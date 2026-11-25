@@ -411,3 +411,52 @@ at connect and an open connection is closed with the reason `key revoked`, the w
 
 **Only the hub writes `key/` facts.** A `send` of a FACT with a topic under `key/` is refused, and the KEY table
 is projected only from FACT messages of the hub, so a replay of the log gives the same table.
+
+## 11. Submissions
+
+A member that holds the lease of an order sends its work as one git bundle. Everything here is off until the
+owner switches the intake on (`intake.enabled`). A hub that has it off answers `503` on the upload and `404` on
+the reads below.
+
+**Upload.** `PUT /api/submit/<task>/<attempt>?sha256=<hex>[&sig=<signature>]` with the bundle as the body.
+
+* The caller signs in with a token (`Authorization: Bearer`) or with a key (`Authorization: SommelierKey`).
+* It must hold the active lease of that task and attempt, else `403` (no lease, another member) or `409` (wrong attempt).
+* A key member must send `sig`: the base64url signature, made with `sign_request`, over
+  `{"op":"submit","task":"<task>","attempt":<attempt>,"sha256":"<hex>"}`. A missing or wrong one is `401`.
+* The body is at most the cap of the tier of the caller (`413` otherwise). The hub reads no more than the cap of
+  the highest tier on this path and applies the own cap of the caller after it knows who it is.
+* `sha256` is the SHA 256 of the body in lower case hex. A body with another hash is `400`, a body that is no git
+  bundle with exactly one ref is `400`.
+* The file is stored as `<store>/<sha256>.bundle` through a temporary file and a rename. The hub writes the FACT
+  `submission/<sha256>` with the state `received` and answers `{"ok":true,"submission","task","attempt","state","bytes","known"}`.
+  The same bundle sent again by the same member for the same order answers with the known state (`"known":true`)
+  and writes nothing. Another member or order with that hash is `409`.
+
+**States.** `received`, then `gated` or `gate_failed`, then `verifying`, then `verified` or `verify_failed` (the
+later states belong to the review). Every change is a FACT `submission/<sha256>` of the hub, so the SUBMISSION
+table tells where each patch stands. `GET /api/state` has `submissions`: `{"counts": {<state>: n}, "newest": [<the 20
+newest rows>]}`. The request `submit.status` lists the caller's own submissions (a tier 0 member may use it).
+
+**Static gates (S1).** A worker thread unpacks the bundle against the reference repository of the hub with the
+base of the lease and runs the gates, never a build. The parsed diff is stored as `<store>/<sha256>.diff.json` and
+the report as `<store>/<sha256>.gate.json`. The hub writes the FACT `gate/<sha256>` (the report, the blocking
+findings first, cut to fit one message), then `submission/<sha256>` with `gated` or `gate_failed`. A failed gate
+returns the order to the queue with the blocking findings as the resume note, the way `task.requeue` does.
+
+**Clean build (S2).** With `verify.enabled` the hub picks `gated` submissions by the tier shares, starts the
+workflow with a `workflow_dispatch` (inputs: the hash, the order, the base and the public address of the hub) and
+reads the conclusion of the run through the GitHub API. Each step is a FACT `verify/<sha256>` with `state`
+(`dispatched`, `running`, `done`), `run_id`, `conclusion` (`passed`, `failed`, `cancelled`, `timed_out`, `no_run`),
+`failing_step` and `minutes`, plus `order`, `dispatches` and `started_ms` so a restart can go on. A dispatch that
+shows no run is retried once. The submission moves to `verifying`, then `verified` or `verify_failed`. A failed
+build returns the order with the failing step as the resume note. `verify.retry` (orchestrator only,
+`{"op":"verify.retry","sha256"}`) puts a `verify_failed` submission back to `gated`.
+
+**Reads for the runner (no credentials, the hash is the key).**
+`GET /api/bundle/<sha256>` serves the bundle of a submission that passed the gates, else `404`.
+`GET /api/order/<task>/done_when` answers `{"task","base","scope":[...],"done_when"}` for an order that has such a
+submission, else `404`. The base is the base of that submission.
+
+**Only the hub writes** `submission/`, `gate/` and `verify/` facts. The tables are projected only from FACT
+messages of the role `hub` whose body names the hash of the topic, so a replay of the log gives the same rows.
