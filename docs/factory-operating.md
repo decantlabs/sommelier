@@ -21,8 +21,13 @@ All of these must be true. Each has a check.
 
 1. **Pull requests limited to collaborators.** Owner's hands: repository settings, pull request access. Check:
    an account with no rights cannot open a pull request.
-2. **A ruleset on the default branch** that requires the check `factory-batch` and lets nobody push past it.
-   Owner's hands. Check: a direct push to main is refused. This is the second lock of `docs/factory.md` 8.5.
+2. **A ruleset on the default branch** that requires the workflow `factory-batch` as a REQUIRED WORKFLOW taken
+   from the protected default branch, and lets nobody push past it. Owner's hands, no script does it. A check
+   that the batch itself can redefine is no lock: a push to `landing/**` runs the workflow file of the pushed
+   commit, so a patch could edit it or add any job named `factory-batch`. The steps are in
+   `templates/workflows/README.md`, "Setting up the second lock". Check: a direct push to main is refused, and a
+   `landing/test` branch whose workflow file always succeeds still cannot be merged. This is the second lock of
+   `docs/factory.md` 8.5.
 3. **Private vulnerability reporting switched on.** Owner's hands. `CONTRIBUTING.md` sends security reports there.
 4. **The scrub.** No old name, no real hostname and no path with a user folder in any file or in the history that
    goes public. Done when a search for those strings is empty. A scrub script does not exist yet, so the check is
@@ -85,10 +90,12 @@ Check each point against the live GitHub documentation first. Mark it when done.
 * [ ] 7. A token with `actions: write` and `contents: read` is the least that may dispatch, and `actions: read` is
   enough for reading runs and jobs. Use a fine grained token.
 * [ ] 8. The limits of `workflow_dispatch` inputs, their number and the size of a value.
-* [ ] 9. `sudo -n unshare --net` and `ip link set lo up` work on the `ubuntu-24.04` hosted image.
+* [ ] 9. `docker run --network none --read-only --cap-drop ALL` works on the `ubuntu-24.04` hosted image with the
+  workspace mounted, and `jq` is installed there.
 * [ ] 10. The current major version and commit SHA of `actions/checkout`, `actions/upload-artifact`,
   `actions/download-artifact` and `actions/attest-build-provenance`, and the permissions the attestation needs.
-* [ ] 11. The ruleset can require the check name `factory-batch`, and the job `name:` is the check name.
+* [ ] 11. The ruleset can require the workflow `factory-batch` from the default branch, and the job `name:` is
+  the check name. The check run has the app `github-actions` and the path of the workflow in its run.
 * [ ] 12. `github.event.repository.default_branch` is set for a push event.
 * [ ] 13. The Free plan limits: 20 concurrent jobs, and the rate limits for dispatch and for reading runs.
 * [ ] 14. An attestation can be verified by the client with `gh attestation verify`, offline or against the API.

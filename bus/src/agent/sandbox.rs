@@ -3,8 +3,9 @@
 //!
 //! `wrap` and `detect` are pure. The real system sits behind `SandboxProbe`, so tests use a fake.
 //!
-//! What a container protects: the worker sees its worktree, its toolchain cache, its vendor tool login and
-//! nothing else of the member's machine. What it does NOT limit: the network. A plain rootless runtime cannot
+//! What a container protects: the worker sees its own plain clone of the project, its toolchain cache, its
+//! vendor tool login and nothing else of the member's machine. The git folder of the member's clone is never
+//! mounted. The vendor and cache folders are read only unless the member writes `:rw`. What it does NOT limit: the network. A plain rootless runtime cannot
 //! restrict egress to a list of hosts, so the worker can reach any address the machine can reach. Read
 //! `swarm/sandbox/README.md` for the full list of limits.
 
@@ -230,6 +231,7 @@ pub struct Mount {
     pub host: PathBuf,
     /// An absolute path inside the container.
     pub container: String,
+    /// True unless the member wrote `:rw` for this folder.
     pub readonly: bool,
 }
 
@@ -256,12 +258,9 @@ pub struct SandboxSpec {
     pub prompt_file: PathBuf,
     /// The folder that holds the hook script. Mounted read only.
     pub hooks_dir: PathBuf,
-    /// The common git folder of the clone that owns the worktree. A worktree has only a pointer to it.
-    /// Mounted at the same path, so the pointer works. `None` when the worktree is self contained.
-    pub git_dir: Option<PathBuf>,
-    /// Toolchain cache folders (cargo registry and so on).
+    /// Toolchain cache folders (cargo registry and so on). Read only unless the member wrote `:rw`.
     pub cache_dirs: Vec<Mount>,
-    /// The folders with the vendor tools' own logins, listed by the member.
+    /// The folders with the vendor tools' own logins, listed by the member. Read only unless `:rw`.
     pub vendor_dirs: Vec<Mount>,
     pub env: ContractEnv,
 }
@@ -319,8 +318,11 @@ fn bind(src: &str, dst: &str, readonly: bool) -> Vec<String> {
 /// Builds the full command line that runs one launcher hook inside the container. `hook_command` is the
 /// command as the container sees it, for example `["sh", "/hooks/hook-claude.sh"]`.
 ///
-/// Mounted: the worktree (read write), the output folder (read write), the prompt file and the hooks folder
-/// (read only), the git folder when given, the cache folders and the vendor login folders. Nothing else.
+/// Mounted: the worktree (read write, it must be a plain clone that only the container uses, see
+/// `launch::prepare_container_clone`), the output folder (read write), the prompt file and the hooks folder
+/// (read only), the cache folders and the vendor login folders (read only unless the member wrote `:rw`).
+/// Nothing else. No git folder of the member's own clone is ever mounted: a writable git folder lets the
+/// worker plant a hook or a `core.fsmonitor` that the member's next git command runs on the host.
 /// The container gets no home folder of the member, no SSH agent socket, no other repository, drops all
 /// capabilities, may not gain new privileges and has a read only root with memory only `/tmp` and home.
 /// The environment is exactly the hook contract. Tokens and the member key are never passed.
@@ -383,11 +385,6 @@ pub fn wrap(hook_command: &[String], spec: &SandboxSpec) -> Result<Vec<String>, 
         HOOKS_DIR,
         true,
     ));
-    if let Some(git) = &spec.git_dir {
-        let s = check_host_path("git folder", git)?;
-        // Same path inside: the worktree's pointer file names the host path.
-        a.extend(bind(&s, &s, false));
-    }
     for m in &spec.cache_dirs {
         check_container_path("cache target", &m.container)?;
         a.extend(bind(
@@ -427,17 +424,20 @@ pub fn wrap(hook_command: &[String], spec: &SandboxSpec) -> Result<Vec<String>, 
     Ok(a)
 }
 
-/// Reads the mounts a member lists in one variable. Entries are `HOST=CONTAINER` or `HOST=CONTAINER:ro`,
-/// separated by `;`.
+/// Reads the mounts a member lists in one variable. Entries are `HOST=CONTAINER`, `HOST=CONTAINER:ro` or
+/// `HOST=CONTAINER:rw`, separated by `;`. A mount is READ ONLY unless the entry ends with `:rw`. A vendor folder
+/// that the worker can write is a way to plant a command that the member's own tool runs on the host, and a
+/// shared cargo registry that it can write lets it change extracted crate sources.
 pub fn parse_mounts(text: &str) -> Result<Vec<Mount>, String> {
     let mut out = Vec::new();
     for entry in text.split(';').map(str::trim).filter(|s| !s.is_empty()) {
         let (host, rest) = entry.split_once('=').ok_or_else(|| {
             format!("sandbox mount `{entry}` must look like HOST=/path/in/container")
         })?;
-        let (target, readonly) = match rest.strip_suffix(":ro") {
-            Some(t) => (t, true),
-            None => (rest, false),
+        let (target, readonly) = match (rest.strip_suffix(":rw"), rest.strip_suffix(":ro")) {
+            (Some(t), _) => (t, false),
+            (None, Some(t)) => (t, true),
+            (None, None) => (rest, true),
         };
         check_container_path("mount target", target)?;
         if host.trim().is_empty() {
@@ -450,6 +450,103 @@ pub fn parse_mounts(text: &str) -> Result<Vec<Mount>, String> {
         });
     }
     Ok(out)
+}
+
+/// Folders below a home folder where the vendor tools and the toolchain keep the member's own login or cache.
+const OWN_LOGIN_FOLDERS: [&str; 13] = [
+    ".claude",
+    ".codex",
+    ".gemini",
+    ".agy",
+    ".config/claude",
+    ".config/gemini",
+    ".config/gh",
+    ".config/github-copilot",
+    ".cursor",
+    ".cargo",
+    ".npm",
+    ".ssh",
+    ".aws",
+];
+
+fn normal(p: &Path) -> String {
+    let mut s = p.to_string_lossy().replace('\\', "/");
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    if cfg!(windows) {
+        s.make_ascii_lowercase();
+    }
+    s
+}
+
+/// Is `inner` the same folder as `outer` or below it. Compared by text, no file system access.
+fn within(inner: &str, outer: &str) -> bool {
+    inner == outer
+        || inner
+            .strip_prefix(outer)
+            .is_some_and(|r| r.starts_with('/') || outer.ends_with('/'))
+}
+
+/// Warnings about the mounts a member listed, for `sommelier doctor`. A vendor folder that is the one the member's
+/// own tool uses gives the worker the member's login (read only) or a place to plant a command (read write).
+/// The home folder itself, or a folder that holds it, is the worst case. A cache folder that is writable and
+/// is the member's own toolchain cache is shared with every other build on the machine.
+pub fn mount_warnings(vendor: &[Mount], cache: &[Mount], home: &Path) -> Vec<String> {
+    let home_s = normal(home);
+    let own: Vec<String> = OWN_LOGIN_FOLDERS
+        .iter()
+        .map(|f| format!("{}/{f}", home_s.trim_end_matches('/')))
+        .collect();
+    let is_own = |host: &str| own.iter().any(|o| within(host, o) || within(o, host));
+    let mut out = Vec::new();
+    for m in vendor {
+        let host = normal(&m.host);
+        let mode = if m.readonly {
+            "read only"
+        } else {
+            "read write"
+        };
+        if within(&home_s, &host) {
+            out.push(format!(
+                "sandbox: the vendor folder {} is or holds your whole home folder ({mode}): make a dedicated login folder that the host never uses",
+                m.host.display()
+            ));
+        } else if is_own(&host) {
+            out.push(format!(
+                "sandbox: the vendor folder {} is the one your own tools use ({mode}): the worker reads your login{}. Use a dedicated login folder that the host never uses",
+                m.host.display(),
+                if m.readonly {
+                    ""
+                } else {
+                    " and can plant a command that your own tool runs"
+                }
+            ));
+        }
+    }
+    for m in cache.iter().filter(|m| !m.readonly) {
+        let host = normal(&m.host);
+        if within(&home_s, &host) || is_own(&host) {
+            out.push(format!(
+                "sandbox: the cache folder {} is writable and is the one your own builds use: use a cache folder that the host never uses",
+                m.host.display()
+            ));
+        }
+    }
+    out
+}
+
+/// A warning when the runtime the member named is not reported as rootless. `None` when it is.
+pub fn runtime_warning(probe: &dyn SandboxProbe, runtime: &str) -> Option<String> {
+    match probe.runtime_rootless(runtime) {
+        Some(true) => None,
+        Some(false) => Some(format!(
+            "sandbox: SOMMELIER_SANDBOX_RUNTIME={runtime} does not report rootless mode: a container that runs as root on the host is no sandbox"
+        )),
+        None => Some(format!(
+            "sandbox: could not ask {runtime} whether it runs rootless (SOMMELIER_SANDBOX_RUNTIME)"
+        )),
+    }
 }
 
 /// The real system. Slow calls have a short deadline.

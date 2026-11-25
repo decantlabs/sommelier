@@ -17,11 +17,22 @@ Any other value is refused when the hook starts, with one line that says what to
 The launcher hook runs inside a rootless container (podman first, docker second).
 
 The worker sees:
-* its worktree and the output folder (read and write)
+* its own PLAIN CLONE of the project and the output folder (read and write). The supervisor makes the clone
+  in a folder next to the output folder of the task (`<out folder>.clone`), with hooks off and no template,
+  without a remote, and mounts it as `/work`. Only the container uses that folder.
 * the prompt file and the hooks folder (read only)
-* the git folder of the clone that owns the worktree (a worktree holds only a pointer to it)
-* the toolchain cache folders and the vendor tool login folders that the member lists
+* the toolchain cache folders and the vendor tool login folders that the member lists, READ ONLY unless the
+  member writes `:rw` after the target
 * a memory only `/tmp` and a memory only home folder
+
+The git folder of the member's own clone is never mounted. A writable git folder would let a hostile brief or
+patch write `hooks/post-checkout` or set `core.fsmonitor`, and the member's next git command outside the
+container would run it. The supervisor takes the result back itself: it reads the commit id the clone stands
+on, fetches exactly that commit out of the clone with hooks off and object checks on, keeps it under
+`refs/sommelier/result/<task>-<attempt>` and moves the task branch to it (`launch::fetch_container_result`).
+The path of the clone comes from the record of the supervisor (the output folder of the task), never from a
+file inside a worktree, and a clone whose `.git` was replaced by a pointer or a link is refused. Work that the
+worker did not commit does not come back, so a hook must commit what it wants to keep.
 
 The worker does not see: the home folder of the member, the SSH agent, SSH keys, browser profiles, other
 repositories, the sommelier member key and the bus tokens. The container runs with all capabilities dropped,
@@ -37,16 +48,24 @@ What it does not protect:
   anything the container can read to the outside. What it can read is the worktree and the mounted vendor login.
 * **The vendor login is mounted and readable.** The vendor tool needs it, so a hostile build can read it and
   send it away. Use an account and a plan you can afford to lose, or an API key with a spending limit.
-* **The worktree is writable.** A hostile change can damage the worktree and the mounted caches. The cache
-  folders are shared between tasks, so use a separate cache folder for this sandbox.
+* **Use a login folder and a cache folder that the host never uses.** A vendor folder that the worker can write
+  lets it add a hook or a command to that tool's settings, and your own tool then runs it on the host. So
+  mounts are read only by default. If the tool must refresh its login, give it a DEDICATED login folder (a
+  folder that only the sandbox uses, with its own login) and write `:rw` for that folder only. Never mount
+  your own `~/.claude`, `~/.codex` or `~/.gemini`, and never mount your own `~/.cargo/registry` writable: a
+  worker could change the extracted crate sources that your own builds use. `sommelier doctor` warns when a
+  mounted vendor folder is one of the folders your own tools use, and when a writable cache folder is.
+* **The clone is writable.** A hostile change can damage the clone and the mounted caches, which is the point
+  of the clone: nothing of the member's own repository is writable. The cache folders are shared between
+  tasks, so use a separate cache folder for this sandbox.
 * The container shares the kernel of the host. A kernel flaw is a way out.
 * With rootless docker or podman the mounted files must be writable by the container user. The image uses
   user id 1000 and podman maps the member's id to it with `--userns=keep-id`. Docker has no such option, so
   the ownership of mounted folders may need `chown` by hand.
 * On a host with SELinux, bind mounts may be unreadable. Label the folders for the container first.
 * A path with a comma or a quote cannot be mounted. `wrap` refuses it and says so.
-* The git folder is mounted at the same path as on the host, because the worktree pointer names that path.
-  It is the clone of the project, not another repository, but it holds every branch of the clone.
+* The clone holds every branch of the member's clone at the time it was made (a full copy of the history, no
+  link back).
 
 ### user
 
@@ -101,11 +120,15 @@ Windows without WSL2 has no rootless container, so use a separate standard accou
 3. Tell the supervisor what to mount, by environment:
    * `SOMMELIER_SANDBOX=container`
    * `SOMMELIER_SANDBOX_IMAGE` (default `sommelier-worker:latest`)
-   * `SOMMELIER_SANDBOX_RUNTIME` (`podman` or `docker`, default the first one found)
+   * `SOMMELIER_SANDBOX_RUNTIME` (`podman` or `docker`, default the first one that reports rootless mode.
+     A runtime that does not report rootless mode is never picked on its own. If you name one, doctor warns
+     when it does not report rootless mode)
    * `SOMMELIER_SANDBOX_VENDOR_DIRS`, the login folder of each vendor tool, as `HOST=/home/worker/.claude`
-     entries separated by `;`
+     entries separated by `;`. Use a login folder that the host never uses. Read only unless you write `:rw`
+     after the target
    * `SOMMELIER_SANDBOX_CACHE_DIRS`, the toolchain caches, as `HOST=/home/worker/.cargo/registry` entries
-     separated by `;` (add `:ro` after the target for a read only mount)
+     separated by `;`. Read only unless you write `:rw` after the target, and then use a cache folder that the
+     host never uses (cargo needs a writable registry to fetch, so give the sandbox its own)
 4. Run `sommelier doctor`. It must print `sandbox: container (...)`.
 
 If `SOMMELIER_SANDBOX=container` is set and no rootless runtime is found, doctor prints `sandbox: none` with a
