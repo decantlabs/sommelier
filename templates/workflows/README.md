@@ -24,8 +24,9 @@ Inputs, all required:
 | `hub` | the base URL of the hub, https only |
 | `attempt` | the attempt number of the submission |
 | `dispatch` | how often the hub dispatched this attempt |
+| `round` | time of the first dispatch of this round in ms, a retry starts a new round |
 
-The run name is `factory-verify <submission> a<attempt> d<dispatch>`, which is how the hub finds its run. The
+The run name is `verify <submission> a<attempt> d<dispatch> t<round>`, which is how the hub finds its run. It must equal `verify::request::run_name` in the hub. The
 concurrency group is `factory-verify-<submission>` and never cancels a running job. The time limit is 30 minutes.
 The steps are named and stable, because the hub reports the name of the failing step: Check inputs, Check out
 base, Fetch bundle, Check bundle hash, Import bundle ref, Fetch dependencies, Read done condition, Write the

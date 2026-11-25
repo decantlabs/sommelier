@@ -19,9 +19,10 @@
 
 name: factory-verify
 
-# The run name carries the submission hash, the attempt and the dispatch count. The hub finds its run by
-# these three words, so a run of an earlier attempt or dispatch is never taken for this one.
-run-name: factory-verify ${{ inputs.submission }} a${{ inputs.attempt }} d${{ inputs.dispatch }}
+# The run name carries the submission hash, the attempt, the dispatch count and the round (the time of the
+# first dispatch, renewed by a retry). It must equal `verify::request::run_name` of the hub word for word, so a
+# run of an earlier attempt, dispatch or round is never taken for this one.
+run-name: verify ${{ inputs.submission }} a${{ inputs.attempt }} d${{ inputs.dispatch }} t${{ inputs.round }}
 
 on:
   workflow_dispatch:
@@ -48,6 +49,10 @@ on:
         type: string
       dispatch:
         description: Count of dispatches of this attempt
+        required: true
+        type: string
+      round:
+        description: Time of the first dispatch of this round in ms, renewed by a retry
         required: true
         type: string
 

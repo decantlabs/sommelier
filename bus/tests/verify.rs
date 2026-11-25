@@ -998,9 +998,15 @@ fn only_release_asks_for_write_permissions() {
 fn factory_verify_has_the_inputs_the_run_name_and_the_guards() {
     let t = template("factory-verify.yml");
     assert!(t.contains("permissions: {}"));
-    assert!(t.contains(
-        "run-name: factory-verify ${{ inputs.submission }} a${{ inputs.attempt }} d${{ inputs.dispatch }}"
-    ));
+    // The run name must equal `run_name` of the hub word for word.
+    let expected = format!(
+        "run-name: {}",
+        run_name("${{ inputs.submission }}", 0, 0, 0)
+            .replace(" a0 ", " a${{ inputs.attempt }} ")
+            .replace(" d0 ", " d${{ inputs.dispatch }} ")
+            .replace(" t0", " t${{ inputs.round }}")
+    );
+    assert!(t.contains(&expected), "{expected}");
     assert!(t.contains("workflow_dispatch:"));
     for input in [
         "submission:",
@@ -1008,6 +1014,7 @@ fn factory_verify_has_the_inputs_the_run_name_and_the_guards() {
         "base:",
         "hub:",
         "attempt:",
+        "round:",
         "dispatch:",
     ] {
         assert!(t.contains(&format!("      {input}\n")), "input {input}");
