@@ -104,6 +104,93 @@ pub fn query_by_states(conn: &Connection, states: &[&str]) -> Vec<SubRow> {
         .unwrap_or_default()
 }
 
+/// States of a submission that ended without success: its order went back to the queue or it was refused.
+pub const ENDED_BAD: [&str; 4] = ["gate_failed", "verify_failed", "review_failed", "rejected"];
+
+/// States whose files may be deleted after the keep days: the submission is over, good or bad.
+pub const ENDED: [&str; 5] = [
+    "gate_failed",
+    "verify_failed",
+    "review_failed",
+    "rejected",
+    "landed",
+];
+
+/// The submission of `(task, attempt)` that has not failed: still under way, approved or landed. The
+/// oldest one wins when the log holds several. At most one of these may exist.
+pub fn query_live_for(conn: &Connection, task: &str, attempt: u32) -> Option<SubRow> {
+    let bad = ENDED_BAD
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    conn.query_row(
+        &format!(
+            "SELECT {COLS} FROM SUBMISSION WHERE task = ?1 AND attempt = ?2 AND state NOT IN ({bad})
+             ORDER BY received_at, sha256 LIMIT 1"
+        ),
+        params![task, i64::from(attempt)],
+        from_row,
+    )
+    .optional()
+    .unwrap_or(None)
+}
+
+/// How many submissions `member` made since `since_sec`, whatever became of them.
+pub fn count_since(conn: &Connection, member: &str, since_sec: u64) -> u64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM SUBMISSION WHERE member = ?1 AND received_at >= ?2",
+        params![member, i64::try_from(since_sec).unwrap_or(i64::MAX)],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n.max(0) as u64)
+    .unwrap_or(0)
+}
+
+/// The newest submission of an order that passed the static gates, one row.
+pub fn query_newest_passed_for_task(
+    conn: &Connection,
+    task: &str,
+    states: &[&str],
+) -> Option<SubRow> {
+    let list = states
+        .iter()
+        .map(|s| format!("'{}'", s.replace('\'', "")))
+        .collect::<Vec<_>>()
+        .join(",");
+    conn.query_row(
+        &format!(
+            "SELECT {COLS} FROM SUBMISSION WHERE task = ?1 AND state IN ({list})
+             ORDER BY updated_at DESC, sha256 DESC LIMIT 1"
+        ),
+        params![task],
+        from_row,
+    )
+    .optional()
+    .unwrap_or(None)
+}
+
+/// Submissions that ended before `before_sec`, oldest first, at most `limit`.
+pub fn query_ended_before(conn: &Connection, before_sec: u64, limit: usize) -> Vec<SubRow> {
+    let list = ENDED
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT {COLS} FROM SUBMISSION WHERE state IN ({list}) AND updated_at < ?1
+         ORDER BY updated_at, sha256 LIMIT {limit}"
+    )) else {
+        return Vec::new();
+    };
+    stmt.query_map(
+        params![i64::try_from(before_sec).unwrap_or(i64::MAX)],
+        from_row,
+    )
+    .map(|rows| rows.filter_map(Result::ok).collect())
+    .unwrap_or_default()
+}
+
 /// The newest submissions, optionally of one member.
 pub fn query_newest(conn: &Connection, member: Option<&str>, limit: usize) -> Vec<SubRow> {
     let Ok(mut stmt) = conn.prepare(&format!(

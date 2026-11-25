@@ -522,7 +522,8 @@ The requests and the tick read the bundles and diffs from the store of the intak
 **`/api/state`.** `reviews` lists the open reviews, `review_counts` the number of reviews by state.
 
 **Briefs.** `GET /api/brief/<id>` answers a token member and also a key member (`Authorization: SommelierKey ...`), so a
-tier 0 member can read the order it holds. `PUT` stays with the orchestrator.
+tier 0 member can read the order it holds. A key member reads a brief only by the id of an order on which it holds
+the active lease, never by hash, and only while it has a tier (`403` otherwise). `PUT` stays with the orchestrator.
 
 **`review.resolve`** `{"task","n","decision","reason"}` (a maintainer: an orchestrator, a member that the hub config lists, or
 a key member at tier 3). It settles a review that waits for ever, an escalated review or an audit that disagrees.
@@ -541,7 +542,9 @@ enqueued again on the tick, through the first lock.
 
 A member that holds the lease of an order sends its work as one git bundle. Everything here is off until the
 owner switches the intake on (`intake.enabled`). A hub that has it off answers `503` on the upload and `404` on
-the reads below.
+the reads below. The policy switch `switch.intake = "off"` acts at once: the hub reads the live policy on every
+upload, every read of the brief and every tick, so one publish stops new uploads and the gate, verify and review
+ticks without a restart. Without a `[switch]` table in the policy nothing vetoes.
 
 **Upload.** `PUT /api/submit/<task>/<attempt>?sha256=<hex>[&sig=<signature>]` with the bundle as the body.
 
@@ -549,8 +552,17 @@ the reads below.
 * It must hold the active lease of that task and attempt, else `403` (no lease, another member) or `409` (wrong attempt).
 * A key member must send `sig`: the base64url signature, made with `sign_request`, over
   `{"op":"submit","task":"<task>","attempt":<attempt>,"sha256":"<hex>"}`. A missing or wrong one is `401`.
-* The body is at most the cap of the tier of the caller (`413` otherwise). The hub reads no more than the cap of
-  the highest tier on this path and applies the own cap of the caller after it knows who it is.
+* The body is at most the cap of the tier of the caller (`413` otherwise). The hub decides this from the request
+  head, before it reads any body: the caller, the key row, the tier, the lease, the daily cap and the store size are
+  checked first (`intake::upload_allowance`), and only then up to the own cap of the caller is read.
+* A key credential is never read as a token: a key member whose key row is not active is `401`, whatever the reason.
+* One live submission per order and attempt. While a submission of that order and attempt has not failed (it is
+  `received`, under way, `approved` or `landed`), another hash is `409`. The same hash is still answered as known.
+  After a failure the order comes back with the next attempt and the member may send again.
+* At most `submissions_per_day` of the policy tier table per member in 24 hours, every submission counted whatever
+  became of it (`429`). The store folder is capped (`max_store_mib` of the factory file, default 2048): a full
+  store answers `507`. The files of landed, rejected and failed submissions are deleted after `keep_days` (factory
+  file, default 14, 0 keeps them) by a sweep on the tick. The rows and the FACTs stay.
 * `sha256` is the SHA 256 of the body in lower case hex. A body with another hash is `400`, a body that is no git
   bundle with exactly one ref is `400`.
 * The file is stored as `<store>/<sha256>.bundle` through a temporary file and a rename. The hub writes the FACT
@@ -567,11 +579,17 @@ newest rows>]}`. The request `submit.status` lists the caller's own submissions 
 base of the lease and runs the gates, never a build. The parsed diff is stored as `<store>/<sha256>.diff.json` and
 the report as `<store>/<sha256>.gate.json`. The hub writes the FACT `gate/<sha256>` (the report, the blocking
 findings first, cut to fit one message), then `submission/<sha256>` with `gated` or `gate_failed`. A failed gate
-returns the order to the queue with the blocking findings as the resume note, the way `task.requeue` does.
+returns the order to the queue the way `task.requeue` does. The resume note is a fixed instruction, then the marker
+`DATA`, then the blocking findings with path and text quoted as plain ASCII data. Nothing from the bundle stands
+before the marker.
 
 **Clean build (S2).** With `verify.enabled` the hub picks `gated` submissions by the tier shares, starts the
-workflow with a `workflow_dispatch` (inputs: the hash, the order, the base and the public address of the hub) and
-reads the conclusion of the run through the GitHub API. Each step is a FACT `verify/<sha256>` with `state`
+workflow with a `workflow_dispatch` (inputs: the hash, the order, the base, the public address of the hub, the
+`attempt` of the order, the `dispatch` count (1, or 2 for the retry of a lost dispatch) and the `round`, the start
+of the verification in milliseconds, which a `verify.retry` renews) and reads the conclusion of the run through the
+GitHub API. The hub finds its run by the whole run name `verify <hash> a<attempt> d<dispatch> t<round>`, read from
+`display_title` first, the newest run with exactly that name. So a retry never finds the failed run of an earlier
+round. Each step is a FACT `verify/<sha256>` with `state`
 (`dispatched`, `running`, `done`), `run_id`, `conclusion` (`passed`, `failed`, `cancelled`, `timed_out`, `no_run`),
 `failing_step` and `minutes`, plus `order`, `dispatches` and `started_ms` so a restart can go on. A dispatch that
 shows no run is retried once. The submission moves to `verifying`, then `verified` or `verify_failed`. A failed
@@ -583,8 +601,8 @@ only, `{"op":"verify.override","submission","conclusion","reason"}`, `conclusion
 CLI: `sommelier verify override SUBMISSION --conclusion passed|failed --reason TEXT`, `verify retry SUBMISSION`.
 
 **Reads for the runner (no credentials, the hash is the key).**
-`GET /api/bundle/<sha256>` serves the bundle of a submission that passed the gates, else `404`.
-`GET /api/order/<task>/done_when` answers `{"task","base","scope":[...],"done_when"}` for an order that has such a
+`GET /api/bundle/<sha256>` serves the bundle of a submission that passed the gates, else `404`. A `HEAD` reads no
+file and answers the size in `X-Bundle-Bytes`. `GET /api/order/<task>/done_when` answers `{"task","base","scope":[...],"done_when"}` for an order that has such a
 submission, else `404`. The base is the base of that submission.
 
 **Only the hub writes** `submission/`, `gate/` and `verify/` facts. The tables are projected only from FACT

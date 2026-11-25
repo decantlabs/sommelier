@@ -439,7 +439,9 @@ fn entry_of(hub: &Hub, row: &SubRow) -> Entry {
 /// Called on every hub tick. Returns messages for the hub to append.
 pub fn on_tick(hub: &Hub, now: u64) -> Vec<Message> {
     let cfg = &hub.config().verify;
-    if !cfg.enabled || cfg.repository.is_empty() {
+    if !crate::factory::part_on(hub.config(), crate::factory::Part::Verify)
+        || cfg.repository.is_empty()
+    {
         return Vec::new();
     }
     let Some(snap) = hub.with_store(|s| {
@@ -561,6 +563,7 @@ pub fn on_op(
     op: &str,
     body: &Value,
 ) -> Result<Map<String, Value>, String> {
+    crate::factory::guard_op(ctx.config(), crate::factory::Part::Verify)?;
     match op {
         "verify.retry" => retry(ctx, body),
         "verify.override" => override_run(ctx, body),

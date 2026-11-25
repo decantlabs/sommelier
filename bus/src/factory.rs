@@ -44,6 +44,10 @@ pub struct IntakeFile {
     pub reference_repo: Option<PathBuf>,
     /// Where bundles and diffs are stored. Default `<data>/bundles`.
     pub bundle_store: Option<PathBuf>,
+    /// Days that the files of a landed, rejected or failed submission stay. Default 14, 0 keeps them.
+    pub keep_days: Option<u64>,
+    /// The most MiB the bundle store may hold before uploads are refused. Default 2048.
+    pub max_store_mib: Option<u64>,
 }
 
 /// `[verify]`: the clean build on GitHub.
@@ -254,6 +258,16 @@ pub fn apply(
         .iter()
         .map(|t| t.max_bundle_kib.saturating_mul(1024))
         .collect();
+    cfg.intake.tier_submissions_per_day = [&rules.tier0, &rules.tier1, &rules.tier2, &rules.tier2]
+        .iter()
+        .map(|t| t.submissions_per_day)
+        .collect();
+    if let Some(d) = file.intake.keep_days {
+        cfg.intake.keep_days = d;
+    }
+    if let Some(m) = file.intake.max_store_mib {
+        cfg.intake.max_store_bytes = m.saturating_mul(1024 * 1024);
+    }
     out.intake = intake_on;
 
     // verify
@@ -527,6 +541,7 @@ mod tests {
         assert_eq!(cfg.stamp.rules.tier1_landed, 5);
         assert_eq!(cfg.stamp.quorum, 3);
         assert_eq!(cfg.intake.tier_bundle_bytes[0], 256 * 1024);
+        assert_eq!(cfg.intake.tier_submissions_per_day, vec![4, 20, 50, 50]);
     }
 
     #[test]

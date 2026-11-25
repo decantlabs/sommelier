@@ -2,13 +2,17 @@
 //! `GET /api/order/<task>/done_when`. See PROTOCOL.md, section Submissions.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use serde_json::json;
 
-use super::facts::{SubRow, is_sha256, query_by_states, query_submission, submission_fact};
+use super::facts::{
+    SubRow, count_since, is_sha256, query_live_for, query_newest_passed_for_task, query_submission,
+    submission_fact,
+};
 use crate::brief::{HttpOutcome, sha256_hex, validate_brief_id};
+use crate::factory::Part;
 use crate::gate::Risk;
 use crate::gate::glob::any_match;
 use crate::hub::Hub;
@@ -18,7 +22,7 @@ use crate::msg::Role;
 use crate::proto::percent_decode;
 use crate::stamp::tier_table::tier_from_table;
 use crate::task::state::split_csv;
-use crate::task::{LeaseRow, TaskRow, query_active_lease_for_task, query_task};
+use crate::task::{TaskRow, query_active_lease_for_task, query_task};
 use crate::time::now_ms;
 use crate::tokens::Member;
 
@@ -51,7 +55,7 @@ pub fn on_http(
         return Some(submit(hub, method, rest, query, body, caller));
     }
     if let Some(rest) = path.strip_prefix("/api/bundle/") {
-        return Some(read_only(method, || bundle(hub, rest)));
+        return Some(read_only(method, || bundle(hub, method, rest)));
     }
     if let Some(rest) = path.strip_prefix("/api/order/") {
         return Some(read_only(method, || order(hub, rest)));
@@ -90,40 +94,172 @@ fn task_and_attempt(rest: &str) -> Result<(String, u32), String> {
     Ok((task, attempt))
 }
 
-/// What the upload needs from the tables.
-struct Facts {
+/// A refusal: the HTTP status and the text.
+type Refusal = (u16, String);
+
+/// Who the caller is for one order, read from the tables.
+struct Who {
     task: Option<TaskRow>,
-    lease: Option<LeaseRow>,
     tier: i64,
     /// The public key of a key member, `None` for a token member.
     key: Option<String>,
-    known: Option<SubRow>,
 }
 
-fn load(hub: &Hub, caller: &Member, task: &str, sha: &str) -> Option<Facts> {
-    hub.with_store(|store| {
+/// A key member carries no token: `check_key` gives it an empty hash and no plain token.
+fn is_key_member(m: &Member) -> bool {
+    m.hash.is_empty() && m.token.is_none()
+}
+
+/// Checks the head of an upload: the caller, the key row, the tier and the lease on `(task, attempt)`.
+/// It reads no body and writes nothing.
+fn who(
+    hub: &Hub,
+    caller: Option<&Member>,
+    task: &str,
+    attempt: u32,
+) -> Result<(Who, Member), Refusal> {
+    let Some(caller) = caller else {
+        return Err((
+            401,
+            "missing credentials: send a token or sign in with your key".into(),
+        ));
+    };
+    if caller.role == Role::Observer {
+        return Err((
+            403,
+            "observers are read only, this token cannot submit".into(),
+        ));
+    }
+    let key_member = is_key_member(caller);
+    let read = hub.with_store(|store| {
         let conn = store.connection();
-        let key = if caller.hash.is_empty() && caller.token.is_none() {
+        // A key credential never falls back to the rules of a token: its row must be active.
+        let key = if key_member {
             match current_row(conn, &caller.name) {
-                Ok(Some((public, _, _, KeyState::Active))) => Some(public),
-                _ => None,
+                Ok(Some((public, _, _, KeyState::Active))) => Ok(Some(public)),
+                Ok(_) => Err((401, "your key is not active on this hub".to_owned())),
+                Err(_) => Err((
+                    500,
+                    "the hub could not read its key table, try again".to_owned(),
+                )),
             }
         } else {
-            None
+            Ok(None)
         };
-        let role = if key.is_some() {
-            None
-        } else {
-            Some(caller.role)
-        };
-        Facts {
-            task: query_task(conn, task).ok().flatten(),
-            lease: query_active_lease_for_task(conn, task).ok().flatten(),
-            tier: tier_from_table(conn, &caller.name, role),
+        let role = if key_member { None } else { Some(caller.role) };
+        (
             key,
-            known: query_submission(conn, sha),
+            query_task(conn, task).ok().flatten(),
+            query_active_lease_for_task(conn, task).ok().flatten(),
+            tier_from_table(conn, &caller.name, role),
+        )
+    });
+    let Some((key, task_row, lease, tier)) = read else {
+        return Err((500, "the hub could not read its tables, try again".into()));
+    };
+    let key = key?;
+    if tier < 0 {
+        return Err((403, "this member has no tier and may not submit".into()));
+    }
+    let lease = match lease {
+        Some(l) if l.owner == caller.name => l,
+        Some(_) => {
+            return Err((403, format!("order `{task}` is leased to another member")));
         }
-    })
+        None => {
+            return Err((403, format!("you hold no active lease of order `{task}`")));
+        }
+    };
+    if lease.attempt != attempt {
+        return Err((
+            409,
+            format!(
+                "the active lease of `{task}` is attempt {}, the request names attempt {attempt}",
+                lease.attempt
+            ),
+        ));
+    }
+    Ok((
+        Who {
+            task: task_row,
+            tier,
+            key,
+        },
+        caller.clone(),
+    ))
+}
+
+/// The bytes that the files of the store hold now.
+fn store_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .fold(0u64, u64::saturating_add)
+}
+
+/// The limits of a member and of the store, checked before a body is read and again before it is stored.
+fn admission(hub: &Hub, member: &str, tier: i64) -> Result<(), Refusal> {
+    let cfg = &hub.config().intake;
+    let day_ago = (now_ms() / 1000).saturating_sub(86_400);
+    let made = hub
+        .with_store(|s| count_since(s.connection(), member, day_ago))
+        .unwrap_or(0);
+    let cap = cfg.daily_cap_for_tier(tier);
+    if made >= cap {
+        return Err((
+            429,
+            format!(
+                "you made {made} submissions in the last 24 hours, the limit for tier {tier} is {cap}: try again later"
+            ),
+        ));
+    }
+    let dir = cfg.store_path(&hub.config().data_dir);
+    if store_bytes(&dir) >= cfg.max_store_bytes {
+        return Err((
+            507,
+            "the hub store is full: old files are deleted after a few days, try again later".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// What an upload may weigh, decided from the request head alone, before the hub reads any body.
+///
+/// It checks that intake is on (the settings and the live policy), the caller, the key row of a key
+/// member, the tier, the lease on the order and attempt of `path` (`/api/submit/<task>/<attempt>`), the
+/// daily cap of the member and the size of the store. The answer is the largest body the caller may
+/// send, the cap of the caller's own tier. The rule of one live submission per order and attempt needs
+/// the hash and is applied by [`on_http`] after the body, because a repeat of the same bundle must still
+/// be answered as known. The signature of a key member is checked there too.
+pub fn upload_allowance(hub: &Hub, caller: Option<&Member>, path: &str) -> Result<u64, String> {
+    upload_allowance_status(hub, caller, path).map_err(|(_, text)| text)
+}
+
+/// [`upload_allowance`] with the HTTP status of the refusal.
+pub fn upload_allowance_status(
+    hub: &Hub,
+    caller: Option<&Member>,
+    path: &str,
+) -> Result<u64, (u16, String)> {
+    let cfg = &hub.config().intake;
+    if !crate::factory::part_on(hub.config(), Part::Intake) {
+        return Err((
+            503,
+            "this hub does not take submissions: intake is switched off".into(),
+        ));
+    }
+    let rest = path
+        .strip_prefix("/api/submit/")
+        .ok_or((400, "the path is /api/submit/<task>/<attempt>".to_owned()))?;
+    let (task, attempt) = task_and_attempt(rest).map_err(|e| (400, e))?;
+    let (w, member) = who(hub, caller, &task, attempt)?;
+    admission(hub, &member.name, w.tier)?;
+    Ok(cfg.cap_for_tier(w.tier))
 }
 
 /// True when the scope of an order meets a hold path: one pattern covers the other.
@@ -168,7 +304,7 @@ fn submit(
         out.headers.push(("Allow", "PUT".into()));
         return out;
     }
-    if !cfg.enabled {
+    if !crate::factory::part_on(hub.config(), Part::Intake) {
         return err(
             503,
             "this hub does not take submissions: intake is switched off",
@@ -184,36 +320,11 @@ fn submit(
             "send `?sha256=<64 lower case hex characters>` with the SHA 256 of the bundle",
         );
     };
-    let Some(caller) = caller else {
-        return err(
-            401,
-            "missing credentials: send a token or sign in with your key",
-        );
+    let (w, member) = match who(hub, caller, &task, attempt) {
+        Ok(v) => v,
+        Err((code, e)) => return err(code, e),
     };
-    if caller.role == Role::Observer {
-        return err(403, "observers are read only, this token cannot submit");
-    }
-    let Some(f) = load(hub, caller, &task, &sha) else {
-        return err(500, "the hub could not read its tables, try again");
-    };
-    if f.tier < 0 {
-        return err(403, "this member has no tier and may not submit");
-    }
-    let lease = match f.lease {
-        Some(l) if l.owner == caller.name => l,
-        Some(_) => return err(403, format!("order `{task}` is leased to another member")),
-        None => return err(403, format!("you hold no active lease of order `{task}`")),
-    };
-    if lease.attempt != attempt {
-        return err(
-            409,
-            format!(
-                "the active lease of `{task}` is attempt {}, the request names attempt {attempt}",
-                lease.attempt
-            ),
-        );
-    }
-    if let Some(public) = &f.key {
+    if let Some(public) = &w.key {
         let Some(sig) = query_param(query, "sig") else {
             return err(
                 401,
@@ -229,14 +340,14 @@ fn submit(
             return err(401, format!("bad signature on the submission: {e}"));
         }
     }
-    let cap = cfg.cap_for_tier(f.tier);
+    let cap = cfg.cap_for_tier(w.tier);
     if body.len() as u64 > cap {
         return err(
             413,
             format!(
                 "the bundle has {} bytes, the limit for tier {} is {cap}: send a smaller change",
                 body.len(),
-                f.tier
+                w.tier
             ),
         );
     }
@@ -246,23 +357,43 @@ fn submit(
             "the SHA 256 of the body differs from `sha256`: send the file again",
         );
     }
-    let Some(task_row) = f.task else {
+    let Some(task_row) = w.task.clone() else {
         return err(404, format!("order `{task}` is not known"));
     };
     let _one_at_a_time = cfg.runtime.upload.lock().unwrap_or_else(|e| e.into_inner());
-    // A second look under the lock: another upload of the same hash may have just finished.
-    let known = hub
-        .with_store(|s| query_submission(s.connection(), &sha))
-        .flatten()
-        .or(f.known);
+    // The tables again under the lock: another upload may have just finished.
+    let seen = hub.with_store(|s| {
+        let conn = s.connection();
+        (
+            query_submission(conn, &sha),
+            query_live_for(conn, &task, attempt),
+        )
+    });
+    let Some((known, live)) = seen else {
+        return err(500, "the hub could not read its tables, try again");
+    };
     if let Some(row) = known {
-        if row.member == caller.name && row.task == task && row.attempt == attempt {
+        if row.member == member.name && row.task == task && row.attempt == attempt {
             return known_reply(&row, true);
         }
         return err(
             409,
             "this bundle was already submitted for another order or by another member",
         );
+    }
+    // One live submission per order and attempt. A member who cannot get a bundle through has to wait
+    // for the first one to fail, so one lease never grinds the review pick with many bundles.
+    if let Some(live) = live {
+        return err(
+            409,
+            format!(
+                "order `{task}` attempt {attempt} already has the submission {} in the state `{}`: send a new bundle only after it failed and the order came back",
+                live.sha256, live.state
+            ),
+        );
+    }
+    if let Err((code, e)) = admission(hub, &member.name, w.tier) {
+        return err(code, e);
     }
     let dir = cfg.store_path(&hub.config().data_dir);
     let head = match store_bundle(&dir, &sha, body) {
@@ -273,17 +404,18 @@ fn submit(
         sha256: sha.clone(),
         task: task.clone(),
         attempt,
-        member: caller.name.clone(),
+        member: member.name.clone(),
         base: task_row.base_sha.clone(),
         head,
         bytes: body.len() as u64,
         state: "received".into(),
         risk: risk_word(order_risk(&task_row.scope, &cfg.gate_rules.hold_paths)).into(),
-        tier: f.tier,
+        tier: w.tier,
         received_at: now_ms() / 1000,
         updated_at: now_ms() / 1000,
     };
     if let Err(e) = hub.append_hook_message(submission_fact(&row, "received", now_ms() / 1000)) {
+        let _ = fs::remove_file(dir.join(format!("{sha}.bundle")));
         return err(500, format!("the hub could not record the submission: {e}"));
     }
     known_reply(&row, false)
@@ -330,7 +462,7 @@ fn store_bundle(dir: &Path, sha: &str, body: &[u8]) -> Result<String, (u16, Stri
     Ok(head)
 }
 
-fn bundle(hub: &Hub, rest: &str) -> HttpOutcome {
+fn bundle(hub: &Hub, method: &str, rest: &str) -> HttpOutcome {
     let cfg = &hub.config().intake;
     if !cfg.enabled || !is_sha256(rest) {
         return err(404, "no such bundle");
@@ -345,18 +477,39 @@ fn bundle(hub: &Hub, rest: &str) -> HttpOutcome {
     let file = cfg
         .store_path(&hub.config().data_dir)
         .join(format!("{rest}.bundle"));
-    match fs::read(&file) {
-        Ok(bytes) => {
-            let mut out = HttpOutcome {
-                status: 200,
-                content_type: "application/octet-stream",
-                body: bytes,
-                headers: vec![("Cache-Control", "no-store".into())],
-            };
-            out.headers.push(("X-Bundle-Sha256", rest.to_owned()));
+    let mut out = HttpOutcome {
+        status: 200,
+        content_type: "application/octet-stream",
+        body: Vec::new(),
+        headers: vec![
+            ("Cache-Control", "no-store".into()),
+            ("X-Bundle-Sha256", rest.to_owned()),
+        ],
+    };
+    if method == "HEAD" {
+        // A HEAD never reads the file: the size comes from the folder entry.
+        return match fs::metadata(&file) {
+            Ok(m) if m.is_file() => {
+                out.headers.push(("X-Bundle-Bytes", m.len().to_string()));
+                out
+            }
+            _ => err(404, "no such bundle"),
+        };
+    }
+    // The read is bounded by the largest bundle any tier may send, so a file that grew behind our back
+    // cannot fill the memory.
+    let limit = cfg.max_body_bytes().saturating_add(1);
+    let read = fs::File::open(&file).and_then(|f| {
+        let mut buf = Vec::new();
+        f.take(limit).read_to_end(&mut buf)?;
+        Ok(buf)
+    });
+    match read {
+        Ok(bytes) if (bytes.len() as u64) < limit => {
+            out.body = bytes;
             out
         }
-        Err(_) => err(404, "no such bundle"),
+        _ => err(404, "no such bundle"),
     }
 }
 
@@ -368,12 +521,11 @@ fn order(hub: &Hub, rest: &str) -> HttpOutcome {
     if !cfg.enabled || validate_brief_id(task).is_err() {
         return err(404, "no such order");
     }
+    // One row by the task, not a scan of every submission under the store lock.
     let found = hub
         .with_store(|s| {
             let conn = s.connection();
-            let sub = query_by_states(conn, &PASSED_GATES)
-                .into_iter()
-                .rfind(|r| r.task == task)?;
+            let sub = query_newest_passed_for_task(conn, task, &PASSED_GATES)?;
             Some((sub, query_task(conn, task).ok().flatten()?))
         })
         .flatten();

@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use crate::bundle::{BundleError, Limits};
@@ -41,7 +42,15 @@ pub(crate) struct Runtime {
     pub in_flight: Mutex<HashSet<String>>,
     /// Gate runs that ended and wait for the next tick to become FACTs.
     pub done: Mutex<Vec<GateDone>>,
+    /// When the store was swept last, in milliseconds.
+    pub last_sweep: AtomicU64,
 }
+
+/// The default size cap of the store folder, 2 GiB.
+pub const DEFAULT_MAX_STORE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// The default number of days that the files of an ended submission stay.
+pub const DEFAULT_KEEP_DAYS: u64 = 14;
 
 /// Settings of the intake of submissions. Lives in `HubConfig.intake`.
 #[derive(Clone, Debug)]
@@ -59,6 +68,14 @@ pub struct IntakeConfig {
     pub gate_rules: GateRules,
     /// The largest bundle in bytes by tier, index 0 to 3. A higher tier uses the last entry.
     pub tier_bundle_bytes: Vec<u64>,
+    /// The most submissions a member may make in 24 hours by tier, index 0 to 3. A higher tier uses the
+    /// last entry. A submission counts whatever became of it.
+    pub tier_submissions_per_day: Vec<u64>,
+    /// The most bytes the store folder may hold. A new upload that would pass it is refused until the
+    /// sweep has deleted old files.
+    pub max_store_bytes: u64,
+    /// Days after which the files of an ended submission (landed, rejected or failed) are deleted.
+    pub keep_days: u64,
     /// A test passes its own inspection here. None: `bundle::inspect`.
     pub inspector: Option<InspectFn>,
     pub(crate) runtime: Arc<Runtime>,
@@ -73,6 +90,9 @@ impl Default for IntakeConfig {
             store_dir: None,
             limits: Limits::default(),
             tier_bundle_bytes: rules.caps.iter().map(|c| c.bundle_bytes).collect(),
+            tier_submissions_per_day: vec![4, 20, 50, 50],
+            max_store_bytes: DEFAULT_MAX_STORE_BYTES,
+            keep_days: DEFAULT_KEEP_DAYS,
             gate_rules: rules,
             inspector: None,
             runtime: Arc::default(),
@@ -91,6 +111,13 @@ impl IntakeConfig {
     /// The largest bundle a member of `tier` may send.
     pub fn cap_for_tier(&self, tier: i64) -> u64 {
         let list = &self.tier_bundle_bytes;
+        let i = usize::try_from(tier.max(0)).unwrap_or(0);
+        list.get(i).or_else(|| list.last()).copied().unwrap_or(0)
+    }
+
+    /// The most submissions a member of `tier` may make in 24 hours.
+    pub fn daily_cap_for_tier(&self, tier: i64) -> u64 {
+        let list = &self.tier_submissions_per_day;
         let i = usize::try_from(tier.max(0)).unwrap_or(0);
         list.get(i).or_else(|| list.last()).copied().unwrap_or(0)
     }
