@@ -924,3 +924,12 @@ async fn rotate_and_revoke_are_made_for_one_hub() {
         .unwrap();
     kc::revoke(&hub.url, dir.path(), "done").await.unwrap();
 }
+
+#[test]
+fn the_join_output_can_say_how_private_the_key_file_is() {
+    // Unix keeps the file at mode 0600 and needs no note, Windows gets the sentence.
+    assert_eq!(kc::privacy_note().is_some(), cfg!(windows));
+    if let Some(n) = kc::privacy_note() {
+        assert!(n.contains("as private as the folder"), "{n}");
+    }
+}

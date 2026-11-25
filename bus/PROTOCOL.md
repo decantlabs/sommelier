@@ -370,7 +370,10 @@ in every object and without the field `sig`. Keys and signatures travel as base6
 nothing for a nonce it hands out, only the nonces that were USED until they expire, and only after a valid
 signature, so a flood of challenges fills nothing. `hub_id` is a random id that the hub keeps in its data folder.
 A client pins the `hub_id` per hub address in `member.hubs` beside its key file at the first join or sign in and
-refuses an answer with another id. To accept a moved hub on purpose, delete the line of that address in the file.
+refuses an answer with another id. It also refuses an id that is already pinned under another address, because
+that is how a relay looks: a hostile hub at a new address that passes on the id of the real hub. To accept a moved
+hub, or a second address of the same hub, on purpose, edit the line of that address in the file. A pin file that
+cannot be read stops the sign in and is never rewritten.
 
 **Joining off means off.** While joining is off (the default) the hub serves no challenge (`GET /api/challenge`
 answers 403), refuses `POST /api/join` with 403 and accepts no key sign in, also not for keys that joined earlier.
@@ -395,12 +398,23 @@ and answers `{"member", "joined": true, "id"}`. A key that is known (also a rota
 
 **Signing in.** On the WebSocket upgrade, and on `GET /api/state`, instead of a bearer token:
 
-    Authorization: SommelierKey <member>.<nonce>.<signature>
+    Authorization: SommelierKey <member>.<nonce>.<address>.<signature>
 
-The signature (base64url) covers three lines: `sommelier-auth-v1`, the hub id and the nonce. The nonce comes
-from `/api/challenge` and is used once, so a replayed header is refused with 401. The key must be `active`
-and the signature must match its current public key. Observer style tokens in the URL are not available for
-keys. `whoami` of a key member also answers `"tier": 0`.
+`address` is the base64url of the address the client connected to, `host:port` in lower case. The port is the
+one of the URL, else 443 for `wss` and `https`, else 80. The signature (base64url) covers four lines:
+`sommelier-auth-v2`, the hub id, that address and the nonce. This is the only form a hub accepts (no key member
+existed before it, so the older form `sommelier-auth-v1` has no reader). The hub takes the address only when it
+is one of its own: a loopback address (`127.0.0.0/8`, `::1`, `localhost`) always, any other address only when
+the owner lists it in `door.public_addresses`, as `host:port` or as a bare `host` that stands for the ports 443
+and 80. Otherwise the answer is 401 and says that the address is not a public address of the hub. A hub with an
+empty list takes key sign ins at loopback addresses only and says so. So a hostile hub that a member reaches at
+an address of its own cannot use the signature at the real hub, even when it passes on the real nonce and hub
+id. The nonce comes from `/api/challenge` and is used once, so a replayed header is refused with 401. A nonce is
+also bound to the start of the hub that made it: after a restart the nonces of the earlier start are refused,
+the set of used nonces is in memory only. The key must be `active` and the signature must match its current
+public key. A member with no tier at all (a revoked key, or a finding of bad intent) is refused like a revoked
+key, and an open connection of such a member is closed with the reason `no tier`. Observer style tokens in the
+URL are not available for keys. `whoami` of a key member also answers `"tier": 0`.
 
 **Tier 0 may send only** `whoami`, `heartbeat`, `log`, `roster`, `who`, `claims` and the two key requests below
 (and the typed requests that later phases add to `key::TIER0_ALLOWED`). A key member sends no message kind, in
@@ -409,16 +423,20 @@ and no slot or lease. Slot counts of every HELLO are cut to 64 per class, 16 cla
 refused with one line that names the tier, for example `tier 0 may not use the message kind CHAT: a new key may
 only use ...`. The list is `key::TIER0_ALLOWED`, later phases extend it. Token members keep their rights.
 
-**`key.rotate`** (module op, key members only): `{"op":"key.rotate","new_pub","sig"}`. `sig` is the signature
-of the CURRENT key over `{"member","new_pub","old_pub","op":"key.rotate"}`. The hub writes a FACT `key/<member>`
-with the same fields as a join plus `"op":"rotate"`, `"prev"` (the old key) and `"sig"`. The old key is refused
+**`key.rotate`** (module op, key members only): `{"op":"key.rotate","hub","new_pub","sig"}`. `sig` is the
+signature of the CURRENT key over `{"hub","member","new_pub","old_pub","op":"key.rotate"}`, where `hub` is the
+hub id of the hub the request is for (the client takes it from the pinned challenge). The hub puts its own id
+into the request before it checks the signature and refuses a `hub` that is another one, so a request signed
+for one hub cannot be replayed at another. The hub writes a FACT `key/<member>` with the same fields as a join
+plus `"op":"rotate"`, `"prev"` (the old key), `"hub"` and `"sig"`. The old key is refused
 from then on and its open connections close. The client keeps the new key in `member.key.next` until the hub
-confirms it. When the answer is lost, the next sign in tries that key and replaces `member.key` when the hub takes it.
+confirms it, and notes the hub id the rotation was sent to in `member.key.next.hub`. When the answer is lost,
+the next sign in tries that key and replaces `member.key` only when the hub at that address has that id and takes it.
 
-**`key.revoke`** (module op): a key member sends `{"op":"key.revoke","reason","sig"}` where `sig` signs
-`{"member","op":"key.revoke","pub","reason"}` with its own key. An orchestrator token sends
+**`key.revoke`** (module op): a key member sends `{"op":"key.revoke","hub","reason","sig"}` where `sig` signs
+`{"hub","member","op":"key.revoke","pub","reason"}` with its own key, `hub` as for `key.rotate`. An orchestrator token sends
 `{"op":"key.revoke","member","reason"}` (the reason is required). The hub writes a FACT `key/<member>` with
-`"state":"revoked"`, `"op":"revoke"`, `"reason"` and `"sig"` or `"by"` (the orchestrator). A revoked key is refused
+`"state":"revoked"`, `"op":"revoke"`, `"reason"` and `"sig"` with `"hub"`, or `"by"` (the orchestrator). A revoked key is refused
 at connect and an open connection is closed with the reason `key revoked`, the way a revoked token is.
 
 **Only the hub writes `key/` facts.** A `send` of a FACT with a topic under `key/` is refused, and the KEY table
@@ -617,6 +635,20 @@ peer is the loopback address, from any other peer it is ignored. With a list of 
 | `conns_per_member` | open connections of one member | `connection limit:` ... per member |
 | `max_conns`, `reserved_share` | all open connections. The share `reserved_share` of them is never filled by tier 0 or anonymous readers | `connection limit:` |
 | `public_reads_per_block_per_min` | connections and state reads of the public reader per block and minute | `public read limit:` |
+| `max_http_conns`, `http_conns_per_block` | plain HTTP connections, counted from the first byte until the answer is sent (a WebSocket leaves this count when it is upgraded). A peer on this machine is not counted per block unless `trust_header` names an address. Default 512 and 32 | the connection is closed, or `429` with `connection limit:` |
+| `bad_joins_per_block_per_hour` | failed join tries (bad JSON, bad proof of work, bad signature, unknown nonce) per block and hour. Default 30 | `join limit:` ... `failed join tries` |
+| `max_upload_bytes_in_flight` | bytes of request bodies the hub holds in memory at once. Default 64 MiB | `429` |
+
+`joins_per_block_per_hour` is charged only for a join request that parsed and carried a valid proof of work and
+signature, so garbage cannot use up the joins of a shared block. Garbage has the cheaper limit above.
+
+**The request head.** A connection has `head_timeout_secs` (default 10) to send its whole request head, read with
+one timer. A connection that sends nothing, or too little, is closed. A head over 16 KiB is refused. A request
+body is read after the head was checked: an upload to `/api/submit/` is read only after the caller is known and
+holds the lease of the order, and only up to the cap of that caller's tier (section 13).
+
+**Replay on connect.** `since` is replayed in pages of at most 1000 lines, the next page is read when the last
+one was taken by the client. `last` is cut at 1000. A client that takes no frame for 60 seconds is dropped.
 
 A member above tier 0 is never refused because tier 0 or anonymous connections fill the hub. When more than
 `join_flood_refusals` joins were refused within `join_flood_window_secs`, the hub writes ONE alert
@@ -626,9 +658,38 @@ A member above tier 0 is never refused because tier 0 or anonymous connections f
 and no `token` query acts as an anonymous observer. A request with a wrong token is still refused with 401. The
 observer counts against the global cap as tier 0 and has its own rate per block. It can send nothing: every
 frame it sends is answered with an error. It is not listed in `who` or in the members of `/api/state`.
-What it gets is redacted: no FACT with a topic under `quota/` or `spend/`, on the socket and in `recent`, and in
-`/api/state` no `quota` object, and each entry of `pools` has only `pool`, `window`, `state` and `resets_at`
-(no percent values, no leases, no forecast). Members with a token or a key see what they saw before.
+The public view is built from ALLOW lists (`door::PUBLIC_KINDS`, `PUBLIC_FACT_PREFIXES`, `PUBLIC_ALERT_CODES`,
+`PUBLIC_STATE_KEYS`), not from a list of what is hidden, so a topic, code or key that a later module adds stays
+private until it is listed. It follows docs/factory.md 12.1: the log of orders, submissions, gates, verdicts,
+stamps and test reports is public, the meters are not.
+
+* Kinds carried as they are: `READY`, `LANDED`, `FIX`, `STUCK`, `FINDING`, `CLAIM`, `RELEASE`, `TASK`, `ACCEPT`,
+  `DECLINE`, `RUN_REQUEST`, `RUN_RESULT`, `HELLO`, `CHAT`, `STATUS`, `POLICY`, `OFFER`, `TASK_UPDATE`.
+* `FACT` only with a topic that starts with `key/`, `submission/`, `gate/`, `verify/`, `review/`, `report/`,
+  `runorder/`, `stamp/`, `tier/`, `land/`, `batch/`, `branch/`, `role/`, `task/`, `run/` or `wip/`. Everything
+  else is hidden, among it `quota/`, `spend/`, `estimate/`, `capacity/`, `pool/`, `owner/`, `class/`, `pause/`,
+  `decision/` and `metric/`.
+* `ALERT` only for the codes `IDLE`, `JOIN_FLOOD`, `LEASE_LOST`, `STUCK`, `CONSULT`, `DIRTY_WORKTREE`,
+  `LOG_DIVERGED`, `MATRIX_REGRESSION`, `REGRESSION`, `VERIFY_BACKLOG`, `REVIEW_DISAGREE`, `REVIEW_SHORT`,
+  `AUDIT_FAILED` and `KEY_REVOKED`, and with every field whose name says percent, used, spend, quota, burn or
+  budget taken out and every number before a `%` replaced. `COORD_BUDGET`, which names owner, pool and the used
+  percent, is never shown.
+* `/api/state` keeps only the keys `hub`, `as_of`, `members`, `agents`, `claims`, `recent`, `derived`, `alerts`,
+  `tasks`, `leases`, `landing`, `batches`, `branches`, `submissions`, `reviews`, `review_counts`, `matrix`,
+  `regress`, `run_orders`, `runs`, `standing`, `keys`, `roles`, `policies`, `pools` and `baselines`. Each entry
+  of `pools` has only `pool`, `window`, `state` and `resets_at`. `recent` and the alerts follow the lists above.
+  `quota`, `spend`, `estimates`, `store`, `machines`, `capacities`, `offers`, `checkpoints`, `pauses`,
+  `decisions` and `metrics` are dropped.
+
+The same view goes to every reader that has no token: on the socket (replay and live), in `recent` and in
+`/api/state`. It also goes to a key member below tier 2, in the replay and the live stream, in the answer of the
+`log` request and in `/api/state`, read again every 2 seconds, so a promotion or a demotion takes effect at once.
+A token of any role, observer tokens included, sees what it saw before.
+
+**Public addresses and the block secret.** `public_addresses` lists the names members reach the hub at (section
+10, signing in). `secret_file` puts the key of the address blocks into a file of its own, 64 hex characters, made
+at the first start, outside the data folder. Without it the key is derived from `challenge_secret`, which sits
+beside `door.db`, and a copy of the data folder lets someone invert every IPv4 block in seconds.
 
 ## 15. Standing
 

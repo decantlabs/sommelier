@@ -92,6 +92,15 @@ pub fn save(path: &Path, file: &KeyFile) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
 }
 
+/// A line for the output of `join` about who can read the key file, or `None` where the file mode
+/// already keeps it private. On Windows the file gets no access list of its own: it is as private as
+/// the folder it is in.
+pub fn privacy_note() -> Option<&'static str> {
+    cfg!(windows).then_some(
+        "on Windows the key file is as private as the folder it is in: keep it in a folder that only you can open",
+    )
+}
+
 /// Loads the key file of `data_dir` or makes one. The flag says whether it was made now.
 pub fn load_or_create(data_dir: &Path) -> Result<(KeyFile, bool), String> {
     let path = key_path(data_dir);

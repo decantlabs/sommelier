@@ -48,7 +48,9 @@ The limits per address block and the public read of the bus are the `[door]` tab
 ## 3. Where the secrets live
 
 * **Hub data folder** (`--data`, else `SOMMELIER_DATA`, else the default data folder). It holds the log `bus.jsonl`,
-  the token file `tokens.json` (salted hashes only) and the hub id. Keep it private and back it up with
+  the token file `tokens.json` (salted hashes only), the hub id, `challenge_secret` and, when `keep_days` is above 0,
+  `door.db`. It is as sensitive as the addresses of the members: with `challenge_secret` and `door.db` anyone
+  can recover the address blocks (see the front door above, and `secret_file`). Keep it private and back it up with
   `sommelier snapshot`.
 * **The key book.** There is no separate file. A key is a FACT from the hub with topic `key/<member>` in the log,
   and replay rebuilds the book. Backing up the log backs up every member's public key. Private keys are only on the
@@ -59,6 +61,31 @@ The limits per address block and the public read of the bus are the `[door]` tab
 * **Role seat tokens** are issued with `sommelier token add` on the hub machine and handed over privately.
 * Network addresses of members are personal data and may not reach the log. They go to a side store that is
   planned.
+
+### The front door
+
+Settings are the `[door]` table of the factory file (`swarm/factory.example.toml` ships limits that are safe when
+copied as they are, and a public address to change).
+
+* **`public_addresses` is required for key sign in.** A key signs the address it connected to and the hub takes it
+  only for these names and for loopback. List the host name that members type, for example `hub.example.org`
+  (ports 443 and 80) or `hub.example.org:7300`. With an empty list members can sign in at loopback addresses only,
+  and the refusal says so. This is what stops a hostile hub from relaying a member's sign in to yours.
+* **The data folder is as sensitive as the addresses.** The address blocks are an HMAC of the /24 of an IPv4 address,
+  and there are only 16 million of those: whoever has the key inverts every block in seconds. By default the key is
+  derived from `challenge_secret` in the data folder, which sits beside `door.db`. So a copy or a backup of the data
+  folder, together with `door.db`, reveals where members connected from. Either keep `keep_days = 0`, or set
+  `secret_file` to a file outside the data folder and outside its backups.
+* **Behind a tunnel.** `trust_header` names the header that carries the client address, and the hub honours it only
+  for a loopback peer. Behind Cloudflare, `CF-Connecting-IP` is overwritten by the edge and is safe. A header that
+  a tunnel or a proxy passes through unchanged lets a client choose its own block. Use a header that your proxy
+  sets itself, and check that a request with that header made by hand is overwritten.
+* **Connection limits.** Set `conns_per_member` and `max_conns` (the example ships 4 and 400), the plain HTTP
+  limits `max_http_conns` and `http_conns_per_block`, and `max_upload_bytes_in_flight`. With `max_conns = 0` the
+  hub holds as many connections as the machine can. Every token, observer tokens included, counts as a member
+  above tier 0, so the dashboard and the witness are not pushed out by anonymous readers.
+* **Public read.** The public view is an allow list (PROTOCOL.md section 14). A key member below tier 2 gets the
+  same view. Read it before you switch `public_read` on.
 
 ## 4. When a key must be revoked
 
