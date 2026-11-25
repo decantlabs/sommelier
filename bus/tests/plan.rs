@@ -1489,7 +1489,8 @@ fn role_hello_is_backfilled_from_existing_log_and_tables_on_schema_migration() {
 
     // Also verify table-level fallback when an in-memory DB has pre-existing MEMBER/CAPACITY rows.
     let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(sommelier::store::CORE_SCHEMA_SQL).unwrap();
+    conn.execute_batch(sommelier::store::CORE_SCHEMA_SQL)
+        .unwrap();
     conn.execute(
         "INSERT INTO META (name, value, msg_id) VALUES ('cursor', '3', 3)",
         [],

@@ -77,9 +77,9 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
                 );
                 return Ok(exit::code(exit::WRONG_USAGE));
             };
-            let who = parsed
-                .who
-                .unwrap_or_else(|| std::env::var("SOMMELIER_WHO").unwrap_or_else(|_| "owner".into()));
+            let who = parsed.who.unwrap_or_else(|| {
+                std::env::var("SOMMELIER_WHO").unwrap_or_else(|_| "owner".into())
+            });
             match table.claim(role, &who, parsed.scope, now_sec) {
                 Ok(row) => {
                     store.save(&table).map_err(|e| e.to_string())?;
@@ -112,7 +112,9 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
         }
         "release" => {
             let Some(role) = parsed.pos.first() else {
-                eprintln!("sommelier: usage: sommelier role release <ROLE> [--who WHO] [--epoch N]");
+                eprintln!(
+                    "sommelier: usage: sommelier role release <ROLE> [--who WHO] [--epoch N]"
+                );
                 return Ok(exit::code(exit::WRONG_USAGE));
             };
             match table.release(role, parsed.who.as_deref(), parsed.epoch, now_sec) {
@@ -246,9 +248,9 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
                 eprintln!("sommelier: usage: sommelier role heartbeat <ROLE> --who <WHO>");
                 return Ok(exit::code(exit::WRONG_USAGE));
             };
-            let who = parsed
-                .who
-                .unwrap_or_else(|| std::env::var("SOMMELIER_WHO").unwrap_or_else(|_| "owner".into()));
+            let who = parsed.who.unwrap_or_else(|| {
+                std::env::var("SOMMELIER_WHO").unwrap_or_else(|_| "owner".into())
+            });
             let updated = table.heartbeat(role, &who, now_sec);
             store.save(&table).map_err(|e| e.to_string())?;
             if parsed.json_out {

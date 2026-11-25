@@ -419,7 +419,8 @@ fn cmd_token(raw: &[String]) -> Result<(), String> {
         }
         _ => {
             return Err(
-                "usage: sommelier token add NAME [--role R] | rotate NAME | revoke NAME | list".into(),
+                "usage: sommelier token add NAME [--role R] | rotate NAME | revoke NAME | list"
+                    .into(),
             );
         }
     }

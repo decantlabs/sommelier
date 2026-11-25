@@ -400,10 +400,7 @@ mod tests {
         m.body.clear();
         assert_eq!(format_line(&m), "#1234 20:05:11 alice READY -");
         m.to = vec!["rex".into(), "ana/d3d".into()];
-        assert_eq!(
-            format_line(&m),
-            "#1234 20:05:11 alice READY @rex,ana/d3d -"
-        );
+        assert_eq!(format_line(&m), "#1234 20:05:11 alice READY @rex,ana/d3d -");
     }
 
     #[test]

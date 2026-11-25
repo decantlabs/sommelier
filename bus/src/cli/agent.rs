@@ -408,7 +408,9 @@ async fn cmd_exec(args: &[String]) -> Result<ExitCode, String> {
     }
 
     let (Some(name), Some(class), Some(branch)) = (name, class, branch) else {
-        eprintln!("sommelier: usage: sommelier agent exec --name N --class C --branch B -- COMMAND...");
+        eprintln!(
+            "sommelier: usage: sommelier agent exec --name N --class C --branch B -- COMMAND..."
+        );
         return Ok(exit::code(exit::WRONG_USAGE));
     };
 

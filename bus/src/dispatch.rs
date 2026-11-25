@@ -192,7 +192,8 @@ mod tests {
 
     impl Fixture {
         fn new(name: &str, content: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("sommelier-{name}-{}", std::process::id()));
+            let path =
+                std::env::temp_dir().join(format!("sommelier-{name}-{}", std::process::id()));
             fs::write(&path, content).unwrap();
             Self(path)
         }

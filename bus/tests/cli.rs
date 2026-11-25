@@ -233,7 +233,9 @@ async fn status_sync_and_tail_without_status() {
     .await;
     assert_eq!(out.lines().count(), 5, "{out}");
     let (_, out, _) = finish(
-        sommelier(&bus, &["log", "--kind", "STATUS"]).spawn().unwrap(),
+        sommelier(&bus, &["log", "--kind", "STATUS"])
+            .spawn()
+            .unwrap(),
         10,
     )
     .await;
@@ -279,7 +281,9 @@ async fn to_worker_and_worker_filter_and_size_refusal() {
 #[tokio::test]
 async fn policy_cli_syncs_and_publish_rejects_network_options() {
     let bus = start("policy").await;
-    let child = sommelier(&bus, &["policy", "show", "--json"]).spawn().unwrap();
+    let child = sommelier(&bus, &["policy", "show", "--json"])
+        .spawn()
+        .unwrap();
     let (ok, out, err) = finish(child, 10).await;
     assert!(ok, "{err}");
     let summary: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -448,7 +452,11 @@ async fn idle_cli_json_matches_fixture() {
         .0
     );
 
-    let (ok, out, err) = finish(sommelier(&bus_orch, &["idle", "--json"]).spawn().unwrap(), 10).await;
+    let (ok, out, err) = finish(
+        sommelier(&bus_orch, &["idle", "--json"]).spawn().unwrap(),
+        10,
+    )
+    .await;
     assert!(ok, "{err}");
     let mut got: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(got["as_of"].as_u64().unwrap_or(0) > 0);

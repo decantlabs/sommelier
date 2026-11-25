@@ -13,7 +13,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sommelier::agent::capture::ExitCapture;
 use sommelier::agent::children::{ChildRecord, ChildrenStore, is_pid_alive};
-use sommelier::agent::classify::{ClassifyInput, ExitReason, classify_exit, parse_resets_in_duration};
+use sommelier::agent::classify::{
+    ClassifyInput, ExitReason, classify_exit, parse_resets_in_duration,
+};
 use sommelier::agent::disk::{DiskGuardConfig, check_disk};
 use sommelier::agent::exec::{ExecConfig, exec_worker};
 use sommelier::agent::outbox::Outbox;

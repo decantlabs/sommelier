@@ -44,7 +44,9 @@ fn cmd_snapshot(args: &[String]) -> Result<ExitCode, String> {
                 out_path = Some(PathBuf::from(other.trim_start_matches("--file=")));
             }
             other => {
-                return Err(format!("unknown argument `{other}` for `sommelier snapshot`"));
+                return Err(format!(
+                    "unknown argument `{other}` for `sommelier snapshot`"
+                ));
             }
         }
     }

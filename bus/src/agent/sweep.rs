@@ -244,7 +244,12 @@ fn infer_task_id(wt: &Path, folder_name: &str) -> Option<String> {
             return Some(trimmed.to_owned());
         }
     }
-    for prefix in ["sommelier-agy-", "sommelier-codex-", "sommelier-claude-", "wt-"] {
+    for prefix in [
+        "sommelier-agy-",
+        "sommelier-codex-",
+        "sommelier-claude-",
+        "wt-",
+    ] {
         if let Some(rest) = folder_name.strip_prefix(prefix)
             && !rest.is_empty()
         {

@@ -9,7 +9,9 @@ use sommelier::quota::calibrate::{
     calibrate_codex_from_rollout, calibrate_gemini_on_limit, parse_launcher_log_limits,
     parse_limited_tsv, parse_quotas_tsv,
 };
-use sommelier::quota::claude::{parse_result_spend, parse_statusline, parse_stream_rate_limit_event};
+use sommelier::quota::claude::{
+    parse_result_spend, parse_statusline, parse_stream_rate_limit_event,
+};
 use sommelier::quota::codex::{parse_appserver_response, parse_rollout_line};
 use sommelier::quota::estimate::{Estimate, EstimateSource, estimate};
 use sommelier::quota::forecast::{ActiveLease, forecast, on_sample, pool_state};

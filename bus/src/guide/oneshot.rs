@@ -47,7 +47,9 @@ pub const TABLE: &[OneShot] = &[
         situation: "quota",
         command: "sommelier quota hit --vendor <v> --text-file <error file> --task <task>",
         output: "pause gemini-4-carbon until 14:02Z, task requeued (code 5)",
-        note: Some("Before stopping on quota/rate limit: commit WIP, push wip/<task> to origin, and post STUCK with quota % + branch/SHA."),
+        note: Some(
+            "Before stopping on quota/rate limit: commit WIP, push wip/<task> to origin, and post STUCK with quota % + branch/SHA.",
+        ),
     },
     OneShot {
         situation: "context",

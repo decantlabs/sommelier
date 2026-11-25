@@ -433,7 +433,9 @@ async fn cmd_requeue(raw: &[String]) -> Result<ExitCode, String> {
         }
     };
     let Some(id) = a.pos.first() else {
-        eprintln!("sommelier: usage: sommelier task requeue ID [--reason TEXT] [--note TEXT] [--json]");
+        eprintln!(
+            "sommelier: usage: sommelier task requeue ID [--reason TEXT] [--note TEXT] [--json]"
+        );
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let json_out = a.flag("json");

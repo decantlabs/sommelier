@@ -335,7 +335,9 @@ async fn cmd_sim(args: &[String]) -> Result<ExitCode, String> {
                 if log_path.is_none() {
                     log_path = Some(PathBuf::from(other));
                 } else {
-                    eprintln!("sommelier: unexpected positional argument `{other}` for `sommelier sim`");
+                    eprintln!(
+                        "sommelier: unexpected positional argument `{other}` for `sommelier sim`"
+                    );
                     return Ok(exit::code(exit::WRONG_USAGE));
                 }
             }

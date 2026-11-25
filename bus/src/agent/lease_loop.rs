@@ -681,7 +681,10 @@ async fn execute_leased_task(
                 task["done_when"].as_str().unwrap_or("tests pass")
             )
         });
-    let _ = fs::write(worktree_path.join(".sommelier").join("brief.md"), &brief_text);
+    let _ = fs::write(
+        worktree_path.join(".sommelier").join("brief.md"),
+        &brief_text,
+    );
 
     // 3. Build prompt from guide + brief + resume note
     let v_str = vendor_for_class(&class, &class);

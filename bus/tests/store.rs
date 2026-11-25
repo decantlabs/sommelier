@@ -499,9 +499,10 @@ async fn cli_snapshot_and_replay_verify_round_trip() {
     .unwrap();
     assert_eq!(code, std::process::ExitCode::SUCCESS);
 
-    let code = sommelier::cli::state::run("snapshot", &["--data".into(), data_arg, "--json".into()])
-        .await
-        .unwrap();
+    let code =
+        sommelier::cli::state::run("snapshot", &["--data".into(), data_arg, "--json".into()])
+            .await
+            .unwrap();
     assert_eq!(code, std::process::ExitCode::SUCCESS);
     assert!(dir.path().join("state.snapshot.json").is_file());
 }
