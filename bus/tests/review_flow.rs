@@ -412,6 +412,8 @@ fn a_verdict_is_refused_from_the_wrong_member_tier_zero_and_a_bad_form() {
 }
 
 /// A key member that holds `tier` and an open review of `t1`.
+const HUB_ID: &str = "0123456789abcdef0123456789abcdef";
+
 fn key_reviewer(tier: i64) -> (Env, String, MemberKey, String) {
     let mut e = Env::new();
     let key = MemberKey::generate().unwrap();
@@ -432,6 +434,21 @@ fn key_reviewer(tier: i64) -> (Env, String, MemberKey, String) {
     e.submission(&s, "t1", "alice", 1, "reviewing");
     e.parts(&s, true, "passed");
     e.assign("t1", 1, &s, &member, false, 1);
+    e.store
+        .connection()
+        .execute(
+            "INSERT INTO STAMP (subject, kind, evidence_msg, issuer, at, msg_id)              VALUES (?1, 'landed', 1, 'hub', 0, 0)",
+            [&member],
+        )
+        .unwrap();
+    std::fs::write(
+        e.dir.path().join("hub_id"),
+        format!(
+            "{HUB_ID}
+"
+        ),
+    )
+    .unwrap();
     (e, s, key, member)
 }
 
@@ -450,18 +467,26 @@ fn a_key_member_must_sign_the_verdict() {
 
     // A signature of another key, and a signature over another verdict.
     let other = MemberKey::generate().unwrap();
-    let wrong_key = sign_request(&other, &verdict_request("t1", 1, PASS));
+    let vr = |n: u64, sub: &str, hub: &str, text: &str| verdict_request("t1", n, sub, hub, text);
+    let wrong_key = sign_request(&other, &vr(1, &s, HUB_ID, PASS));
     let err = run(&mut e, Some(wrong_key)).unwrap_err();
     assert!(err.contains("bad signature"), "{err}");
-    let wrong_text = sign_request(&key, &verdict_request("t1", 1, FAIL));
+    let wrong_text = sign_request(&key, &vr(1, &s, HUB_ID, FAIL));
     let err = run(&mut e, Some(wrong_text)).unwrap_err();
     assert!(err.contains("bad signature"), "{err}");
-    let wrong_review = sign_request(&key, &verdict_request("t1", 2, PASS));
+    let wrong_review = sign_request(&key, &vr(2, &s, HUB_ID, PASS));
     let err = run(&mut e, Some(wrong_review)).unwrap_err();
+    assert!(err.contains("bad signature"), "{err}");
+    // A signature cannot move to another submission or to another hub.
+    let other_sub = sign_request(&key, &vr(1, &sha('f'), HUB_ID, PASS));
+    let err = run(&mut e, Some(other_sub)).unwrap_err();
+    assert!(err.contains("bad signature"), "{err}");
+    let other_hub = sign_request(&key, &vr(1, &s, "ffffffffffffffffffffffffffffffff", PASS));
+    let err = run(&mut e, Some(other_hub)).unwrap_err();
     assert!(err.contains("bad signature"), "{err}");
     assert_eq!(e.sub_state(&s), "reviewing");
 
-    let good = sign_request(&key, &verdict_request("t1", 1, PASS));
+    let good = sign_request(&key, &vr(1, &s, HUB_ID, PASS));
     let out = run(&mut e, Some(good.clone())).unwrap();
     assert_eq!(out["state"], "approved");
     let row = data::review_of(e.store.connection(), "t1", 1)
@@ -475,9 +500,12 @@ fn a_key_member_must_sign_the_verdict() {
 
 #[test]
 fn a_key_member_at_tier_zero_may_not_review_even_with_a_good_signature() {
-    let (mut e, _s, key, member) = key_reviewer(0);
+    let (mut e, s, key, member) = key_reviewer(0);
     let mut body = verdict_body("t1", 1, PASS);
-    body["sig"] = json!(sign_request(&key, &verdict_request("t1", 1, PASS)));
+    body["sig"] = json!(sign_request(
+        &key,
+        &verdict_request("t1", 1, &s, HUB_ID, PASS)
+    ));
     let err = e
         .run(&member, Role::Member, "tier0", "review.verdict", body)
         .unwrap_err();
@@ -817,7 +845,9 @@ fn the_prompt_has_exactly_one_marker_line_also_for_a_hostile_diff() {
     assert!(prompt.contains("file src/lib.rs (modified"));
     assert!(prompt.contains("-3: let x = 0;"));
     assert!(prompt.contains("+3: let x = 1;"));
-    assert!(prompt.contains("> DATA:"));
+    // A line break inside one diff line is shown as an escape, it cannot start a line of its own.
+    assert!(prompt.contains("x\\u{a}DATA:\\u{a}"));
+    assert!(prompt.lines().all(|l| l != "DATA:" || l.len() == 5));
 
     // `show` names the review, a stranger cannot read it.
     let out = e
@@ -1448,4 +1478,351 @@ async fn a_client_cannot_send_a_fact_on_review() {
     let state = api_state(&h).await;
     assert!(state["reviews"].as_array().unwrap().is_empty(), "{state}");
     assert_eq!(state["review_counts"]["assigned"], 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Second review: the count, the audit, the timeout, the standing of a reviewer, the signature
+// ---------------------------------------------------------------------------------------------
+
+fn online(e: &Env, names: &[&str]) {
+    for name in names {
+        e.store
+            .connection()
+            .execute(
+                "INSERT OR REPLACE INTO MEMBER (name, role, trust, online, last_seen_at, msg_id) \
+                 VALUES (?1, 'member', 'guest', 1, ?2, 0)",
+                rusqlite::params![name, (now_ms() / 1000) as i64],
+            )
+            .unwrap();
+    }
+}
+
+fn landed_stamp(e: &Env, member: &str) {
+    e.store
+        .connection()
+        .execute(
+            "INSERT INTO STAMP (subject, kind, evidence_msg, issuer, at, msg_id) \
+             VALUES (?1, 'landed', 1, 'hub', 0, 0)",
+            [member],
+        )
+        .unwrap();
+}
+
+/// An assignment that is overdue, with `prev` as the earlier holders.
+fn overdue(e: &mut Env, task: &str, n: u64, sha: &str, who: &str, required: u32, prev: &[String]) {
+    let m = sommelier::review::flow::assignment_fact(
+        task, n, sha, who, "required", required, false, prev, 1, 2,
+    );
+    e.put(
+        m.kind,
+        &m.topic.clone(),
+        serde_json::from_str(&m.body).unwrap(),
+    );
+}
+
+fn reviewer_row(e: &Env, task: &str, n: u64) -> String {
+    data::review_of(e.store.connection(), task, n)
+        .unwrap()
+        .unwrap()
+        .row
+        .reviewer
+}
+
+fn enabled() -> ReviewConfig {
+    ReviewConfig {
+        enabled: true,
+        ..ReviewConfig::default()
+    }
+}
+
+#[test]
+fn two_rows_that_expire_in_one_tick_never_fall_to_one_member() {
+    let mut e = Env::new();
+    let s = sha('a');
+    e.task("t1", "delivered");
+    e.submission(&s, "t1", "alice", 1, "reviewing");
+    e.parts(&s, true, "passed");
+    overdue(&mut e, "t1", 1, &s, "bob", 2, &[]);
+    overdue(&mut e, "t1", 2, &s, "carol", 2, &[]);
+    e.tier("alice", 1);
+    online(&e, &["bob", "carol", "dave", "erin", "frank", "grace"]);
+    assert!(e.tick(&enabled()) > 0);
+    let (a, b) = (reviewer_row(&e, "t1", 1), reviewer_row(&e, "t1", 2));
+    assert_ne!(a, b, "both required reviews went to {a}");
+    assert!(!["bob", "carol"].contains(&a.as_str()), "{a}");
+    assert!(!["bob", "carol"].contains(&b.as_str()), "{b}");
+}
+
+#[test]
+fn a_timeout_excludes_a_holder_for_one_round_only() {
+    let mut e = Env::new();
+    let s = sha('a');
+    e.task("t1", "delivered");
+    e.submission(&s, "t1", "alice", 1, "reviewing");
+    e.parts(&s, true, "passed");
+    // carol was silent in an earlier round, bob is silent now, nobody else is online.
+    overdue(&mut e, "t1", 1, &s, "bob", 1, &["carol".to_string()]);
+    e.tier("alice", 1);
+    online(&e, &["bob", "carol"]);
+    assert!(e.tick(&enabled()) > 0);
+    assert_eq!(reviewer_row(&e, "t1", 1), "carol");
+    // The round before is not forgotten in the record.
+    let r = data::review_of(e.store.connection(), "t1", 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.meta.prev, vec!["carol".to_string(), "bob".to_string()]);
+}
+
+#[test]
+fn two_passes_of_one_member_are_one_pass() {
+    let mut e = Env::new();
+    let s = sha('a');
+    e.task("t1", "delivered");
+    e.submission(&s, "t1", "alice", 1, "reviewing");
+    e.parts(&s, true, "passed");
+    e.assign("t1", 1, &s, "bob", false, 2);
+    e.assign("t1", 2, &s, "bob", false, 2);
+    e.member("bob", "review.verdict", verdict_body("t1", 1, PASS))
+        .unwrap();
+    let out = e
+        .member("bob", "review.verdict", verdict_body("t1", 2, PASS))
+        .unwrap();
+    assert_eq!(out["state"], "reviewing", "one reviewer is not two");
+    assert!(e.landings().is_empty());
+    assert_eq!(e.sub_state(&s), "reviewing");
+    // The lock agrees when it is asked for the same rows.
+    let inputs = sommelier::land::lock::read_inputs(e.store.connection(), &s).unwrap();
+    assert!(sommelier::land::lock::evaluate(&s, &inputs, false).is_err());
+}
+
+fn assignment_audited(e: &Env, task: &str) -> Vec<Value> {
+    e.log
+        .iter()
+        .filter(|m| m.topic.starts_with(&format!("review/{task}/")))
+        .map(|m| serde_json::from_str::<Value>(&m.body).unwrap())
+        .filter(|b| b["state"] == "assigned")
+        .map(|b| b["audited"].clone())
+        .collect()
+}
+
+#[test]
+fn the_audit_is_decided_and_shown_only_after_the_required_passes() {
+    let mut e = Env::new();
+    e.config.review.audit_share = 1.0;
+    let s = sha('a');
+    e.task("t1", "delivered");
+    e.submission(&s, "t1", "alice", 1, "verified");
+    e.parts(&s, true, "passed");
+    e.tier("alice", 1);
+    e.tier("orch", 3);
+    online(&e, &["bob", "carol"]);
+    let mut cfg = audit_cfg();
+    cfg.rule.reviewers = [2; 4];
+    assert!(e.tick(&cfg) > 0);
+    // Even with the audit share at 1.0 nothing shows an audit while the required reviews are open.
+    let flags = assignment_audited(&e, "t1");
+    assert_eq!(flags.len(), 2, "{flags:?}");
+    assert!(flags.iter().all(|f| *f == json!(false)), "{flags:?}");
+    let first = reviewer_row(&e, "t1", 1);
+    let second = reviewer_row(&e, "t1", 2);
+    assert_ne!(first, second);
+
+    let out = e
+        .member(&first, "review.verdict", verdict_body("t1", 1, PASS))
+        .unwrap();
+    assert_eq!(out["state"], "reviewing");
+    for n in [1, 2] {
+        let r = data::review_of(e.store.connection(), "t1", n)
+            .unwrap()
+            .unwrap();
+        assert!(!r.row.audited, "row {n} shows an audit before the passes");
+    }
+    assert_eq!(
+        e.tick(&cfg),
+        0,
+        "no audit seat while a required review is open"
+    );
+    assert!(
+        data::review_of(e.store.connection(), "t1", 3)
+            .unwrap()
+            .is_none()
+    );
+
+    // The last required pass decides the audit and marks the rows. The submission does not land yet.
+    let out = e
+        .member(&second, "review.verdict", verdict_body("t1", 2, PASS))
+        .unwrap();
+    assert_eq!(out["state"], "reviewing");
+    assert!(e.landings().is_empty());
+    for n in [1, 2] {
+        let r = data::review_of(e.store.connection(), "t1", n)
+            .unwrap()
+            .unwrap();
+        assert!(r.row.audited, "row {n}");
+        assert_eq!(r.row.verdict, "pass", "the mark keeps the answer");
+    }
+    // The maintainer seat comes online only now.
+    e.store
+        .connection()
+        .execute(
+            "INSERT OR REPLACE INTO MEMBER (name, role, trust, online, last_seen_at, msg_id) \
+             VALUES ('orch', 'orchestrator', 'owner', 1, ?1, 0)",
+            [(now_ms() / 1000) as i64],
+        )
+        .unwrap();
+    assert!(e.tick(&cfg) > 0);
+    let audit = data::review_of(e.store.connection(), "t1", 3)
+        .unwrap()
+        .expect("the audit seat is assigned after the passes");
+    assert!(audit.is_audit());
+    assert_eq!(audit.row.reviewer, "orch");
+    let out = e
+        .run(
+            "orch",
+            Role::Orchestrator,
+            "owner",
+            "review.verdict",
+            verdict_body("t1", 3, PASS),
+        )
+        .unwrap();
+    assert_eq!(out["state"], "approved");
+    assert_eq!(e.landings(), vec![format!("bundle:{s}")]);
+}
+
+#[test]
+fn a_tier_1_member_without_a_landed_stamp_may_not_review() {
+    let (mut e, s) = reviewing(false);
+    e.tier("bob", 1);
+    e.tier("alice", 1);
+    online(&e, &["bob", "carol", "alice"]);
+    let snap = assign::read(e.store.connection(), &enabled(), now_ms() / 1000).unwrap();
+    let bob = snap.members.iter().find(|m| m.name == "bob").unwrap();
+    assert!(bob.unproven);
+    let err = e
+        .member("bob", "review.verdict", verdict_body("t1", 1, PASS))
+        .unwrap_err();
+    assert!(err.contains("landed"), "{err}");
+    assert_eq!(e.sub_state(&s), "reviewing");
+
+    landed_stamp(&e, "bob");
+    let snap = assign::read(e.store.connection(), &enabled(), now_ms() / 1000).unwrap();
+    assert!(
+        !snap
+            .members
+            .iter()
+            .find(|m| m.name == "bob")
+            .unwrap()
+            .unproven
+    );
+    let out = e
+        .member("bob", "review.verdict", verdict_body("t1", 1, PASS))
+        .unwrap();
+    assert_eq!(out["state"], "approved");
+}
+
+#[test]
+fn the_tier_and_the_rule_minimum_are_checked_again_when_the_verdict_arrives() {
+    // A tier 0 author needs a reviewer of tier 2, whatever the review was assigned to.
+    let mut e = Env::new();
+    let s = sha('a');
+    e.task("t1", "delivered");
+    e.submission(&s, "t1", "alice", 0, "reviewing");
+    e.parts(&s, true, "passed");
+    e.assign("t1", 1, &s, "bob", false, 1);
+    e.tier("bob", 1);
+    landed_stamp(&e, "bob");
+    let err = e
+        .member("bob", "review.verdict", verdict_body("t1", 1, PASS))
+        .unwrap_err();
+    assert!(err.contains("tier 2"), "{err}");
+    e.tier("bob", 2);
+    assert!(
+        e.member("bob", "review.verdict", verdict_body("t1", 1, PASS))
+            .is_ok()
+    );
+
+    // The author's tier at answer time counts: alice rose to tier 3 after the submission.
+    let mut e = Env::new();
+    e.task("t1", "delivered");
+    e.submission(&s, "t1", "alice", 1, "reviewing");
+    e.parts(&s, true, "passed");
+    e.assign("t1", 1, &s, "bob", false, 1);
+    e.tier("alice", 3);
+    e.tier("bob", 2);
+    let err = e
+        .member("bob", "review.verdict", verdict_body("t1", 1, PASS))
+        .unwrap_err();
+    assert!(err.contains("tier 3"), "{err}");
+}
+
+fn answer_facts(e: &Env, task: &str, n: u64) -> Vec<Value> {
+    e.log
+        .iter()
+        .filter(|m| m.topic == format!("review/{task}/{n}"))
+        .map(|m| serde_json::from_str::<Value>(&m.body).unwrap())
+        .filter(|b| b["state"] == "answered" && b.get("signature").is_some())
+        .collect()
+}
+
+#[test]
+fn the_signed_verdict_can_be_checked_again_from_the_log_alone() {
+    let (mut e, s, key, member) = key_reviewer(1);
+    let sig = sign_request(&key, &verdict_request("t1", 1, &s, HUB_ID, PASS));
+    let mut body = verdict_body("t1", 1, PASS);
+    body["sig"] = json!(sig);
+    e.run(&member, Role::Member, "tier0", "review.verdict", body)
+        .unwrap();
+
+    // Everything below uses the log and the public key only: no request, no hub id file.
+    let facts = answer_facts(&e, "t1", 1);
+    assert_eq!(facts.len(), 1);
+    let fact = &facts[0];
+    let signed = fact["signed"]
+        .as_str()
+        .expect("the FACT keeps the signed text");
+    let logged_sig = fact["signature"].as_str().unwrap();
+    let signed_json: Value = serde_json::from_str(signed).unwrap();
+    assert_eq!(signed_json["op"], "review.verdict");
+    assert_eq!(signed_json["submission"], s.as_str());
+    assert_eq!(signed_json["hub"], HUB_ID);
+    assert_eq!(signed_json["task"], "t1");
+    assert_eq!(signed_json["n"], 1);
+    assert_eq!(signed_json["verdict"], PASS);
+    let public = key.public();
+    let raw_sig = sommelier::key::crypto::unb64(logged_sig).unwrap();
+    sommelier::key::crypto::verify_bytes(&public, signed.as_bytes(), &raw_sig)
+        .expect("the stored signature checks against the stored text");
+    // A changed text does not check.
+    assert!(
+        sommelier::key::crypto::verify_bytes(
+            &public,
+            signed.replace("pass", "fail").as_bytes(),
+            &raw_sig,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_signed_verdict_too_long_to_keep_is_refused_before_anything_is_written() {
+    let (mut e, s, key, member) = key_reviewer(1);
+    let long = "x".repeat(480);
+    let findings: Vec<String> = (0..8)
+        .map(|i| format!(r#"{{"path":"f{i}","line":1,"text":"{long}"}}"#))
+        .collect();
+    let text = format!(
+        r#"{{"verdict":"fail","findings":[{}],"summary":"s"}}"#,
+        findings.join(",")
+    );
+    let mut body = verdict_body("t1", 1, &text);
+    body["sig"] = json!(sign_request(
+        &key,
+        &verdict_request("t1", 1, &s, HUB_ID, &text)
+    ));
+    let err = e
+        .run(&member, Role::Member, "tier0", "review.verdict", body)
+        .unwrap_err();
+    assert!(err.contains("shorten"), "{err}");
+    assert!(answer_facts(&e, "t1", 1).is_empty());
+    assert_eq!(e.sub_state(&s), "reviewing");
 }

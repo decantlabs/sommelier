@@ -69,10 +69,13 @@ pub fn evaluate(sha: &str, i: &LockInputs, require_approved: bool) -> Result<(),
         }
     }
     let need = required.iter().map(|r| r.meta.required).max().unwrap_or(1) as usize;
+    // Distinct reviewers: one member who holds two rows is one pass, not two.
     let passed = required
         .iter()
         .filter(|r| r.row.state == "answered" && r.row.verdict == "pass")
-        .count();
+        .map(|r| r.row.reviewer.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     if passed < need {
         return refuse(format!("{passed} of {need} required reviews have passed"));
     }
@@ -184,19 +187,31 @@ mod tests {
         assert!(why(&i).contains("said `escalate`"));
     }
 
+    fn by(mut r: Review, who: &str) -> Review {
+        r.row.reviewer = who.into();
+        r.meta.required = 2;
+        r
+    }
+
     #[test]
     fn two_required_reviews_need_two_passes() {
-        let mut a = review(1, "answered", "pass", "required", false);
-        let mut b = review(2, "assigned", "", "required", false);
-        a.meta.required = 2;
-        b.meta.required = 2;
+        let a = by(review(1, "answered", "pass", "required", false), "r1");
+        let b = by(review(2, "assigned", "", "required", false), "r2");
         let mut i = good();
         i.reviews = vec![a.clone(), b];
         assert!(why(&i).contains("1 of 2"));
-        let mut c = review(2, "answered", "pass", "required", false);
-        c.meta.required = 2;
+        let c = by(review(2, "answered", "pass", "required", false), "r2");
         i.reviews = vec![a, c];
         assert!(evaluate("abc", &i, true).is_ok());
+    }
+
+    #[test]
+    fn two_passes_of_one_reviewer_count_once() {
+        let a = by(review(1, "answered", "pass", "required", false), "same");
+        let b = by(review(2, "answered", "pass", "required", false), "same");
+        let mut i = good();
+        i.reviews = vec![a, b];
+        assert!(why(&i).contains("1 of 2"), "{}", why(&i));
     }
 
     #[test]

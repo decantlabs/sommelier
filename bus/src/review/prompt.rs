@@ -35,14 +35,78 @@ fn looks_special(line: &str) -> bool {
     l.starts_with("review guide")
 }
 
-/// Prefixes every line that looks like the marker or the guide header with `> `.
+/// True for a character that is invisible or reorders text: the format characters of Unicode that a reader
+/// cannot see (zero width, bidirectional controls, joiners, invisible operators, soft hyphen, variation
+/// selectors, tag characters and a few blank letters).
+fn is_invisible(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5
+        | 0x180B..=0x180F | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F
+        | 0x3164 | 0xFE00..=0xFE0F | 0xFEFF | 0xFFA0 | 0xFFF9..=0xFFFB
+        | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)
+}
+
+/// True for every kind of Unicode line break: LF, CR, vertical tab, form feed, NEL, line and paragraph
+/// separator.
+fn is_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// The one function that turns untrusted text into what a reviewer sees, for ONE line. Every control
+/// character (the tab too), every invisible character, every bidirectional character and every line break
+/// becomes a visible escape such as `\u{202e}`. Nothing that remains can move the cursor, change the colour
+/// of the terminal or hide a character.
+pub fn escape_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() || is_invisible(c) || is_line_break(c) {
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Splits text at every kind of line break. CR LF is one break.
+fn split_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if !is_line_break(c) {
+            continue;
+        }
+        lines.push(&text[start..i]);
+        start = i + c.len_utf8();
+        if c == '\r'
+            && let Some(&(j, '\n')) = chars.peek()
+        {
+            chars.next();
+            start = j + 1;
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+/// Makes text safe to show: every Unicode line break is a line break, every control, invisible and
+/// bidirectional character is a visible escape, and every line that looks like the marker or the guide
+/// header gets the prefix `> `.
 pub fn neutralise(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 16);
-    for line in text.lines() {
-        if looks_special(line) {
+    for line in split_lines(text) {
+        let special = looks_special(line);
+        let line = escape_line(line);
+        if special || looks_special(&line) {
             out.push_str("> ");
         }
-        out.push_str(line);
+        out.push_str(&line);
         out.push('\n');
     }
     out

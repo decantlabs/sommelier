@@ -27,9 +27,13 @@ pub struct Candidate {
     pub family: Option<String>,
     pub online: bool,
     pub open_reviews: u32,
+    /// True for a member below tier 2 that has no `landed` stamp of its own. Tier 1 reached by test
+    /// reports alone gives weight to test results, it does not make a reviewer of code.
+    pub unproven: bool,
 }
 
-/// Whether a reviewer of another model family comes first.
+/// Whether a reviewer of another model family comes first. The family is declared by the member and a
+/// stranger can set it, so it is never more than a tie break inside equal HMAC ranks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OtherFamily {
     Prefer,
@@ -53,7 +57,7 @@ impl Default for ReviewRule {
         ReviewRule {
             reviewers: [1, 1, 1, 1],
             min_tier: [2, 1, 1, 1],
-            other_family: OtherFamily::Prefer,
+            other_family: OtherFamily::Ignore,
             max_open: 3,
         }
     }
@@ -70,6 +74,8 @@ pub enum Exclusion {
     TierBelowOne,
     /// Below the minimum of the rule, for a tier 0 author this means below tier 2.
     TierBelowMinimum,
+    /// Tier 1 by test reports alone: no `landed` stamp of its own and below tier 2.
+    Unproven,
     TooManyOpen,
 }
 
@@ -83,6 +89,7 @@ impl fmt::Display for Exclusion {
             Exclusion::TierBelowAuthor => "tier below the author's",
             Exclusion::TierBelowOne => "tier below 1",
             Exclusion::TierBelowMinimum => "tier below the minimum for this author",
+            Exclusion::Unproven => "no landed stamp of its own and below tier 2",
             Exclusion::TooManyOpen => "too many open reviews",
         })
     }
@@ -119,6 +126,8 @@ fn exclusion(sub: &SubmissionView, c: &Candidate, rule: &ReviewRule) -> Option<E
         Some(Exclusion::TierBelowOne)
     } else if c.tier < rule.min_tier[idx] {
         Some(Exclusion::TierBelowMinimum)
+    } else if c.unproven {
+        Some(Exclusion::Unproven)
     } else if c.open_reviews >= rule.max_open {
         Some(Exclusion::TooManyOpen)
     } else {
@@ -127,7 +136,8 @@ fn exclusion(sub: &SubmissionView, c: &Candidate, rule: &ReviewRule) -> Option<E
 }
 
 /// Picks the reviewers. The order among eligible candidates is the HMAC SHA 256 of the bundle hash
-/// and the candidate id under `secret`, so the author can neither predict nor steer it.
+/// and the candidate id under `secret`, so the author can neither predict nor steer it. The model family
+/// breaks a tie between equal ranks and nothing more.
 pub fn pick_reviewers(
     sub: &SubmissionView,
     candidates: &[Candidate],
@@ -154,7 +164,7 @@ pub fn pick_reviewers(
             && matches!((&sub.author_family, &c.family), (Some(a), Some(b)) if a != b);
         ranked.push((tag, !other, c));
     }
-    ranked.sort_by(|a, b| (a.1, a.0, &a.2.member).cmp(&(b.1, b.0, &b.2.member)));
+    ranked.sort_by(|a, b| (a.0, a.1, &a.2.member).cmp(&(b.0, b.1, &b.2.member)));
     let want = rule.reviewers[usize::from(sub.author_tier.min(3))];
     let picked: Vec<String> = ranked
         .iter()

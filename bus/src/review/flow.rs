@@ -11,6 +11,8 @@ use crate::time::rfc3339;
 const MAX_FACT_BYTES: usize = 3800;
 /// Longest resume note that goes back to the task.
 const MAX_NOTE_CHARS: usize = 1500;
+/// Longest signed text the hub keeps with an answer. A longer signed answer is refused.
+pub const MAX_SIGNED_BYTES: usize = 2400;
 
 /// What the answers so far mean for a submission.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +39,16 @@ fn word(r: &Review) -> &str {
     }
 }
 
+/// How many DISTINCT reviewers passed. One member who holds two rows of a submission counts once.
+pub fn passed_reviewers(required: &[&Review]) -> usize {
+    required
+        .iter()
+        .filter(|r| word(r) == "pass")
+        .map(|r| r.row.reviewer.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
 /// Decides from the reviews of one submission. The first answer that needs action wins, a fail before an escalate.
 pub fn decide(reviews: &[Review]) -> Decision {
     let required: Vec<&Review> = reviews.iter().filter(|r| !r.is_audit()).collect();
@@ -50,8 +62,7 @@ pub fn decide(reviews: &[Review]) -> Decision {
         return Decision::Escalate { n: r.row.n };
     }
     let need = required.iter().map(|r| r.meta.required).max().unwrap_or(1) as usize;
-    let passed = required.iter().filter(|r| word(r) == "pass").count();
-    if passed < need {
+    if passed_reviewers(&required) < need {
         return Decision::Wait;
     }
     match reviews.iter().find(|r| r.is_audit()) {
@@ -121,7 +132,15 @@ pub fn assignment_fact(
 }
 
 /// The FACT that records an answer. It stays under the size of a message: findings are dropped from the end.
-pub fn answer_fact(review: &Review, verdict: &Verdict, signature: &str, now_sec: u64) -> Message {
+/// `signed` is the exact text the key member signed, kept so the signature can be checked again from the
+/// log alone. It is never shortened, a caller refuses a signed answer that is longer than [`MAX_SIGNED_BYTES`].
+pub fn answer_fact(
+    review: &Review,
+    verdict: &Verdict,
+    signature: &str,
+    signed: Option<&str>,
+    now_sec: u64,
+) -> Message {
     let mut findings: Vec<Value> = verdict
         .findings
         .iter()
@@ -143,7 +162,11 @@ pub fn answer_fact(review: &Review, verdict: &Verdict, signature: &str, now_sec:
             "audited": review.row.audited,
             "at": now_sec,
         });
-        if body.to_string().len() <= MAX_FACT_BYTES {
+        let mut body = body;
+        if let Some(text) = signed {
+            body["signed"] = json!(text);
+        }
+        if body.to_string().len() <= MAX_FACT_BYTES || (findings.is_empty() && summary.is_empty()) {
             return hub_message(
                 Kind::Fact,
                 format!("review/{}/{}", review.row.task, review.row.n),
@@ -156,6 +179,16 @@ pub fn answer_fact(review: &Review, verdict: &Verdict, signature: &str, now_sec:
             summary = summary.chars().take(summary.chars().count() / 2).collect();
         }
     }
+}
+
+/// The FACT that marks the answered required reviews of a submission as audited. The hub writes it once the
+/// required passes are in, so nobody learns of the audit while the required reviews are open.
+pub fn audit_mark_fact(review: &Review, now_sec: u64) -> Message {
+    hub_message(
+        Kind::Fact,
+        format!("review/{}/{}", review.row.task, review.row.n),
+        json!({"v": 1, "state": "answered", "audited": true, "at": now_sec}),
+    )
 }
 
 /// The FACT that a maintainer writes to settle an escalated review or a disagreeing audit. It changes the

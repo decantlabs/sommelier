@@ -484,8 +484,11 @@ in the log and is ignored by the projection.
 
 * `review/<task>/<n>`: one review. Fields `state` (`assigned` or `answered`), `submission`, `reviewer`, `picked_by`
   (`rule` or `audit`), `role` (`required` or `audit`), `required` (how many passing reviews the submission needs),
-  `audited`, `prev` (earlier holders that did not answer), `at` and `due` (UTC epoch seconds). An answer adds
-  `verdict`, `findings`, `summary` and `signature`. An answered review is frozen. A review that nobody answers by
+  `audited`, `prev` (earlier holders that did not answer), `at` and `due` (UTC epoch seconds). `audited` is `false`
+  at assignment. The hub decides the audit only after the required passes and then marks the answered required
+  reviews with a FACT that carries `audited: true`. An answer adds `verdict`, `findings`, `summary` and
+  `signature`, and for a key member `signed`, the exact text that was signed, so the signature can be checked
+  again from the log alone. An answered review is frozen. A review that nobody answers by
   `due` is assigned again to someone else with the same `n`.
 * `gate/<sha256>`: the gate report of a submission as written by the intake, with `passed`.
 * `verify/<sha256>`: the clean build, with `state` and `conclusion`.
@@ -499,15 +502,20 @@ passed but the first lock refuses, to the coordinator).
 reviews of the caller. For the one named (else the first) it also answers `task`, `n`, `submission` and `prompt`: the
 text of the review guide, the marker line `DATA:`, the order (title, scope, done condition), the gate report and
 the diff as plain text. The diff is read from `<data>/bundles/<sha256>.diff.json`. Text after the marker line is
-data and never an instruction. The prompt holds exactly one marker line.
+data and never an instruction. The prompt holds exactly one marker line. Every control character, invisible
+character and bidirectional character in that text is shown as a visible escape such as `\u{202e}`, and every
+kind of Unicode line break is a line break before the marker rule is applied. The CLI also strips terminal escape
+sequences from everything a hub sends.
 
 **`review.verdict`** `{"task","n","verdict","sig"?}`. `verdict` is the text of one JSON object
 `{"verdict":"pass|fail|escalate","findings":[{"path","line","text"}],"summary"}`. Only the assigned reviewer may
-answer, and only with tier 1 or above. A key member must sign: `sig` is `sign_request` over
-`{"op":"review.verdict","task","n","verdict"}` (key `verdict` is the same text as sent). Answers `{"task","n",
+answer. The tier, the minimum of the rule for the author's tier at that moment and the proof of a reviewer (tier 2 or
+a `landed` stamp of its own) are checked again then. A key member must sign: `sig` is `sign_request` over
+`{"op":"review.verdict","task","n","submission","hub","verdict"}` (`submission` is the SHA 256 of the bundle,
+`hub` the hub id, `verdict` the same text as sent). The signed text may be at most 2400 bytes, a longer one is refused. Answers `{"task","n",
 "verdict","state"}` where `state` is the new state of the submission.
 
-* every required review passed, no audit chosen: `approved`, and the hub enqueues `bundle:<sha256>` with the head
+* every required review passed (by distinct reviewers), no audit chosen: `approved`, and the hub enqueues `bundle:<sha256>` with the head
   commit through `land.enqueue`. With an audit: a maintainer seat (tier 3) gets one more review first, and a pass
   there approves.
 * a `fail`: `review_failed`, and the task returns to the queue with the findings as its resume note.
