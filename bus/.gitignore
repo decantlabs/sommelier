@@ -1,3 +1,5 @@
 /target
 /sommelier-data
 *.log
+# Test fixtures are data, keep them even when they look like logs.
+!tests/fixtures/**/*.log

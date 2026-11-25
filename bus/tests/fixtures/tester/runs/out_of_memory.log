@@ -1,0 +1,4 @@
+1.0 starting
+5.2 swapchain created
+14.0 E_OUTOFMEMORY while creating a heap
+15.0 UNHANDLED exception after that
