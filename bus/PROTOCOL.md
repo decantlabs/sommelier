@@ -423,3 +423,53 @@ at connect and an open connection is closed with the reason `key revoked`, the w
 
 **Only the hub writes `key/` facts.** A `send` of a FACT with a topic under `key/` is refused, and the KEY table
 is projected only from FACT messages of the hub, so a replay of the log gives the same table.
+
+## 11. Test network
+
+Testers need no model and no lease, so run orders are their own small table and never touch the task queue.
+The part is off until the owner sets `HubConfig.test.enabled`. While it is off every request below answers
+`the test network is switched off on this hub`. A request in the first moments of a hub, before its first tick,
+answers `the test network is starting: try again in a few seconds`.
+
+**Run orders.** The table RUN_ORDER (id, build, channel, profile, scenario, needs, wanted, state, created_at) is
+projected from FACTs of the hub with topic `runorder/<id>`. The body is one line of JSON:
+`{"v":1,"id","build","channel","profile","scenario","needs":{"os"?,"gpu"?},"wanted","state","created_at"}`.
+The first FACT of an id makes the row. Later FACTs change only the state: `open` to `settled` or `closed`,
+`settled` to `closed`. `closed` is final.
+
+**`test.order`** (orchestrator token): `{"op":"test.order","build","channel","profile","scenario","needs"?,"wanted"?}`.
+`build` is a commit of 7 to 64 lower case hex digits, `channel` is `main` or `candidate`, `needs.os` is `windows`
+or `linux`, `needs.gpu` is a card name that the normalised GPU of the tester must contain, `wanted` (1 to 50,
+default the quorum) is the number of independent owners that settle the order. Answers `{"id","msg"}`. The same
+order twice while it is open is refused. **`test.close`** (orchestrator token): `{"op":"test.close","id"}`.
+
+**`test.next`** (any member, tier 0 too): `{"op":"test.next","machine":<machine class>,"profiles":[ids]}`. The
+machine class is `{"os","os_build","gpu","gpu_memory_mb","driver","memory_mb"}`. The answer is
+`{"order":{"id","build","channel","profile","scenario","wanted"}}` for the best open order: its needs fit the
+machine, its profile is one of `profiles`, the member has not reported on it, and it has the fewest reports so far
+(then the oldest). Without a match the answer is `{"order":null,"reason":"nothing to test now"}` and the client
+exits with code 6. A member may hold `test.max_handed_per_member` handed orders that it has not answered. The
+answer says nothing about other testers.
+
+**`report.send`** (any member, tier 0 too): `{"op":"report.send","report":{...}}`. The report is the one of
+`report::types::Report`. A key member signs it: `sig` is the signature (base64url) of the member's current key
+over the canonical form of the report without `sig` (the compact JSON with sorted keys). A token member needs no
+signature. `report.member` must be the sender. The run order must exist and be open, and build, channel,
+profile and scenario must match it. One report per member and order. Then the report is checked (privacy,
+limits, a log excerpt of at most 2048 bytes by default) and the hub writes the FACT `report/<run>`. A message
+body of the hub is at most 4096 bytes, so a report must stay below that. Answers `{"run","id"}`.
+
+**Only the hub writes `report/` and `runorder/` facts.** The tables are projected only from FACT messages of the
+hub (role `hub`), so a FACT of a client in the log changes nothing, and a replay of the log gives the same
+tables. `/api/state` keeps `matrix` and gains `run_orders`, the open orders with the number of their reports.
+
+**The tick** settles an order when the reports of one machine class agree at `wanted` independent owners
+(distinct members in distinct address blocks), closes an order older than `test.order_ttl_secs`, and raises one
+alert MATRIX_REGRESSION with `data.last_good` and `data.first_bad` when a profile and machine class goes from
+`works` on an older build to `fails` on a newer one. The order of builds is the order of their first run orders.
+
+**`sommelier test`** runs one round: machine class, `test.next`, the check of the build with `gh attestation
+verify` (no flag turns it off), the check of the title against the profile, the scenario through the run script
+(`swarm/run-title.sh`), the report, its signature, `report.send`. A failed build or title check sends an
+inconclusive report for the order that was taken and runs nothing. `--loop` repeats while the pause file does
+not exist. See `sommelier test --help`.

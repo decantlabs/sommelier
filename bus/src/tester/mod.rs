@@ -10,12 +10,16 @@
 //! * [`run`]: [`run::build_report`], which turns a run folder and a log into a
 //!   [`crate::report::types::Report`]. The caller signs the report.
 //!
-//! Nothing here is wired into the hub or the CLI yet. The real system sits behind `Probe` and
-//! `CommandRunner`, everything else is a pure function.
+//! * [`round`]: one round of `sommelier test`, with every outside effect behind the [`round::Effects`]
+//!   trait.
+//!
+//! The real system sits behind `Probe`, `CommandRunner` and `Effects`, everything else is a pure
+//! function.
 
 pub mod cmd;
 pub mod machine;
 pub mod profile;
+pub mod round;
 pub mod run;
 pub mod verify;
 
