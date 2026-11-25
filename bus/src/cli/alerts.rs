@@ -20,6 +20,7 @@ use crate::msg::{Kind, Message, Role};
 use crate::role::{self, RoleCommand, RoleStore};
 use crate::store::{AlertTableRow, Store, query_alerts};
 use crate::time::{now_ms, rfc3339};
+use crate::{errln, out, outln};
 
 const ALERTS_USAGE: &str = "\
 usage:
@@ -364,7 +365,7 @@ fn load_local_alerts(
 
 fn print_alerts(alerts: &[AlertTableRow], now_sec: u64, json_out: bool) {
     if json_out {
-        println!(
+        outln!(
             "{}",
             json!({
                 "ok": true,
@@ -374,13 +375,20 @@ fn print_alerts(alerts: &[AlertTableRow], now_sec: u64, json_out: bool) {
             })
         );
     } else if alerts.is_empty() {
-        println!("no alerts");
+        outln!("no alerts");
     } else {
         for a in alerts {
             let age = now_sec.saturating_sub(a.opened_at);
-            println!(
+            outln!(
                 "{}/{} [{}] {} state={} age={}s count={} DATA: {}",
-                a.code, a.key, a.severity, a.to, a.state, age, a.count, a.text
+                a.code,
+                a.key,
+                a.severity,
+                a.to,
+                a.state,
+                age,
+                a.count,
+                a.text
             );
         }
     }
@@ -388,7 +396,7 @@ fn print_alerts(alerts: &[AlertTableRow], now_sec: u64, json_out: bool) {
 
 async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
     if raw.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{ALERTS_USAGE}");
+        out!("{ALERTS_USAGE}");
         return Ok(exit::code(exit::OK));
     }
     let a = match ParsedArgs::parse(
@@ -406,12 +414,12 @@ async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
     ) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return Ok(exit::code(exit::WRONG_USAGE));
         }
     };
     if !a.pos.is_empty() {
-        eprintln!("sommelier: unexpected positional arguments for `sommelier alerts`");
+        errln!("sommelier: unexpected positional arguments for `sommelier alerts`");
         return Ok(exit::code(exit::WRONG_USAGE));
     }
 
@@ -421,7 +429,7 @@ async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
         Some(v) => match v.parse::<u64>() {
             Ok(n) => Some(n),
             Err(_) => {
-                eprintln!("sommelier: --wait needs a number, got `{v}`");
+                errln!("sommelier: --wait needs a number, got `{v}`");
                 return Ok(exit::code(exit::WRONG_USAGE));
             }
         },
@@ -431,7 +439,7 @@ async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
         Some(v) => match v.parse::<usize>() {
             Ok(n) => n,
             Err(_) => {
-                eprintln!("sommelier: --limit needs a number, got `{v}`");
+                errln!("sommelier: --limit needs a number, got `{v}`");
                 return Ok(exit::code(exit::WRONG_USAGE));
             }
         },
@@ -465,7 +473,7 @@ async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
             }
             if Instant::now() >= deadline {
                 if json_out {
-                    println!(
+                    outln!(
                         "{}",
                         json!({
                             "ok": false,
@@ -475,7 +483,7 @@ async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
                         })
                     );
                 } else {
-                    println!("no open alerts");
+                    outln!("no open alerts");
                 }
                 return Ok(exit::code(exit::NO_WORK));
             }
@@ -492,7 +500,7 @@ async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
                 let now_sec = now_ms() / 1000;
                 if alerts.is_empty() && wait_opt.is_some() {
                     if json_out {
-                        println!(
+                        outln!(
                             "{}",
                             json!({
                                 "ok": false,
@@ -502,7 +510,7 @@ async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
                             })
                         );
                     } else {
-                        println!("no open alerts");
+                        outln!("no open alerts");
                     }
                     return Ok(exit::code(exit::NO_WORK));
                 }
@@ -537,7 +545,7 @@ async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
         }
         if Instant::now() >= deadline {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({
                         "ok": false,
@@ -547,7 +555,7 @@ async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
                     })
                 );
             } else {
-                println!("no open alerts");
+                outln!("no open alerts");
             }
             return Ok(exit::code(exit::NO_WORK));
         }
@@ -557,17 +565,17 @@ async fn cmd_alerts(raw: &[String]) -> Result<ExitCode, String> {
 
 async fn cmd_alert(raw: &[String]) -> Result<ExitCode, String> {
     if raw.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{ALERT_USAGE}");
+        out!("{ALERT_USAGE}");
         return Ok(exit::code(exit::OK));
     }
     let Some((sub, rest)) = raw.split_first() else {
-        eprintln!("{ALERT_USAGE}");
+        errln!("{ALERT_USAGE}");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     match sub.as_str() {
         "ack" => cmd_alert_ack(rest).await,
         other => {
-            eprintln!("sommelier: unknown subcommand `alert {other}`\n{ALERT_USAGE}");
+            errln!("sommelier: unknown subcommand `alert {other}`\n{ALERT_USAGE}");
             Ok(exit::code(exit::WRONG_USAGE))
         }
     }
@@ -575,7 +583,7 @@ async fn cmd_alert(raw: &[String]) -> Result<ExitCode, String> {
 
 fn output_refusal(reason: &str, json_out: bool) -> ExitCode {
     if json_out {
-        println!(
+        outln!(
             "{}",
             json!({
                 "ok": false,
@@ -584,7 +592,7 @@ fn output_refusal(reason: &str, json_out: bool) -> ExitCode {
             })
         );
     } else {
-        eprintln!("sommelier: {reason}");
+        errln!("sommelier: {reason}");
     }
     exit::code(exit::REFUSED)
 }
@@ -597,12 +605,12 @@ async fn cmd_alert_ack(raw: &[String]) -> Result<ExitCode, String> {
     ) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return Ok(exit::code(exit::WRONG_USAGE));
         }
     };
     let Some(key_target) = a.pos.first() else {
-        eprintln!("sommelier: usage: sommelier alert ack <KEY> [--epoch N] [--json]");
+        errln!("sommelier: usage: sommelier alert ack <KEY> [--epoch N] [--json]");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let json_out = a.flag("json");
@@ -610,7 +618,7 @@ async fn cmd_alert_ack(raw: &[String]) -> Result<ExitCode, String> {
         Some(v) => match v.parse::<u64>() {
             Ok(n) => Some(n),
             Err(_) => {
-                eprintln!("sommelier: --epoch needs a number, got `{v}`");
+                errln!("sommelier: --epoch needs a number, got `{v}`");
                 return Ok(exit::code(exit::WRONG_USAGE));
             }
         },
@@ -657,7 +665,7 @@ async fn cmd_alert_ack(raw: &[String]) -> Result<ExitCode, String> {
             let code = reply["code"].as_str().unwrap_or("");
             let key = reply["key"].as_str().unwrap_or(key_target);
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({
                         "ok": true,
@@ -670,7 +678,7 @@ async fn cmd_alert_ack(raw: &[String]) -> Result<ExitCode, String> {
                     })
                 );
             } else {
-                println!("ok alert {code}/{key} acked");
+                outln!("ok alert {code}/{key} acked");
             }
             Ok(exit::code(exit::OK))
         }
@@ -727,7 +735,7 @@ fn ack_local(
     updated.msg_id = next_id;
 
     if json_out {
-        println!(
+        outln!(
             "{}",
             json!({
                 "ok": true,
@@ -740,7 +748,7 @@ fn ack_local(
             })
         );
     } else {
-        println!("ok alert {}/{} acked", updated.code, updated.key);
+        outln!("ok alert {}/{} acked", updated.code, updated.key);
     }
     Ok(exit::code(exit::OK))
 }

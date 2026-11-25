@@ -13,6 +13,7 @@ pub mod hello;
 pub mod key;
 pub mod land;
 pub mod metric;
+pub mod plain;
 pub mod plan;
 pub mod promote;
 pub mod quota;

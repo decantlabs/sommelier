@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use crate::client::{self, Opts};
 use crate::exit;
 use crate::key::client as kc;
+use crate::{out, outln};
 
 const HELP: &str = "\
 usage: sommelier standing [MEMBER] [--json]
@@ -111,7 +112,7 @@ fn opts(a: &Args) -> Result<Opts, String> {
 /// Entry point of `sommelier standing`.
 pub async fn run(args: &[String]) -> Result<ExitCode, String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{HELP}");
+        out!("{HELP}");
         return Ok(exit::code(exit::OK));
     }
     let a = parse(args)?;
@@ -155,14 +156,14 @@ async fn maintainer(a: &Args, op: &str, mut body: Value) -> Result<ExitCode, Str
     body["rid"] = json!("cli-standing");
     let reply = client::request_ok(&opts, body).await?;
     if a.json {
-        println!("{reply}");
+        outln!("{reply}");
     } else {
-        println!("{op} done: {}", reply["ids"]);
+        outln!("{op} done: {}", reply["ids"]);
         if reply["revoked"] == json!(true) {
-            println!("the key is revoked");
+            outln!("the key is revoked");
         }
         if let Some(note) = reply["revoke_note"].as_str() {
-            println!("note: {note}");
+            outln!("note: {note}");
         }
     }
     Ok(exit::code(exit::OK))
@@ -225,11 +226,11 @@ async fn show(a: &Args, member: Option<&str>) -> Result<ExitCode, String> {
         .cloned()
         .unwrap_or_else(|| json!({"member": name, "counts": {}, "missing": []}));
     if a.json {
-        println!("{row}");
+        outln!("{row}");
         return Ok(exit::code(exit::OK));
     }
-    println!("member {name}");
-    println!("tier {}", tier_text(&row));
+    outln!("member {name}");
+    outln!("tier {}", tier_text(&row));
     let counts: Vec<String> = row["counts"]
         .as_object()
         .map(|m| {
@@ -239,7 +240,7 @@ async fn show(a: &Args, member: Option<&str>) -> Result<ExitCode, String> {
                 .collect()
         })
         .unwrap_or_default();
-    println!(
+    outln!(
         "stamps {}",
         if counts.is_empty() {
             "none".into()
@@ -248,17 +249,17 @@ async fn show(a: &Args, member: Option<&str>) -> Result<ExitCode, String> {
         }
     );
     for r in row["reasons"].as_array().into_iter().flatten() {
-        println!("because {}", r.as_str().unwrap_or_default());
+        outln!("because {}", r.as_str().unwrap_or_default());
     }
     for p in row["open_penalties"].as_array().into_iter().flatten() {
-        println!(
+        outln!(
             "open penalty stamp {} ({})",
             p["id"],
             p["kind"].as_str().unwrap_or_default()
         );
     }
     for m in row["missing"].as_array().into_iter().flatten() {
-        println!("missing {}", m.as_str().unwrap_or_default());
+        outln!("missing {}", m.as_str().unwrap_or_default());
     }
     Ok(exit::code(exit::OK))
 }

@@ -648,3 +648,27 @@ fn help_documents_all_v2_commands_and_subcommand_help() {
         );
     }
 }
+
+#[tokio::test]
+async fn tail_does_not_pass_invisible_direction_marks_of_a_message() {
+    // The client and the hub refuse control characters in a body, so the marks that remain are the
+    // invisible ones. The escape sequences are covered by the unit tests of `cli::plain`, which the
+    // same macros apply to every line.
+    let bus = start("escape").await;
+    let hostile = "evil\u{202e}txt\u{200b}!";
+    let child = sommelier(&bus, &["send", "CHAT", hostile]).spawn().unwrap();
+    let (ok, _, err) = finish(child, 10).await;
+    assert!(ok, "{err}");
+    let child = sommelier(&bus, &["tail", "--last", "1", "--once"])
+        .spawn()
+        .unwrap();
+    let (ok, out, err) = finish(child, 10).await;
+    assert!(ok, "{err}");
+    assert!(out.contains("eviltxt!"), "{out:?}");
+    let child = sommelier(&bus, &["log", "--last", "1"]).spawn().unwrap();
+    let (_, out, _) = finish(child, 10).await;
+    assert!(
+        !out.contains('\u{202e}') && !out.contains('\u{200b}'),
+        "{out:?}"
+    );
+}

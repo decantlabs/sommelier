@@ -15,6 +15,7 @@ use sommelier::msg::{Kind, Message, Role, format_line, parse_names};
 use sommelier::policy::{Change, Mode, Snapshot, Store};
 use sommelier::proto::{ConnectParams, FilterSpec};
 use sommelier::tokens::TokenFile;
+use sommelier::{errln, outln};
 
 const HELP: &str = "\
 sommelier: coordination bus for coding agents on several machines
@@ -247,9 +248,9 @@ fn filter_spec(a: &Args) -> Result<FilterSpec, String> {
 
 fn print_msg(m: &Message, raw: &str, json: bool) {
     if json {
-        println!("{raw}");
+        outln!("{raw}");
     } else {
-        println!("{}", format_line(m));
+        outln!("{}", format_line(m));
     }
 }
 
@@ -769,12 +770,12 @@ async fn cmd_status(raw: &[String]) -> Result<(), String> {
                 text: words.join(" "),
             };
             let v = c.call_ok(&row.request()).await?;
-            println!("#{}", v["id"]);
+            outln!("#{}", v["id"]);
         }
         ("clear", [agent]) => {
             let req = json!({"op": "send", "kind": "STATUS", "topic": format!("agent/{agent}"), "body": "cleared", "refs": ["state:done"]});
             let v = c.call_ok(&req).await?;
-            println!("#{}", v["id"]);
+            outln!("#{}", v["id"]);
         }
         ("list", []) => {
             let v = c
@@ -782,7 +783,7 @@ async fn cmd_status(raw: &[String]) -> Result<(), String> {
                 .await?;
             for r in v["agents"].as_array().into_iter().flatten() {
                 if a.flag("json") {
-                    println!("{r}");
+                    outln!("{r}");
                     continue;
                 }
                 let s = |k: &str| r[k].as_str().unwrap_or("").to_owned();
@@ -791,7 +792,7 @@ async fn cmd_status(raw: &[String]) -> Result<(), String> {
                 } else {
                     ""
                 };
-                println!(
+                outln!(
                     "{}/{} {}{stale} {} {} #{} {} : {}",
                     s("owner"),
                     s("agent"),
@@ -852,7 +853,7 @@ async fn cmd_status(raw: &[String]) -> Result<(), String> {
                     cleared += 1;
                 }
             }
-            println!("sync: {updated} updated, {cleared} cleared, {kept} unchanged");
+            outln!("sync: {updated} updated, {cleared} cleared, {kept} unchanged");
         }
         _ => return Err(USAGE.into()),
     }
@@ -864,7 +865,7 @@ fn dispatch_exit(result: Result<(), String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(reason) => {
-            eprintln!("sommelier: {reason}");
+            errln!("sommelier: {reason}");
             ExitCode::from(3)
         }
     }
@@ -942,12 +943,12 @@ async fn cmd_claims(raw: &[String]) -> Result<ExitCode, String> {
         claim["age_secs"] = json!(now.saturating_sub(since) / 1000);
     }
     if a.flag("json") {
-        println!("{reply}");
+        outln!("{reply}");
     } else if claims.is_empty() {
-        println!("no claims");
+        outln!("no claims");
     } else {
         for claim in claims {
-            println!(
+            outln!(
                 "{} {} since #{} {} age {} s, idle {} min",
                 claim["topic"].as_str().unwrap_or(""),
                 claim["holder"].as_str().unwrap_or(""),
@@ -966,7 +967,7 @@ async fn cmd_simple(op: &str, raw: &[String]) -> Result<(), String> {
     let opts = client_opts(&a)?;
     let v = client::request_ok(&opts, json!({"op": op})).await?;
     if a.flag("json") {
-        println!("{v}");
+        outln!("{v}");
         return Ok(());
     }
     let s = |v: &Value| v.as_str().unwrap_or("").to_owned();
@@ -976,14 +977,14 @@ async fn cmd_simple(op: &str, raw: &[String]) -> Result<(), String> {
                 .as_u64()
                 .map(|t| format!(" tier {t}"))
                 .unwrap_or_default();
-            println!(
+            outln!(
                 "{} {}{tier} (hub at #{})",
                 s(&v["name"]),
                 s(&v["role"]),
                 v["last_id"]
             );
         }
-        "heartbeat" => println!("ok, {} claims kept alive", v["claims"]),
+        "heartbeat" => outln!("ok, {} claims kept alive", v["claims"]),
         _ => {
             for c in v["connections"].as_array().into_iter().flatten() {
                 let mode = if c["live"].as_bool() == Some(true) {
@@ -991,7 +992,7 @@ async fn cmd_simple(op: &str, raw: &[String]) -> Result<(), String> {
                 } else {
                     "request"
                 };
-                println!(
+                outln!(
                     "{} {} {} since {}",
                     s(&c["name"]),
                     s(&c["role"]),
@@ -1310,7 +1311,7 @@ fn main() -> ExitCode {
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -1329,7 +1330,7 @@ fn main() -> ExitCode {
     match result {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("sommelier: error: {e}");
+            errln!("sommelier: error: {e}");
             ExitCode::FAILURE
         }
     }
