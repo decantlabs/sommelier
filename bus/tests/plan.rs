@@ -1336,8 +1336,8 @@ fn hooks_on_tick_projects_task_reaper_before_plan_enforce_avoids_duplicates() {
     let hub = Hub::open(HubConfig::new(dir.path())).unwrap();
 
     // Create a task and an open offer that expires at t = 100s.
-    hub.publish(
-        &owner_member,
+    as_hub(
+        &hub,
         Kind::TaskUpdate,
         "task/t-dup".into(),
         json!({
@@ -1354,8 +1354,8 @@ fn hooks_on_tick_projects_task_reaper_before_plan_enforce_avoids_duplicates() {
         vec![],
     )
     .unwrap();
-    hub.publish(
-        &owner_member,
+    as_hub(
+        &hub,
         Kind::Offer,
         "task/t-dup".into(),
         json!({
@@ -1611,8 +1611,8 @@ fn empty_decision_spam_is_suppressed_within_300s_and_emitted_on_change_action_or
     let apply_tick = |now_sec: u64| -> Vec<Message> {
         let msgs = sommelier::plan::on_tick(&hub, now_sec * 1000);
         for m in &msgs {
-            hub.publish(
-                &owner_member,
+            as_hub(
+                &hub,
                 m.kind,
                 m.topic.clone(),
                 m.body.clone(),
@@ -1661,8 +1661,8 @@ fn empty_decision_spam_is_suppressed_within_300s_and_emitted_on_change_action_or
     assert!(apply_tick(1310).is_empty());
 
     // 4. State change (new task added to state.db) emits immediately at t = 1320s even when actions are empty.
-    hub.publish(
-        &owner_member,
+    as_hub(
+        &hub,
         Kind::TaskUpdate,
         "task/t-state-change".into(),
         json!({
@@ -1715,4 +1715,27 @@ fn empty_decision_spam_is_suppressed_within_300s_and_emitted_on_change_action_or
         !m_act2.is_empty(),
         "non-empty actions must emit even within 300s"
     );
+}
+
+/// Writes one message as the hub itself. A client may not send the kinds and topics of the hub, so a test
+/// that needs such a line in the log does it as the hub does.
+fn as_hub(
+    hub: &sommelier::hub::Hub,
+    kind: Kind,
+    topic: String,
+    body: String,
+    refs: Vec<String>,
+    to: Vec<String>,
+) -> Result<u64, String> {
+    hub.append_hook_message(Message {
+        id: 0,
+        ts: String::new(),
+        from: "hub".into(),
+        role: Role::Hub,
+        kind,
+        topic,
+        body,
+        refs,
+        to,
+    })
 }

@@ -6,6 +6,7 @@
 pub mod elect;
 pub mod eligible;
 pub mod lease;
+pub mod writers;
 
 use std::fs;
 use std::io;

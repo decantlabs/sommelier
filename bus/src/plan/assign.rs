@@ -136,7 +136,10 @@ impl AssignContext {
                 .owner_total_parallel
                 .entry(cap.owner.clone())
                 .or_insert(0);
-            *total = total.saturating_add(cap.useful_parallel);
+            // One owner never counts for more than the total of one declaration, whatever the table holds.
+            *total = total
+                .saturating_add(cap.useful_parallel)
+                .min(crate::derive::capacity::MAX_TOTAL_SLOTS);
         }
 
         // Seed externally held locks.
@@ -533,10 +536,8 @@ pub fn evaluate_slot_for_task(
     }
 
     // 4. Trust & kind acceptance & clean room check.
-    let trust = state
-        .members
-        .get(&slot.owner)
-        .map_or("owner", |m| m.trust.as_str());
+    let trust = effective_trust(state, &slot.owner);
+    let trust = trust.as_str();
     if !trust_allows_kind(trust, &task.kind, policy) {
         return Err(reject(
             "trust",
@@ -686,6 +687,20 @@ pub fn member_tier(state: &PlanState, owner: &str) -> i64 {
         "tier0" => 0,
         _ => 2,
     })
+}
+
+/// The trust name that decides which kinds `owner` may claim. A key member always carries `tier0` in MEMBER, and
+/// `tier0` gets no kind. A key member at tier 1 or above is offered work like a token member of that standing,
+/// so it counts as a `guest`. Its tier is checked on its own by [`tier_block`].
+pub fn effective_trust(state: &PlanState, owner: &str) -> String {
+    let trust = state
+        .members
+        .get(owner)
+        .map_or("owner", |m| m.trust.as_str());
+    if trust == "tier0" && member_tier(state, owner) >= 1 {
+        return "guest".to_owned();
+    }
+    trust.to_owned()
 }
 
 /// The lowest tier that may take `task`: its `min_trust`, and 2 at least when it is guarded.

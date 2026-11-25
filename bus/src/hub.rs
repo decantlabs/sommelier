@@ -479,21 +479,14 @@ impl Hub {
 
     /// Validates, stamps, appends to `bus.jsonl`, projects into `store`, and broadcasts
     /// an `OFFER`, `TASK_UPDATE`, `ALERT`, or `FACT` message emitted by a module hook or tick.
-    pub(crate) fn append_hook_message(&self, mut msg: Message) -> Result<u64, String> {
+    pub fn append_hook_message(&self, mut msg: Message) -> Result<u64, String> {
         if !crate::hooks::is_hook_emittable_kind(msg.kind) {
             return Err(format!(
                 "hook may only emit OFFER, TASK_UPDATE, ALERT, or FACT (got {})",
                 msg.kind.as_str()
             ));
         }
-        if msg.kind == Kind::Fact
-            && msg.role != Role::Hub
-            && let Some(prefix) = hub_only_prefix(&msg.topic)
-        {
-            return Err(format!(
-                "FACT topics under {prefix} are written by the hub only"
-            ));
-        }
+        crate::role::writers::check_hook(&msg)?;
         check_kind_limit(&self.cfg.limits, msg.kind, &msg.body)?;
         validate(&self.cfg.limits, &msg.topic, &msg.body, &msg.refs)?;
         if !msg.to.is_empty() {
@@ -614,21 +607,11 @@ impl Hub {
         if kind == Kind::Policy {
             return Err("only the hub may send POLICY".into());
         }
-        match msg.role {
-            Role::Observer => return Err("observers are read only, this token cannot send".into()),
-            Role::Hub => return Err("the hub role cannot send".into()),
-            Role::Member if kind == Kind::Task => {
-                return Err("only an orchestrator may send TASK".into());
-            }
-            _ => {}
+        if msg.role == Role::Member && kind == Kind::Task {
+            return Err("only an orchestrator may send TASK".into());
         }
-        if kind == Kind::Fact
-            && let Some(prefix) = hub_only_prefix(&msg.topic)
-        {
-            return Err(format!(
-                "FACT topics under {prefix} are written by the hub only"
-            ));
-        }
+        // The one table of who may write what is in role/writers.rs.
+        crate::role::writers::check_client(&msg)?;
         check_kind_limit(&self.cfg.limits, kind, &msg.body)?;
         validate(&self.cfg.limits, &msg.topic, &msg.body, &msg.refs)?;
         if kind == Kind::Status {
@@ -1332,9 +1315,9 @@ impl Hub {
 
 /// The topic prefixes of the factory's FACTs. Only the hub itself writes them: a client FACT on one is
 /// refused in `publish_message`, and a hook may emit one only as the hub in `append_hook_message`. Each
-/// projection also checks the sender role, as the second guard. `land/bundle:` is the landing row of a
+/// projection also checks the sender role, as the second guard. The table of all writers is `role/writers.rs`. `land/bundle:` is the landing row of a
 /// submission, which reaches the queue through `land.enqueue` and its lock only.
-pub const HUB_ONLY_TOPICS: [&str; 10] = [
+pub const HUB_ONLY_TOPICS: [&str; 20] = [
     "key/",
     "submission/",
     "gate/",
@@ -1344,16 +1327,18 @@ pub const HUB_ONLY_TOPICS: [&str; 10] = [
     "runorder/",
     "stamp/",
     "tier/",
-    "land/bundle:",
+    "task/",
+    "land/",
+    "batch/",
+    "branch/",
+    "run/",
+    "role/",
+    "decision/",
+    "pause/",
+    "drill/",
+    "metric/",
+    "scheduler/",
 ];
-
-/// The prefix of [`HUB_ONLY_TOPICS`] that `topic` starts with.
-fn hub_only_prefix(topic: &str) -> Option<&'static str> {
-    HUB_ONLY_TOPICS
-        .iter()
-        .copied()
-        .find(|p| topic.starts_with(p))
-}
 
 /// What a member of `tier` asked for that it may not use, as the text for the refusal.
 fn tier_denied(req: &Request, tier: i64, tier0_coding: bool) -> Option<String> {
