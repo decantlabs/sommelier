@@ -294,21 +294,32 @@ fn load_hub_id(dir: &std::path::Path) -> io::Result<String> {
     Ok(id)
 }
 
-/// The secret that makes the nonces of this data folder, made at the first start. It is never
-/// logged and never sent. A hub that loses the file only invalidates the nonces in flight.
-fn load_nonce_secret(dir: &std::path::Path) -> io::Result<[u8; 32]> {
-    let path = dir.join("challenge_secret");
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        let text = text.trim();
-        if text.len() == 64
-            && let Some(raw) = (0..32)
-                .map(|i| u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok())
-                .collect::<Option<Vec<u8>>>()
-        {
-            let mut out = [0u8; 32];
-            out.copy_from_slice(&raw);
-            return Ok(out);
+/// Reads the 32 byte secret in `path` (64 hex characters). A missing file is made with a random secret,
+/// readable by the owner only on Unix. With `strict` a file that holds something else is an error, not
+/// replaced.
+fn load_secret_file(path: &std::path::Path, strict: bool) -> io::Result<[u8; 32]> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let text = text.trim();
+            if text.len() == 64
+                && let Some(raw) = (0..32)
+                    .map(|i| u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok())
+                    .collect::<Option<Vec<u8>>>()
+            {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&raw);
+                return Ok(out);
+            }
+            if strict {
+                return Err(io::Error::other(format!(
+                    "{} does not hold a secret of 64 hex characters, fix or remove it",
+                    path.display()
+                )));
+            }
         }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) if strict => return Err(e),
+        Err(_) => {}
     }
     let mut raw = [0u8; 32];
     getrandom::fill(&mut raw).map_err(|e| io::Error::other(e.to_string()))?;
@@ -322,14 +333,17 @@ fn load_nonce_secret(dir: &std::path::Path) -> io::Result<[u8; 32]> {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&path)?;
+        let mut f = opts.open(path)?;
         f.write_all(text.as_bytes())?;
-        f.write_all(
-            b"
-",
-        )?;
+        f.write_all(b"\n")?;
     }
     Ok(raw)
+}
+
+/// The secret that makes the nonces of this data folder, made at the first start. It is never
+/// logged and never sent. A hub that loses the file only invalidates the nonces in flight.
+fn load_nonce_secret(dir: &std::path::Path) -> io::Result<[u8; 32]> {
+    load_secret_file(&dir.join("challenge_secret"), false)
 }
 
 fn file_stamp(path: &std::path::Path) -> Option<(SystemTime, u64)> {
@@ -426,11 +440,14 @@ impl Hub {
         if let Some(ref mut s) = sqlite_store {
             let _ = s.catch_up_from_log(&log_path);
         }
-        let door = crate::door::Door::open(
-            cfg.door.clone(),
-            hmac_sha256(&nonce_secret, b"door-secret-v1"),
-            &cfg.data_dir,
-        );
+        // The key of the address blocks. By default it comes from `challenge_secret`, which sits beside
+        // door.db, so a copy of the data folder inverts every IPv4 block. `door.secret_file` keeps it
+        // elsewhere.
+        let door_secret = match &cfg.door.secret_file {
+            Some(path) => hmac_sha256(&load_secret_file(path, true)?, b"door-secret-v1"),
+            None => hmac_sha256(&nonce_secret, b"door-secret-v1"),
+        };
+        let door = crate::door::Door::open(cfg.door.clone(), door_secret, &cfg.data_dir);
         let hub = Arc::new(Hub {
             cfg,
             log_path,

@@ -615,3 +615,33 @@ async fn a_key_below_tier_2_gets_the_public_view_everywhere() {
     let _ = WsMsg::Close(None);
     let _ = ws.send(WsMsg::Close(None)).await;
 }
+
+#[tokio::test]
+async fn the_block_secret_can_live_in_a_file_outside_the_data_folder() {
+    let outside = tempfile::tempdir().unwrap();
+    let file = outside.path().join("door-secret");
+    let ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+    let f = file.clone();
+    let a = start_with_log(0, move |c| c.door.secret_file = Some(f)).await;
+    assert!(file.is_file(), "made at the first start");
+    let block_a = a.hub.door().block(ip);
+    // Another data folder with the same file gives the same blocks, another file gives other ones.
+    let f = file.clone();
+    let b = start_with_log(0, move |c| c.door.secret_file = Some(f)).await;
+    assert_eq!(b.hub.door().block(ip), block_a);
+    let other = outside.path().join("other-secret");
+    let o = other.clone();
+    let c = start_with_log(0, move |c| c.door.secret_file = Some(o)).await;
+    assert_ne!(c.hub.door().block(ip), block_a);
+    // The data folder holds no copy of that secret.
+    let secret = std::fs::read_to_string(&file).unwrap();
+    let challenge = std::fs::read_to_string(a.dir.path().join("challenge_secret")).unwrap();
+    assert_ne!(secret.trim(), challenge.trim());
+    // A file that holds something else stops the start, it is not replaced.
+    std::fs::write(&other, "not a secret").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = HubConfig::new(dir.path());
+    cfg.door.secret_file = Some(other.clone());
+    assert!(Hub::open(cfg).is_err());
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), "not a secret");
+}
