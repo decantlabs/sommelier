@@ -111,6 +111,19 @@ pub struct GateReport {
 
 /// Runs all thirteen gates in the order of the design and sums them up.
 pub fn check(diff: &ParsedDiff, order: &OrderView, rules: &GateRules) -> GateReport {
+    // A path that is too long or too deep stops the run before any other gate reads the paths.
+    let limits = gates::path_limits(diff);
+    if !limits.is_empty() {
+        return GateReport {
+            passed: false,
+            risk_after: order.risk,
+            findings: gates::limit(limits, rules.max_findings_per_gate),
+            capability_delta: Vec::new(),
+            test_delta: Vec::new(),
+            capability_counts: BTreeMap::new(),
+            test_counts: BTreeMap::new(),
+        };
+    }
     let capability_delta = gates::capability_hits(diff, rules);
     let test_delta = gates::test_hits(diff, rules);
     let runs: Vec<Vec<Finding>> = vec![
