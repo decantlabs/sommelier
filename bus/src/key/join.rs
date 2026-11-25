@@ -151,6 +151,12 @@ impl Challenges {
     }
 }
 
+/// The front door's limit of joins per address block, the one call of the join path into it.
+/// The refusal names the limit and the time to retry.
+pub fn limit_join(door: &crate::door::Door, block: &str, now_ms: u64) -> Result<(), String> {
+    door.charge_join(block, now_ms)
+}
+
 /// The fields of a join request, parsed.
 #[derive(Clone, Debug)]
 pub struct JoinRequest {

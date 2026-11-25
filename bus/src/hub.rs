@@ -37,6 +37,7 @@ use crate::msg::{
 };
 use crate::policy::{Snapshot as PolicySnapshot, Store as PolicyStore};
 use crate::proto::{ConnectParams, Request, parse_request, reply_err, reply_ok};
+use crate::review::hmac_sha256;
 use crate::roster::{self, Roster};
 use crate::time::{now_ms, rfc3339};
 use crate::tokens::{Member, TokenFile};
@@ -200,6 +201,7 @@ pub struct Hub {
     /// Random id of this hub, stored in the data folder at the first start.
     hub_id: String,
     challenges: Challenges,
+    door: crate::door::Door,
 }
 
 /// How a connection proved who it is. Opaque outside the hub.
@@ -211,6 +213,20 @@ enum Cred {
     Token(String),
     /// A key: the base64url public key it signed with. The member has tier 0.
     Key(String),
+    /// No credentials at all on a hub with public read: an anonymous observer.
+    Public,
+}
+
+/// The member an anonymous observer acts as. It is never registered as a connection.
+fn public_member() -> Member {
+    Member {
+        name: "public".into(),
+        role: Role::Observer,
+        salt: String::new(),
+        hash: String::new(),
+        created: String::new(),
+        token: None,
+    }
 }
 
 /// The hub id of the data folder, made at the first start.
@@ -367,6 +383,11 @@ impl Hub {
         if let Some(ref mut s) = sqlite_store {
             let _ = s.catch_up_from_log(&log_path);
         }
+        let door = crate::door::Door::open(
+            cfg.door.clone(),
+            hmac_sha256(&nonce_secret, b"door-secret-v1"),
+            &cfg.data_dir,
+        );
         let hub = Arc::new(Hub {
             cfg,
             log_path,
@@ -392,6 +413,7 @@ impl Hub {
             stop: tokio::sync::watch::channel(false).0,
             hub_id,
             challenges: Challenges::with_secret(nonce_secret),
+            door,
         });
         hub.reload_policy().map_err(io::Error::other)?;
         Ok(hub)
@@ -404,6 +426,11 @@ impl Hub {
 
     pub fn config(&self) -> &HubConfig {
         &self.cfg
+    }
+
+    /// The front door: limits and address blocks.
+    pub fn door(&self) -> &crate::door::Door {
+        &self.door
     }
 
     /// Id of the newest stored message, 0 when the log is empty.
@@ -673,7 +700,8 @@ impl Hub {
                 }
             }
         }
-        let tick_msgs = crate::hooks::on_tick(self, now);
+        let mut tick_msgs = crate::hooks::on_tick(self, now);
+        tick_msgs.extend(crate::door::on_tick(self, now));
         for msg in tick_msgs {
             if let Err(e) = self.append_hook_message(msg) {
                 eprintln!("sommelier: {e}");
@@ -828,19 +856,32 @@ impl Hub {
     fn authorize(
         &self,
         req: &HsRequest,
-    ) -> Result<(Member, ConnectParams, Credential), (StatusCode, String)> {
+        ip: std::net::IpAddr,
+    ) -> Result<(Member, ConnectParams, Credential, crate::door::Slot), (StatusCode, String)> {
         let mut params = ConnectParams::from_query(req.uri().query())
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         let header = req
             .headers()
             .get("authorization")
             .and_then(|v| v.to_str().ok());
+        let too_many = |e: String| (StatusCode::TOO_MANY_REQUESTS, e);
+        if header.is_none() && params.token.is_none() && self.door.public_read() {
+            // An anonymous observer: it sends nothing and fills the hub as tier 0 does.
+            self.door
+                .charge_read(&self.door.block(ip), now_ms())
+                .map_err(too_many)?;
+            let slot = self.door.admit("", true).map_err(too_many)?;
+            return Ok((public_member(), params, Credential(Cred::Public), slot));
+        }
         let (m, cred) = self.check_auth(header, params.token.clone())?;
+        let role = matches!(cred.0, Cred::Token(_)).then_some(m.role);
+        let low = self.cfg.door.max_conns > 0 && crate::door::is_low(self, &m.name, role);
+        let slot = self.door.admit(&m.name, low).map_err(too_many)?;
         // Kept for the periodic revocation check, the file only holds hashes.
         if let Cred::Token(t) = &cred.0 {
             params.token = Some(t.clone());
         }
-        Ok((m, params, cred))
+        Ok((m, params, cred, slot))
     }
 
     /// `GET /api/challenge`: a nonce that lives a short time and is used once.
@@ -863,7 +904,7 @@ impl Hub {
     }
 
     /// `POST /api/join`: registers a key. A known key gets its member id and nothing is written.
-    pub fn join(&self, raw: &[u8]) -> Result<Value, (u16, String)> {
+    pub fn join(&self, raw: &[u8], ip: Option<std::net::IpAddr>) -> Result<Value, (u16, String)> {
         let rules = self.cfg.join;
         if !rules.enabled {
             return Err((
@@ -872,6 +913,10 @@ impl Hub {
             ));
         }
         let bad = |e: String| (400u16, e);
+        let block = ip.map(|ip| self.door.block(ip));
+        if let Some(block) = &block {
+            crate::key::join::limit_join(&self.door, block, now_ms()).map_err(|e| (429u16, e))?;
+        }
         let body: Value = serde_json::from_slice(raw)
             .map_err(|e| bad(format!("the join body is not valid JSON: {e}")))?;
         let req = crate::key::join::parse_join(&body).map_err(bad)?;
@@ -893,6 +938,8 @@ impl Hub {
         let mut st = lock(&self.state);
         match st.keys.standing(&member, &req.public_b64) {
             Standing::Known(existing) => {
+                drop(st);
+                self.note_door(&member, block.as_deref());
                 return Ok(json!({"member": existing, "joined": false}));
             }
             Standing::Taken => {
@@ -916,7 +963,16 @@ impl Hub {
         };
         validate(&self.cfg.limits, &msg.topic, &msg.body, &msg.refs).map_err(bad)?;
         let id = self.append(&mut st, msg).map_err(|e| (500, e))?;
+        drop(st);
+        self.note_door(&member, block.as_deref());
         Ok(json!({"member": member, "joined": true, "id": id}))
+    }
+
+    /// Notes the address block of a member in the side store, without the state lock.
+    fn note_door(&self, member: &str, block: Option<&str>) {
+        if let Some(block) = block {
+            self.door.note_seen(member, block, now_ms());
+        }
     }
 
     /// Reads stored lines with `from <= id <= upto` that match, keeping the last `last`
@@ -1301,13 +1357,13 @@ pub async fn serve(hub: Arc<Hub>, listener: TcpListener) -> io::Result<()> {
             () = stopped(&mut stop) => return Ok(()),
         };
         match accepted {
-            Ok((stream, peer)) => {
+            Ok((stream, _)) => {
                 let h = hub.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle(h.clone(), stream).await
                         && h.cfg.verbose
                     {
-                        eprintln!("sommelier: {peer}: {e}");
+                        eprintln!("sommelier: connection: {e}");
                     }
                 });
             }
@@ -1337,9 +1393,17 @@ async fn handle(hub: Arc<Hub>, stream: TcpStream) -> Result<(), String> {
             .await
             .map_err(|e| format!("http: {e}"));
     }
+    let peer = stream.peer_addr().map_err(|e| format!("peer: {e}"))?.ip();
+    let ip = hub.door.client_ip(
+        peer,
+        hub.door
+            .trust_header()
+            .and_then(|h| head.headers.get(&h))
+            .map(String::as_str),
+    );
     let mut auth = None;
     let cb = |req: &HsRequest, resp: HsResponse| -> Result<HsResponse, ErrorResponse> {
-        match hub.authorize(req) {
+        match hub.authorize(req, ip) {
             Ok(a) => {
                 auth = Some(a);
                 Ok(resp)
@@ -1353,27 +1417,33 @@ async fn handle(hub: Arc<Hub>, stream: TcpStream) -> Result<(), String> {
     let ws = tokio_tungstenite::accept_hdr_async_with_config(stream, cb, Some(wscfg))
         .await
         .map_err(|e| format!("handshake refused: {e}"))?;
-    let Some((member, params, cred)) = auth else {
+    let Some((member, params, cred, _slot)) = auth else {
         return Err("no credentials".into());
     };
+    let public = matches!(cred.0, Cred::Public);
     let id = hub.next_conn.fetch_add(1, Ordering::Relaxed);
-    let since = rfc3339(now_ms());
-    lock(&hub.conns).insert(
-        id,
-        ConnInfo {
-            name: member.name.clone(),
-            role: member.role,
-            since,
-            live: params.live,
-        },
-    );
+    if !public {
+        let since = rfc3339(now_ms());
+        lock(&hub.conns).insert(
+            id,
+            ConnInfo {
+                name: member.name.clone(),
+                role: member.role,
+                since,
+                live: params.live,
+            },
+        );
+        hub.note_door(&member.name, Some(&hub.door.block(ip)));
+    }
     // Only subscribers are announced: one shot requests (`sommelier send`) would flood the console.
-    let announce = hub.cfg.verbose && params.live;
+    let announce = hub.cfg.verbose && params.live && !public;
     if announce {
         eprintln!("sommelier: + {} ({})", member.name, member.role.as_str());
     }
     let r = connection(&hub, ws, &member, params, &cred.0).await;
-    lock(&hub.conns).remove(&id);
+    if !public {
+        lock(&hub.conns).remove(&id);
+    }
     if announce {
         eprintln!("sommelier: - {}", member.name);
     }
@@ -1437,6 +1507,9 @@ async fn connection(
             .await?
         {
             last_sent = e.msg.id;
+            if matches!(cred, Cred::Public) && crate::door::hidden_from_public(&e.msg) {
+                continue;
+            }
             send(&mut sink, e.line.clone()).await?;
         }
     }
@@ -1445,6 +1518,7 @@ async fn connection(
     let mut check = tokio::time::interval(Duration::from_secs(2));
     check.tick().await;
     let mut stop = hub.stop.subscribe();
+    let public = matches!(cred, Cred::Public);
     loop {
         tokio::select! {
             () = stopped(&mut stop) => {
@@ -1453,6 +1527,10 @@ async fn connection(
             }
             incoming = stream.next() => match incoming {
                 None | Some(Err(_)) | Some(Ok(WsMsg::Close(_))) => return Ok(()),
+                Some(Ok(WsMsg::Text(_) | WsMsg::Binary(_))) if public => {
+                    let e = "this reader has no key or token and can only read, join with a key or ask the owner for a token to send";
+                    send(&mut sink, reply_err("?", &None, e)).await?;
+                }
                 Some(Ok(WsMsg::Text(t))) => {
                     let reply = hub.handle_text(member, tier0, t.as_str()).await;
                     send(&mut sink, reply).await?;
@@ -1465,7 +1543,9 @@ async fn connection(
             },
             ev = recv_live(&mut live) => match ev {
                 Ok(e) => {
-                    if e.msg.id > upto && filter.matches(&e.msg) {
+                    if e.msg.id > upto && filter.matches(&e.msg)
+                        && !(public && crate::door::hidden_from_public(&e.msg))
+                    {
                         last_sent = e.msg.id;
                         send(&mut sink, e.line.clone()).await?;
                     }
