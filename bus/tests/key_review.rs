@@ -485,9 +485,23 @@ async fn a_lost_rotation_reply_does_not_lose_the_identity() {
 
     // The client wrote member.key.next and sent the rotation. The hub wrote it, the reply was lost.
     let new = MemberKey::generate().unwrap();
-    let mut req =
-        sommelier::key::book::rotate_request(&old.member, &old.key.public_b64(), &new.public_b64());
+    let hub_id = kc::fetch_challenge(&hub.url).await.unwrap().hub_id;
+    let mut req = sommelier::key::book::rotate_request(
+        &hub_id,
+        &old.member,
+        &old.key.public_b64(),
+        &new.public_b64(),
+    );
     req["sig"] = json!(sommelier::key::crypto::sign_request(&old.key, &req));
+    // The client also notes which hub the rotation went to.
+    std::fs::write(
+        path.with_extension("key.next.hub"),
+        format!(
+            "{hub_id}
+"
+        ),
+    )
+    .unwrap();
     kc::save(
         &path.with_extension("key.next"),
         &kc::KeyFile {
@@ -498,7 +512,7 @@ async fn a_lost_rotation_reply_does_not_lose_the_identity() {
     .unwrap();
     client::request_ok(
         &kc::opts_for(&hub.url, dir.path()),
-        json!({"op": "key.rotate", "new_pub": new.public_b64(), "sig": req["sig"]}),
+        json!({"op": "key.rotate", "hub": hub_id, "new_pub": new.public_b64(), "sig": req["sig"]}),
     )
     .await
     .unwrap();
@@ -517,13 +531,59 @@ async fn a_failed_rotation_keeps_the_new_key_file() {
     let hub = start(true, None).await;
     let dir = tempfile::tempdir().unwrap();
     kc::join(&hub.url, dir.path(), None).await.unwrap();
+    // A hub that answers the challenge and then no request: the rotation was sent, the reply is lost.
+    let flaky = flaky_hub().await;
+    let err = kc::rotate(&flaky, dir.path()).await.unwrap_err();
+    assert!(err.contains("member.key.next"), "{err}");
+    assert!(kc::key_path(dir.path()).with_extension("key.next").exists());
+    // A hub that cannot be reached at all gets nothing: no new key is made.
     let dead = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         format!("ws://{}", l.local_addr().unwrap())
     };
-    let err = kc::rotate(&dead, dir.path()).await.unwrap_err();
-    assert!(err.contains("member.key.next"), "{err}");
-    assert!(kc::key_path(dir.path()).with_extension("key.next").exists());
+    std::fs::remove_file(kc::key_path(dir.path()).with_extension("key.next")).unwrap();
+    assert!(kc::rotate(&dead, dir.path()).await.is_err());
+    assert!(!kc::key_path(dir.path()).with_extension("key.next").exists());
+}
+
+/// A hub that answers the challenge and refuses everything else with a 500.
+async fn flaky_hub() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            let reply = if head.starts_with("GET /api/challenge") {
+                let body = json!({"hub_id": "b".repeat(32), "nonce": "n".repeat(8),
+                                  "expires": "x", "pow_bits": 0})
+                .to_string();
+                format!(
+                    "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{body}",
+                    body.len()
+                )
+            } else {
+                "HTTP/1.1 500 Internal Server Error
+Content-Length: 0
+Connection: close
+
+"
+                .to_owned()
+            };
+            let _ = sock.write_all(reply.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    url
 }
 
 // Finding 8: the client trusts the hub less.
@@ -607,4 +667,260 @@ fn a_member_id_of_another_key_is_not_joined_twice() {
         book.standing(&member_id(&b.public()), &b.public_b64()),
         Standing::New
     );
+}
+
+// The sign in names the address, the pins and the key requests name the hub (door 4, 10, testnet 5).
+
+/// A hub with `public_addresses` set.
+async fn start_listed(addresses: &[&str]) -> TestHub {
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = TokenFile::default();
+    let orch = t.add("orch", Role::Orchestrator).unwrap();
+    let alice = t.add("alice", Role::Member).unwrap();
+    t.save(&dir.path().join("tokens.json")).unwrap();
+    let mut cfg = HubConfig::new(dir.path());
+    cfg.verbose = false;
+    cfg.join = JoinRules {
+        enabled: true,
+        proof_of_work_bits: BITS,
+    };
+    cfg.door.public_addresses = addresses.iter().map(|a| (*a).to_owned()).collect();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        hub::run(cfg, listener).await.unwrap();
+    });
+    TestHub {
+        url,
+        dir,
+        orch,
+        alice,
+        task,
+    }
+}
+
+/// The header a client would make for a hub it reached at `address`, built by hand.
+async fn header_for_address(hub: &TestHub, key: &kc::KeyFile, address: &str) -> String {
+    let ch = kc::fetch_challenge(&hub.url).await.unwrap();
+    let sig = sommelier::key::crypto::b64(
+        &key.key
+            .sign(sommelier::key::crypto::auth_text(&ch.hub_id, address, &ch.nonce).as_bytes()),
+    );
+    format!(
+        "SommelierKey {}.{}.{}.{sig}",
+        key.member,
+        ch.nonce,
+        sommelier::key::crypto::b64(address.as_bytes())
+    )
+}
+
+#[tokio::test]
+async fn a_sign_in_made_for_another_address_is_refused() {
+    let hub = start_listed(&["hub.example.org"]).await;
+    let dir = tempfile::tempdir().unwrap();
+    kc::join(&hub.url, dir.path(), None).await.unwrap();
+    let key = kc::load(&kc::key_path(dir.path())).unwrap();
+
+    // A hostile hub at another address hands the real nonce and hub id on. The signature it gets from
+    // the member names the hostile address, so the real hub refuses it.
+    let relay = header_for_address(&hub, &key, "relay.example.test:443").await;
+    let (code, v) = get(&hub.url, "/api/state", Some(&relay)).await;
+    assert_eq!(code, 401, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a public address"),
+        "{v}"
+    );
+    // Not even an address that merely contains the name of the hub.
+    let lookalike = header_for_address(&hub, &key, "hub.example.org.evil.test:443").await;
+    assert_eq!(get(&hub.url, "/api/state", Some(&lookalike)).await.0, 401);
+    // The address the owner listed works, with the signature made for it.
+    let ok = header_for_address(&hub, &key, "hub.example.org:443").await;
+    assert_eq!(get(&hub.url, "/api/state", Some(&ok)).await.0, 200);
+    // So does the address of the own machine.
+    let own = header_for_address(&hub, &key, "127.0.0.1:9").await;
+    assert_eq!(get(&hub.url, "/api/state", Some(&own)).await.0, 200);
+    // A signature made for one address does not pass with another address written into the header.
+    let ch = kc::fetch_challenge(&hub.url).await.unwrap();
+    let sig = sommelier::key::crypto::b64(
+        &key.key.sign(
+            sommelier::key::crypto::auth_text(&ch.hub_id, "relay.example.test:443", &ch.nonce)
+                .as_bytes(),
+        ),
+    );
+    let forged = format!(
+        "SommelierKey {}.{}.{}.{sig}",
+        key.member,
+        ch.nonce,
+        sommelier::key::crypto::b64(b"hub.example.org:443")
+    );
+    let (code, v) = get(&hub.url, "/api/state", Some(&forged)).await;
+    assert_eq!(code, 401, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("signature"), "{v}");
+}
+
+#[tokio::test]
+async fn a_hub_without_public_addresses_takes_loopback_only_and_says_why() {
+    let hub = start_listed(&[]).await;
+    let dir = tempfile::tempdir().unwrap();
+    kc::join(&hub.url, dir.path(), None).await.unwrap();
+    let key = kc::load(&kc::key_path(dir.path())).unwrap();
+    let other = header_for_address(&hub, &key, "hub.example.org:443").await;
+    let (code, v) = get(&hub.url, "/api/state", Some(&other)).await;
+    assert_eq!(code, 401);
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("door.public_addresses"),
+        "{v}"
+    );
+    // The client signs the address of its URL: loopback works as before.
+    let opts = kc::opts_for(&hub.url, dir.path());
+    client::request_ok(&opts, json!({"op": "whoami"}))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_hub_id_pinned_under_another_address_is_refused() {
+    let hub = start(true, None).await;
+    let dir = tempfile::tempdir().unwrap();
+    kc::join(&hub.url, dir.path(), None).await.unwrap();
+    let opts = kc::opts_for(&hub.url, dir.path());
+    let hub_id = kc::fetch_challenge(&hub.url).await.unwrap().hub_id;
+    // The id of the real hub was pinned for the real address. A relay at a new address passes it on.
+    let pins = kc::pins_path(&kc::key_path(dir.path()));
+    std::fs::write(&pins, format!("wss://hub.example.test {hub_id}\n")).unwrap();
+    let err = kc::auth_header(&hub.url, &opts.token).await.unwrap_err();
+    assert!(err.fatal);
+    assert!(
+        err.msg.contains("wss://hub.example.test") && err.msg.contains("relay"),
+        "{}",
+        err.msg
+    );
+    // Nothing was added to the file.
+    assert_eq!(
+        std::fs::read_to_string(&pins).unwrap(),
+        format!("wss://hub.example.test {hub_id}\n")
+    );
+}
+
+#[tokio::test]
+async fn a_pin_file_that_cannot_be_read_is_not_replaced() {
+    let hub = start(true, None).await;
+    let dir = tempfile::tempdir().unwrap();
+    kc::join(&hub.url, dir.path(), None).await.unwrap();
+    let opts = kc::opts_for(&hub.url, dir.path());
+    let pins = kc::pins_path(&kc::key_path(dir.path()));
+    std::fs::write(
+        &pins,
+        format!("wss://other.example.test {}\n", "1".repeat(32)),
+    )
+    .unwrap();
+    // A read error other than "not found" (here: the path is a folder) stops the sign in.
+    let saved = std::fs::read(&pins).unwrap();
+    std::fs::remove_file(&pins).unwrap();
+    std::fs::create_dir(&pins).unwrap();
+    let err = kc::auth_header(&hub.url, &opts.token).await.unwrap_err();
+    assert!(err.fatal && err.msg.contains("cannot read"), "{}", err.msg);
+    assert!(pins.is_dir(), "the path was left alone");
+    std::fs::remove_dir(&pins).unwrap();
+    std::fs::write(&pins, &saved).unwrap();
+    kc::auth_header(&hub.url, &opts.token).await.unwrap();
+    let after = std::fs::read_to_string(&pins).unwrap();
+    assert!(
+        after.contains("wss://other.example.test"),
+        "the other pin is kept: {after}"
+    );
+}
+
+#[tokio::test]
+async fn a_new_key_is_promoted_only_at_the_hub_the_rotation_went_to() {
+    let dir = tempfile::tempdir().unwrap();
+    // A hub that is not the real one says yes to everything.
+    let hostile = fake_hub(0, "mabcdefghijklmnop").await;
+    let key_path = kc::key_path(dir.path());
+    let old = MemberKey::generate().unwrap();
+    let member = member_id(&old.public());
+    let file = kc::KeyFile {
+        member: member.clone(),
+        key: MemberKey::from_pkcs8(old.pkcs8()).unwrap(),
+    };
+    kc::save(&key_path, &file).unwrap();
+    let next = MemberKey::generate().unwrap();
+    kc::save(
+        &key_path.with_extension("key.next"),
+        &kc::KeyFile {
+            member: member.clone(),
+            key: next,
+        },
+    )
+    .unwrap();
+    let opts = kc::opts_for(&hostile, dir.path());
+    let before = std::fs::read(&key_path).unwrap();
+    // No record of where the rotation went: no promotion.
+    let _ = kc::auth_header(&hostile, &opts.token).await;
+    assert_eq!(std::fs::read(&key_path).unwrap(), before);
+    // The rotation went to a hub with another id: no promotion either.
+    std::fs::write(
+        key_path.with_extension("key.next.hub"),
+        format!("{}\n", "c".repeat(32)),
+    )
+    .unwrap();
+    let _ = kc::auth_header(&hostile, &opts.token).await;
+    assert_eq!(std::fs::read(&key_path).unwrap(), before);
+    assert!(key_path.with_extension("key.next").exists());
+    // At the hub the rotation went to, it is promoted.
+    std::fs::write(
+        key_path.with_extension("key.next.hub"),
+        format!("{}\n", "a".repeat(32)),
+    )
+    .unwrap();
+    let _ = kc::auth_header(&hostile, &opts.token).await;
+    assert_ne!(std::fs::read(&key_path).unwrap(), before);
+    assert!(!key_path.with_extension("key.next").exists());
+}
+
+#[tokio::test]
+async fn rotate_and_revoke_are_made_for_one_hub() {
+    let hub = start(true, None).await;
+    let dir = tempfile::tempdir().unwrap();
+    kc::join(&hub.url, dir.path(), None).await.unwrap();
+    let key = kc::load(&kc::key_path(dir.path())).unwrap();
+    let opts = kc::opts_for(&hub.url, dir.path());
+    let other_hub = "0".repeat(32);
+    let new = MemberKey::generate().unwrap();
+
+    // A rotation signed for another hub, replayed here: with the hub named and without.
+    let mut req = sommelier::key::book::rotate_request(
+        &other_hub,
+        &key.member,
+        &key.key.public_b64(),
+        &new.public_b64(),
+    );
+    req["sig"] = json!(sommelier::key::crypto::sign_request(&key.key, &req));
+    let named = json!({"op": "key.rotate", "hub": other_hub, "new_pub": new.public_b64(),
+                       "sig": req["sig"]});
+    assert!(refused(&opts, named).await.contains("another hub"));
+    let silent = json!({"op": "key.rotate", "new_pub": new.public_b64(), "sig": req["sig"]});
+    assert!(refused(&opts, silent).await.contains("signature"));
+
+    // The same for a revocation.
+    let mut req =
+        sommelier::key::book::revoke_request(&other_hub, &key.member, &key.key.public_b64(), "x");
+    req["sig"] = json!(sommelier::key::crypto::sign_request(&key.key, &req));
+    let silent = json!({"op": "key.revoke", "reason": "x", "sig": req["sig"]});
+    assert!(refused(&opts, silent).await.contains("signature"));
+    // Nothing changed: the key still works, and the client made for this hub goes through.
+    client::request_ok(&opts, json!({"op": "whoami"}))
+        .await
+        .unwrap();
+    kc::rotate(&hub.url, dir.path()).await.unwrap();
+    client::request_ok(&kc::opts_for(&hub.url, dir.path()), json!({"op": "whoami"}))
+        .await
+        .unwrap();
+    kc::revoke(&hub.url, dir.path(), "done").await.unwrap();
 }

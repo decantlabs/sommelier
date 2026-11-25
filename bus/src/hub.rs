@@ -847,7 +847,7 @@ impl Hub {
         Ok((m, token))
     }
 
-    /// Authenticates with the `Authorization` header: `SommelierKey <member>.<nonce>.<sig>` for
+    /// Authenticates with the `Authorization` header: `SommelierKey <member>.<nonce>.<address>.<sig>` for
     /// a key member, else a bearer token (or an observer token in the URL query).
     pub(crate) fn check_auth(
         &self,
@@ -874,13 +874,39 @@ impl Hub {
             ));
         }
         let mut parts = header.split('.');
-        let (Some(member), Some(nonce), Some(sig), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
+        let (Some(member), Some(nonce), Some(address), Some(sig), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
             return Err(unauthorized(
-                "malformed key credentials: send `Authorization: SommelierKey <member>.<nonce>.<signature>`",
+                "malformed key credentials: send `Authorization: SommelierKey <member>.<nonce>.<address>.<signature>`",
             ));
         };
+        // The address the client connected to is part of what it signs. A hub takes it only when it is
+        // one of its own public addresses, so a sign in made for a hostile hub is of no use here.
+        let address = crate::key::crypto::unb64(address)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .filter(|a| {
+                a.len() <= crate::key::addr::MAX_ADDRESS && a.bytes().all(|c| c.is_ascii_graphic())
+            })
+            .ok_or_else(|| unauthorized("the address in the key credentials is not valid"))?;
+        if !crate::key::addr::address_allowed(&address, &self.cfg.door.public_addresses) {
+            return Err(unauthorized(
+                &if self.cfg.door.public_addresses.is_empty() {
+                    format!(
+                        "this hub lists no public address (door.public_addresses), a key signs in only at a loopback address, not at {address}"
+                    )
+                } else {
+                    format!(
+                        "{address} is not a public address of this hub: this sign in was made for another address, it may have passed through a relay"
+                    )
+                },
+            ));
+        }
         let (public, joined_at) = {
             let st = lock(&self.state);
             match st.keys.lookup(member) {
@@ -911,7 +937,7 @@ impl Hub {
             .map_err(|_| unauthorized("the stored key is damaged"))?;
         crate::key::crypto::verify_bytes(
             &public_bytes,
-            crate::key::crypto::auth_text(&self.hub_id, nonce).as_bytes(),
+            crate::key::crypto::auth_text(&self.hub_id, &address, nonce).as_bytes(),
             &sig,
         )
         .map_err(|_| unauthorized("the key signature is wrong"))?;
@@ -1404,7 +1430,28 @@ impl Hub {
                     Err(e) => return reply_err(op, rid, &e),
                 }
             }
-            Request::ModuleOp { op: mod_op, body } => {
+            Request::ModuleOp {
+                op: mod_op,
+                mut body,
+            } => {
+                // A signed key request names the hub it is for. The hub puts its own id in, so a request
+                // signed for another hub fails the signature check, and says why when it names one.
+                if matches!(mod_op.as_str(), "key.rotate" | "key.revoke") {
+                    if body
+                        .get("hub")
+                        .and_then(Value::as_str)
+                        .is_some_and(|h| h != self.hub_id)
+                    {
+                        return reply_err(
+                            op,
+                            rid,
+                            "this request is signed for another hub, sign it for this one",
+                        );
+                    }
+                    if let Some(o) = body.as_object_mut() {
+                        o.insert("hub".into(), json!(self.hub_id));
+                    }
+                }
                 let now = now_ms();
                 let mut caller = crate::hooks::OpCaller::from_member(member);
                 if tier0 {

@@ -10,7 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 /// First line of the text a connection signs to prove its key.
-pub const AUTH_TAG: &str = "sommelier-auth-v1";
+pub const AUTH_TAG: &str = "sommelier-auth-v2";
 
 /// The key pair of one member. Debug never shows the private part.
 pub struct MemberKey {
@@ -133,9 +133,10 @@ pub fn verify_bytes(public: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String>
         .map_err(|_| "the signature does not match the key".to_string())
 }
 
-/// The text a connection signs: the tag, the hub id and the nonce, one per line.
-pub fn auth_text(hub_id: &str, nonce: &str) -> String {
-    format!("{AUTH_TAG}\n{hub_id}\n{nonce}")
+/// The text a connection signs: the tag, the hub id, the address the client connected to (`host:port`,
+/// see `addr::address_of_url`) and the nonce, one per line.
+pub fn auth_text(hub_id: &str, address: &str, nonce: &str) -> String {
+    format!("{AUTH_TAG}\n{hub_id}\n{address}\n{nonce}")
 }
 
 /// True when SHA 256 over the nonce text, the public key and the counter (8 bytes, big
