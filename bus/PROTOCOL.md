@@ -611,3 +611,59 @@ frame it sends is answered with an error. It is not listed in `who` or in the me
 What it gets is redacted: no FACT with a topic under `quota/` or `spend/`, on the socket and in `recent`, and in
 `/api/state` no `quota` object, and each entry of `pools` has only `pool`, `window`, `state` and `resets_at`
 (no percent values, no leases, no forecast). Members with a token or a key see what they saw before.
+
+## 15. Standing
+
+A key member earns its tier from facts. Everything below is off until the owner turns it on (`HubConfig.stamp.enabled`).
+With it off, every key member stays at tier 0 and the `stamp.*` requests answer `standing is switched off on this hub`.
+
+**Stamps.** The hub writes a FACT `stamp/<member>` for each rule and each request of a maintainer. The body is one
+line of JSON: `v` (1), `subject`, `issuer` (`hub` for a rule, the maintainer for a request), `kind`, `evidence`
+(`msg`, and `commit` and `ref` when there are any), `at` and, for a maintainer, `cause`. Each rule runs on the tick
+and writes one stamp per kind, subject and evidence, so a restart or a replay writes nothing twice.
+
+| Rule | Stamp | For |
+|------|-------|-----|
+| a submission reached `landed` | `landed` | its author |
+| a review answered `pass`, its submission landed at least `confirm_days` ago and was not reverted | `review_confirmed` | the reviewer |
+| a report agrees with a settled cell of the matrix, the blocks come from `door::block_of` | `run_agreed` | the tester |
+| a report contradicts a settled cell | `run_outlier` | the tester |
+| a submission was `rejected` after another one of the same task landed | `superseded` | its author, neutral |
+
+**Tiers.** On the tick the hub computes `stamp::tier` for every member that has a KEY row, from its key state, its
+join time and its stamps. A tier that differs from the TIER row is written as a FACT `tier/<member>` with `tier`
+(-1 means no tier at all), `reasons` and `at`. The reasons make every promotion and demotion readable in the log.
+A listed maintainer is tier 3. A grant by a maintainer counts as the linked account that tier 2 needs. Only the hub
+writes `stamp/` and `tier/` facts: a `send` of a FACT with such a topic is refused with `written by the hub only`.
+
+**What a tier may use**, decided in one place (`key::tier_allows`) and read at the time of each request, so a
+demotion works at once. Token members are untouched.
+
+| Tier | Requests and kinds |
+|------|--------------------|
+| none (-1) | `whoami` |
+| 0 | `whoami`, `heartbeat`, `log`, `roster`, `who`, `claims`, `key.rotate`, `key.revoke`, `submit.status`, `report.send`, `test.next`. With `tier0_coding` on also `task.next`, `task.work`, `task.checkpoint`, `task.done`, `task.stuck`, `task.decline`, `task.heartbeat` |
+| 1 | all of tier 0 with the order requests, the kinds `CHAT`, `FINDING`, `FIX`, `READY`, `STUCK` and `HELLO`, and `review.next`, `review.verdict` |
+| 2 and 3 | what a member with a token may do |
+
+`whoami` of a key member answers its current `tier`. A refusal is one line that names the tier, for example
+`tier 1 may not use the message kind CLAIM: ...`.
+
+**Requests of maintainers.** A maintainer is an orchestrator token, or a token name or member id in
+`stamp.maintainers`. Anyone else gets `... is for maintainers`. Each is a module op with a JSON body and answers `ids`
+(the messages written).
+
+| Op | Body | Writes |
+|----|------|--------|
+| `stamp.revert` | `submission`, `cause` | `reverted` for the author of a landed submission and `review_missed` for each reviewer that passed it |
+| `stamp.grant` | `member` | `grant_tier2`, the evidence is the KEY fact of the member |
+| `stamp.clear` | `member`, `stamp` (the id of a penalty stamp) | `cleared` that names the penalty |
+| `stamp.intent` | `member`, `cause`, optional `msg` | `intent`, then revokes the key through `key.revoke`. The answer has `revoked` |
+
+An open penalty drops the earned tier by one, `cleared` closes it. A grant alone does not give tier 2 and the facts
+of tier 2 alone do not either.
+
+**`/api/state`.** `standing` has one row per member with a stamp or a key. A hub with standing on adds to a key
+member's row `tier`, `reasons`, `missing` (what the next tier still needs) and `open_penalties` (`id` and `kind`,
+the ids that `stamp.clear` takes). `sommelier standing [member]` prints it, `standing grant|clear|revert|intent`
+sends the requests above.

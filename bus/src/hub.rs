@@ -433,6 +433,12 @@ impl Hub {
         &self.door
     }
 
+    /// The role of the token member `name`, `None` when no token has that name.
+    pub(crate) fn token_role(&self, name: &str) -> Option<Role> {
+        let tokens = self.tokens.read().unwrap_or_else(|e| e.into_inner());
+        tokens.get(name).map(|m| m.role)
+    }
+
     /// Id of the newest stored message, 0 when the log is empty.
     pub fn last_id(&self) -> u64 {
         lock(&self.state).next_id - 1
@@ -480,8 +486,11 @@ impl Hub {
                 msg.kind.as_str()
             ));
         }
-        if msg.kind == Kind::Fact && msg.topic.starts_with("key/") && msg.role != Role::Hub {
-            return Err("FACT topics under key/ are written by the hub only".into());
+        if msg.kind == Kind::Fact && hub_only_topic(&msg.topic) && msg.role != Role::Hub {
+            return Err(format!(
+                "FACT topics under {}/ are written by the hub only",
+                msg.topic.split('/').next().unwrap_or_default()
+            ));
         }
         check_kind_limit(&self.cfg.limits, msg.kind, &msg.body)?;
         validate(&self.cfg.limits, &msg.topic, &msg.body, &msg.refs)?;
@@ -611,8 +620,11 @@ impl Hub {
             }
             _ => {}
         }
-        if kind == Kind::Fact && msg.topic.starts_with("key/") {
-            return Err("FACT topics under key/ are written by the hub only".into());
+        if kind == Kind::Fact && hub_only_topic(&msg.topic) {
+            return Err(format!(
+                "FACT topics under {}/ are written by the hub only",
+                msg.topic.split('/').next().unwrap_or_default()
+            ));
         }
         check_kind_limit(&self.cfg.limits, kind, &msg.body)?;
         validate(&self.cfg.limits, &msg.topic, &msg.body, &msg.refs)?;
@@ -1118,8 +1130,13 @@ impl Hub {
             Ok(r) => r,
             Err(e) => return reply_err(op, rid, &e),
         };
-        if tier0 && let Some(what) = tier0_denied(&req) {
-            return reply_err(op, rid, &crate::key::tier0_refusal(&what));
+        // A key member is held to its tier, read now: a demotion takes effect at once.
+        let tier = tier0.then(|| crate::stamp::ops::request_tier(self, &member.name));
+        let coding = self.cfg.stamp.enabled && self.cfg.stamp.tier0_coding;
+        if let Some(tier) = tier
+            && let Some(what) = tier_denied(&req, tier, coding)
+        {
+            return reply_err(op, rid, &crate::key::tier_refusal(tier, &what, coding));
         }
         let mut out = Map::new();
         match req {
@@ -1167,8 +1184,8 @@ impl Hub {
             Request::Whoami => {
                 out.insert("name".into(), member.name.clone().into());
                 out.insert("role".into(), member.role.as_str().into());
-                if tier0 {
-                    out.insert("tier".into(), 0.into());
+                if let Some(tier) = tier {
+                    out.insert("tier".into(), tier.into());
                 }
                 out.insert("last_id".into(), self.last_id().into());
             }
@@ -1272,6 +1289,11 @@ impl Hub {
                 let mut caller = crate::hooks::OpCaller::from_member(member);
                 if tier0 {
                     caller.trust = crate::key::ops::TRUST;
+                } else if self.cfg.stamp.is_listed_maintainer(&member.name) {
+                    caller.trust = crate::stamp::ops::MAINTAINER_TRUST;
+                }
+                if mod_op.starts_with("stamp.") && !self.cfg.stamp.enabled {
+                    return reply_err(op, rid, "standing is switched off on this hub");
                 }
                 let mut store = match crate::store::Store::open(&self.cfg.data_dir) {
                     Ok(mut s) => {
@@ -1306,8 +1328,15 @@ impl Hub {
     }
 }
 
-/// What a tier 0 member asked for that it may not use, as the text for the refusal.
-fn tier0_denied(req: &Request) -> Option<String> {
+/// FACT topics that only the hub itself may write: the keys, the stamps and the tiers.
+fn hub_only_topic(topic: &str) -> bool {
+    ["key/", "stamp/", "tier/"]
+        .iter()
+        .any(|p| topic.starts_with(p))
+}
+
+/// What a member of `tier` asked for that it may not use, as the text for the refusal.
+fn tier_denied(req: &Request, tier: i64, tier0_coding: bool) -> Option<String> {
     let (name, shown) = match req {
         Request::Send { kind, .. } => (
             kind.as_str().to_owned(),
@@ -1322,7 +1351,7 @@ fn tier0_denied(req: &Request) -> Option<String> {
         Request::Log { .. } => ("log".into(), "log".into()),
         Request::ModuleOp { op, .. } => (op.clone(), format!("the op `{op}`")),
     };
-    (!crate::key::tier0_allows(&name)).then_some(shown)
+    (!crate::key::tier_allows(tier, &name, tier0_coding)).then_some(shown)
 }
 
 /// Opens the hub in `cfg.data_dir` and serves on `listener` until the process ends.
