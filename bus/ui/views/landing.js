@@ -25,32 +25,40 @@ export function renderLanding(state) {
   const batches = Array.isArray(state.batches) ? state.batches : [];
 
   if (!landing.length && !batches.length) {
-    return `<div class="panel landing-panel"><h2 class="panel-h">Landing</h2><p class="empty">Landing queue is empty.</p></div>`;
+    return `<section class="panel landing-panel"><h2 class="panel-h">Landing</h2><p class="empty">Landing queue is empty. Verified branches appear here while waiting to merge.</p></section>`;
   }
 
   const rows = landing.map((l) => {
     const shaShort = String(l.sha || "").slice(0, 10);
-    const batch = l.batch_id ? `batch ${esc(l.batch_id)}` : "-";
+    const batch = l.batch_id ? `batch ${esc(l.batch_id)}` : "unbatched";
     return `<li class="landing-row" data-ref="${esc(l.ref || "")}" data-state="${esc(l.state || "")}">
-      <span class="c-topic"><code>${esc(l.ref || "")}</code> <code>${esc(shaShort)}</code></span>
-      ${landBadge(l.state)}
-      <span class="chip"><span>${esc(l.priority || "normal")} · tries ${esc(l.tries || 0)}</span></span>
-      <span class="r-foot">${batch}</span>
+      <div class="cp-row-top">
+        <span class="c-topic"><code>${esc(l.ref || "")}</code> ${shaShort ? `<span class="chip"><span>${esc(shaShort)}</span></span>` : ""}</span>
+        ${landBadge(l.state)}
+      </div>
+      <div class="cp-row-meta">
+        <span class="chip"><span>${esc(l.priority || "normal")} · tries ${esc(l.tries || 0)}</span></span>
+        <span class="r-foot">${batch}</span>
+      </div>
     </li>`;
   }).join("");
 
   const batchRows = batches.map((b) => {
     const count = Array.isArray(b.members) ? b.members.length : 0;
     return `<li class="batch-row" data-batch="${esc(b.batch_id || "")}">
-      <span class="c-topic"><code>${esc(b.batch_id || "")}</code> (${count} branches)</span>
-      ${landBadge(b.result || "running")}
-      <span class="r-foot">verifications ${esc(b.verifications || 0)}</span>
+      <div class="cp-row-top">
+        <span class="c-topic"><code>${esc(b.batch_id || "")}</code> (${count} branches)</span>
+        ${landBadge(b.result || "running")}
+      </div>
+      <div class="cp-row-meta">
+        <span class="r-foot">verifications ${esc(b.verifications || 0)}</span>
+      </div>
     </li>`;
   }).join("");
 
-  return `<div class="panel landing-panel">
+  return `<section class="panel landing-panel">
     <h2 class="panel-h">Landing <span class="count">${landing.length}</span></h2>
     ${rows ? `<ul class="landing-list">${rows}</ul>` : ""}
-    ${batchRows ? `<h3 class="panel-sub">Batches (${batches.length})</h3><ul class="batches-list">${batchRows}</ul>` : ""}
-  </div>`;
+    ${batchRows ? `<h3 class="panel-sub">Batches <span class="count">${batches.length}</span></h3><ul class="batches-list">${batchRows}</ul>` : ""}
+  </section>`;
 }

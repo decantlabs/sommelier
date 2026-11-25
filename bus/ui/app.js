@@ -33,6 +33,9 @@
   const TOKEN_KEY = "sommelier.token";
   const HUB_KEY = "sommelier.hub";
   const FILTER_KEY = "sommelier.filters";
+  const TAB_KEY = "sommelier.tab";
+  const THEME_KEY = "sommelier.theme";
+  const VALID_TABS = new Set(["overview", "people", "tasks", "pools", "landing", "runs", "branches", "metrics", "ledger"]);
 
   const KINDS = ["READY", "LANDED", "FIX", "STUCK", "FINDING", "TASK", "ACCEPT", "DECLINE",
     "RUN_REQUEST", "RUN_RESULT", "CHAT", "HELLO", "CLAIM", "RELEASE", "STATUS", "POLICY", "ALERT", "FACT", "OFFER", "TASK_UPDATE"];
@@ -98,6 +101,8 @@
     feedEmpty: $("feed-empty"), kinds: $("kinds"), fFrom: $("f-from"), fTopic: $("f-topic"),
     fClear: $("f-clear"), pulse: $("pulse"), conn: $("conn"), connText: $("conn-text"),
     forget: $("forget"), bar: $("bar"), staleBanner: $("stale-banner"), views: $("views"),
+    triage: $("triage"), wsTabs: $("ws-tabs"), themeToggle: $("theme-toggle"),
+    board: $("board"),
   };
 
   let viewsModule = null;
@@ -551,9 +556,11 @@
   function render() {
     raf = 0;
     renderStaleBanner();
+    renderTriage();
     renderPeople();
     invokeRenderViews();
     renderLedger();
+    updateTabCounts();
     flushFeed();
     renderPulse();
   }
@@ -1247,7 +1254,20 @@
     clearTimeout(retryTimer);
     if (ws) { const w = ws; ws = null; try { w.close(); } catch (_) { /* closed */ } }
     S.failures = 0; backoff = 1000;
-    start();
+    if (el.wsTabs) {
+    el.wsTabs.addEventListener("click", (e) => {
+      const btn = e.target.closest(".ws-tab[data-tab]");
+      if (btn) setTab(btn.dataset.tab);
+    });
+  }
+  document.addEventListener("click", (e) => {
+    const jt = e.target.closest("[data-jump-tab]");
+    if (jt) setTab(jt.dataset.jumpTab);
+  });
+  setTab(load(TAB_KEY) || "overview");
+  initTheme();
+
+  start();
   });
   el.forget.addEventListener("click", forget);
 
@@ -1302,6 +1322,113 @@
     ag.classList.toggle("open", openAgents.has(k));
   }
 
+  function renderTriage() {
+    if (!el.triage) return;
+    const items = [];
+    for (const a of S.agents.values()) {
+      const m = S.members.get(a.owner);
+      if (!m) continue;
+      const st = agentState(a, m);
+      if (st === "blocked" || st === "suspect" || st === "starved") {
+        items.push({ cls: "", tab: "people", text: `${st}: ${a.owner}/${a.agent}` });
+      }
+    }
+    const snap = S.snapshot || {};
+    for (const p of Array.isArray(snap.pools) ? snap.pools : []) {
+      const pst = String(p.state || "").toLowerCase();
+      if (pst === "drain" || pst === "throttled" || pst === "closed") {
+        items.push({ cls: "is-warn", tab: "pools", text: `pool ${p.pool}: ${pst}` });
+      }
+    }
+    const checks = snap.regress && Array.isArray(snap.regress.checks) ? snap.regress.checks : [];
+    for (const c of checks) {
+      if (c && c.status === "regression_confirmed") {
+        items.push({ cls: "", tab: "metrics", text: `regression: ${c.metric || "metric"} (+${Number(c.worse_pct || 0).toFixed(1)}%)` });
+      }
+    }
+    if (!items.length) {
+      el.triage.hidden = true;
+      el.triage.innerHTML = "";
+      return;
+    }
+    el.triage.hidden = false;
+    el.triage.innerHTML = `<span class="triage-lbl"><svg class="ic" aria-hidden="true"><use href="#i-alert"/></svg>Triage</span>` +
+      items.slice(0, 6).map((it) => `<button type="button" class="triage-item ${it.cls}" data-jump-tab="${esc(it.tab)}">${esc(it.text)}</button>`).join("") +
+      (items.length > 6 ? `<span class="count">+${items.length - 6} more</span>` : "");
+  }
+
+  function updateTabCounts() {
+    if (!el.wsTabs) return;
+    const snap = S.snapshot || {};
+    const setBadge = (id, count, alert) => {
+      const n = $(id);
+      if (n) n.textContent = count > 0 ? String(count) : "";
+      const btn = n ? n.closest(".ws-tab") : null;
+      if (btn) btn.classList.toggle("has-alert", Boolean(alert));
+    };
+    let peopleAlert = false;
+    for (const a of S.agents.values()) {
+      const m = S.members.get(a.owner);
+      if (!m) continue;
+      const st = agentState(a, m);
+      if (st === "blocked" || st === "suspect" || st === "starved") { peopleAlert = true; break; }
+    }
+    const tasks = Array.isArray(snap.tasks) ? snap.tasks : [];
+    const pools = Array.isArray(snap.pools) ? snap.pools : [];
+    const landing = Array.isArray(snap.landing) ? snap.landing : [];
+    const runs = Array.isArray(snap.runs) ? snap.runs : [];
+    const branches = Array.isArray(snap.branches) ? snap.branches : [];
+    const checks = snap.regress && Array.isArray(snap.regress.checks) ? snap.regress.checks : [];
+    const claimsCount = [...S.claims.values()].filter((c) => !S.roster || S.roster.has(c.holder)).length;
+    const openRunsCount = [...S.asks.values()].filter((a) => a.msg.kind === "RUN_REQUEST" && isOpenRun(a)).length;
+
+    setBadge("tn-people", S.members.size, peopleAlert);
+    setBadge("tn-tasks", tasks.length, tasks.some((t) => t && t.state === "stuck"));
+    setBadge("tn-pools", pools.length, pools.some((p) => p && (p.state === "drain" || p.state === "throttled" || p.state === "closed")));
+    setBadge("tn-landing", landing.length, landing.some((l) => l && (l.state === "failed" || l.state === "conflict")));
+    setBadge("tn-runs", runs.length, runs.some((r) => r && (r.outcome === "fail" || r.outcome === "error")));
+    setBadge("tn-branches", branches.length, branches.some((b) => b && b.state === "orphan"));
+    setBadge("tn-metrics", checks.length, checks.some((c) => c && c.status === "regression_confirmed"));
+    setBadge("tn-ledger", claimsCount + openRunsCount, false);
+  }
+
+  function setTab(tab) {
+    const next = VALID_TABS.has(tab) ? tab : "overview";
+    if (el.board) el.board.dataset.tab = next;
+    store(TAB_KEY, next);
+    if (el.wsTabs) {
+      for (const btn of el.wsTabs.querySelectorAll(".ws-tab")) {
+        btn.setAttribute("aria-selected", String(btn.dataset.tab === next));
+      }
+    }
+  }
+
+  function applyTheme(mode) {
+    const m = mode === "dark" || mode === "light" ? mode : "system";
+    if (m === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = m;
+    if (!el.themeToggle) return;
+    const icon = m === "dark" ? "#i-moon" : m === "light" ? "#i-sun" : "#i-monitor";
+    const lbl = m === "dark" ? "Dark" : m === "light" ? "Light" : "Auto";
+    const use = el.themeToggle.querySelector("use");
+    const span = el.themeToggle.querySelector(".theme-lbl");
+    if (use) use.setAttribute("href", icon);
+    if (span) span.textContent = lbl;
+    el.themeToggle.title = `Theme: ${m}`;
+  }
+
+  function initTheme() {
+    applyTheme(load(THEME_KEY) || "system");
+    if (el.themeToggle) {
+      el.themeToggle.addEventListener("click", () => {
+        const cur = load(THEME_KEY) || "system";
+        const next = cur === "system" ? "dark" : cur === "dark" ? "light" : "system";
+        store(THEME_KEY, next === "system" ? null : next);
+        applyTheme(next);
+      });
+    }
+  }
+
   // Keep sticky offsets right when the bar wraps. On a phone only the section
   // switcher stays on screen: the name, numbers and connection row scroll away.
   const phone = matchMedia("(max-width: 640px)");
@@ -1322,6 +1449,19 @@
     }
   });
   setInterval(tick, 15000);
+
+  if (el.wsTabs) {
+    el.wsTabs.addEventListener("click", (e) => {
+      const btn = e.target.closest(".ws-tab[data-tab]");
+      if (btn) setTab(btn.dataset.tab);
+    });
+  }
+  document.addEventListener("click", (e) => {
+    const jt = e.target.closest("[data-jump-tab]");
+    if (jt) setTab(jt.dataset.jumpTab);
+  });
+  setTab(load(TAB_KEY) || "overview");
+  initTheme();
 
   start();
 })();

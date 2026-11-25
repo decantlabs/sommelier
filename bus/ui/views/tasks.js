@@ -26,7 +26,7 @@ export function renderTasks(state) {
   const offers = Array.isArray(state.offers) ? state.offers : [];
 
   if (!tasks.length && !leases.length && !offers.length) {
-    return `<div class="panel tasks-panel"><h2 class="panel-h">Tasks</h2><p class="empty">No tasks in queue.</p></div>`;
+    return `<section class="panel tasks-panel"><h2 class="panel-h">Tasks</h2><p class="empty">No tasks in queue. Tasks enter here when work orders are queued.</p></section>`;
   }
 
   const activeLeaseByTask = new Map();
@@ -38,28 +38,32 @@ export function renderTasks(state) {
 
   const rows = tasks.map((t) => {
     const lease = activeLeaseByTask.get(t.id);
-    const holder = lease ? `${esc(lease.owner)}/${esc(lease.worker || "-")}${lease.state === "suspect" ? " (suspect)" : ""}` : "-";
+    const holder = lease ? `${esc(lease.owner)}/${esc(lease.worker || "-")}${lease.state === "suspect" ? " (suspect)" : ""}` : "unleased";
     const score = t.score != null ? `score ${esc(t.score)}` : "";
     const cp = t.latest_checkpoint && t.latest_checkpoint.note
       ? `<div class="task-cp">cp #${esc(t.latest_checkpoint.seq)}: ${esc(t.latest_checkpoint.note)}</div>`
       : "";
     return `<li class="task-row" data-task="${esc(t.id)}" data-state="${esc(t.state)}">
-      <span class="c-topic"><code>${esc(t.id)}</code> ${esc(t.title || "")}</span>
-      ${stateBadge(t.state)}
-      <span class="chip"><span>${esc(t.kind || "fix")} · ${esc(t.priority || "normal")}</span></span>
-      <span class="t-meta">attempt ${esc(t.attempt || 1)} · ${score} · holder ${holder}</span>
+      <div class="cp-row-top">
+        <span class="c-topic"><code>${esc(t.id)}</code> ${esc(t.title || "")}</span>
+        ${stateBadge(t.state)}
+      </div>
+      <div class="cp-row-meta">
+        <span class="chip"><span>${esc(t.kind || "fix")} · ${esc(t.priority || "normal")}</span></span>
+        <span class="t-meta">attempt ${esc(t.attempt || 1)}${score ? " · " + score : ""} · ${holder}</span>
+      </div>
       ${cp}
     </li>`;
   }).join("");
 
   const openOffers = offers.filter((o) => o && o.state === "open");
   const offerRows = openOffers.map((o) => (
-    `<li class="offer-row"><code>${esc(o.task_id)}</code> → ${esc(o.to_owner)} (${esc(o.class || "-")})</li>`
+    `<li class="offer-row"><code>${esc(o.task_id)}</code> → <strong>${esc(o.to_owner)}</strong> <span class="chip"><span>${esc(o.class || "-")}</span></span></li>`
   )).join("");
 
-  return `<div class="panel tasks-panel">
+  return `<section class="panel tasks-panel">
     <h2 class="panel-h">Tasks <span class="count">${tasks.length}</span></h2>
     <ul class="tasks-list">${rows}</ul>
-    ${offerRows ? `<h3 class="panel-sub">Open offers (${openOffers.length})</h3><ul class="offers-list">${offerRows}</ul>` : ""}
-  </div>`;
+    ${offerRows ? `<h3 class="panel-sub">Open offers <span class="count">${openOffers.length}</span></h3><ul class="offers-list">${offerRows}</ul>` : ""}
+  </section>`;
 }
