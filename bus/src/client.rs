@@ -230,6 +230,11 @@ impl Conn {
         Ok(Conn { ws })
     }
 
+    /// Wraps a connection that the caller opened itself, for example with an extra header in a test.
+    pub fn from_ws(ws: Ws) -> Conn {
+        Conn { ws }
+    }
+
     /// Sends one request and waits up to 20 s for its reply.
     pub async fn call(&mut self, req: &Value) -> Result<Value, String> {
         self.ws

@@ -794,6 +794,10 @@ section differs, this section holds, and the earlier section was corrected where
 * Every change of a tier is a hub FACT `tier/<member>` and a row of the TIER table. A member without a row is tier 0
   with a key, tier 2 with a token and tier 3 as orchestrator.
 * Nothing writes a linked account yet, so tier 2 today rests on the maintainer's grant alone.
+* `task.work` checks the tier of the caller against the `min_trust` of the order. Before, only the scheduler did, so a
+  tier 0 member could lease an order of any kind by asking for it directly.
+* The stamp tick takes the address blocks from the same place as the matrix of the test network (the test hook first,
+  then the front door), so the two parts cannot disagree on who sits in which block.
 * A key member has no machine, no capacity and no role row while its tier is below 1. At tier 1 and above it has them
   like a token member (its next HELLO is kept).
 

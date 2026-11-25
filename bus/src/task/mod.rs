@@ -703,6 +703,20 @@ pub fn on_op(
                     existing.owner, existing.attempt
                 ));
             }
+            // The order says the lowest tier that may lease it. A token member is tier 2, the orchestrator
+            // tier 3, a key member the tier of its TIER row.
+            let role = (ctx.caller.trust != crate::key::ops::TRUST).then_some(ctx.caller.role);
+            let tier = crate::stamp::tier_table::tier_from_table(
+                ctx.store.connection(),
+                &ctx.caller.name,
+                role,
+            );
+            if tier < i64::from(task.min_trust) {
+                return Err(format!(
+                    "task `{id}` needs tier {} or above, you are tier {tier}",
+                    task.min_trust
+                ));
+            }
             let prev = TaskState::parse(&task.state)
                 .ok_or_else(|| format!("invalid state `{}`", task.state))?;
             if !matches!(prev, TaskState::Ready | TaskState::Offered) {

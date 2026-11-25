@@ -436,7 +436,8 @@ pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     let blocks: BTreeMap<String, Option<String>> = reporters
         .into_iter()
         .map(|m| {
-            let b = crate::door::block_of(hub, &m);
+            // The same blocks as the matrix of the test network sees, the test hook first.
+            let b = crate::report::ops::block_for(hub, &hub.config().test, &m);
             (m, b)
         })
         .collect();

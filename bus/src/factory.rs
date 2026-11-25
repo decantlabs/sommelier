@@ -203,10 +203,11 @@ fn tier_rules(rules: &FactoryRules) -> TierRules {
     }
 }
 
-/// The review rule from the policy rule named `default`, or the defaults of the picker.
-fn review_rule(rules: &FactoryRules) -> (ReviewRule, f64) {
-    let mut rule = ReviewRule::default();
-    let mut audit = crate::policy::ReviewRules::default().audit_share;
+/// The review rule and audit share from the policy rule named `default`. A policy without review rules
+/// leaves both as the review settings have them (the picker defaults, no audit).
+fn review_rule(rules: &FactoryRules, base: &crate::review::ops::ReviewConfig) -> (ReviewRule, f64) {
+    let mut rule = base.rule.clone();
+    let mut audit = base.audit_share;
     if let Some(p) = rules.review.get("default") {
         let n = |v: u64| usize::try_from(v).unwrap_or(1).max(1);
         rule.reviewers[0] = n(p.tier0_author.reviewers);
@@ -279,7 +280,7 @@ pub fn apply(
     out.verify = v.enabled;
 
     // review
-    let (rule, audit) = review_rule(rules);
+    let (rule, audit) = review_rule(rules, &cfg.review);
     cfg.review.enabled = file.review.enabled;
     cfg.review.rule = rule;
     cfg.review.audit_share = audit;

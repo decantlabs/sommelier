@@ -390,7 +390,7 @@ fn send(
 }
 
 /// The opaque address block of a member: the test table first, then the front door.
-fn block_for(hub: &Hub, cfg: &TestConfig, member: &str) -> Option<String> {
+pub(crate) fn block_for(hub: &Hub, cfg: &TestConfig, member: &str) -> Option<String> {
     if let Some(b) = lock(&cfg.blocks).get(member) {
         return Some(b.clone());
     }
