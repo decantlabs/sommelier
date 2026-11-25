@@ -1,0 +1,87 @@
+# release: on a push to the default branch, build the release binaries, create a provenance attestation
+# and attach both to a release. Testers run only builds that carry this attestation.
+#
+# Copy this file to .github/workflows/release.yml of the project. .github/** must be a hold path.
+# This is the only template with write permissions, and only for the jobs that publish. It holds no
+# secret of its own: it uses the token GitHub gives each run.
+#
+# Never add to this file: a secret, or the pull request target trigger.
+
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4 # PROJECT: pin to a full commit SHA
+        with:
+          persist-credentials: false
+
+      - name: Name the release
+        id: meta
+        run: |
+          set -euo pipefail
+          echo "tag=main-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          cargo build --release --locked # PROJECT: your release build
+          mkdir -p dist
+          cp target/release/PROJECT_BINARY dist/ # PROJECT: the binaries to ship
+          (cd dist && sha256sum * > SHA256SUMS)
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4 # PROJECT: pin to a full commit SHA
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write      # create the release and attach the files
+      id-token: write      # the signing identity of the attestation
+      attestations: write  # store the attestation
+    steps:
+      - name: Download build output
+        uses: actions/download-artifact@v4 # PROJECT: pin to a full commit SHA
+        with:
+          name: dist
+          path: dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2 # PROJECT: pin to a full commit SHA, check the current major
+        with:
+          subject-path: 'dist/*'
+
+      - name: Create the release and attach the files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "Build of $GITHUB_SHA. Verify with: gh attestation verify <file> --repo $GITHUB_REPOSITORY"

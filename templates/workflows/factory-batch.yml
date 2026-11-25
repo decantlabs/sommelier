@@ -1,0 +1,80 @@
+# factory-batch: the second lock. The lander pushes a batch as landing/<batch>. A ruleset on the default
+# branch requires the check named "factory-batch" on that exact commit, so a hub that was taken over still
+# cannot move main.
+#
+# Copy this file to .github/workflows/factory-batch.yml of the project. .github/** must be a hold path.
+# It holds no secret and asks for read access to the repository only.
+#
+# Never add to this file: a secret, the pull request target trigger, or a write permission.
+
+name: factory-batch
+run-name: batch ${{ github.ref_name }}
+
+on:
+  push:
+    branches:
+      - 'landing/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: factory-batch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  batch:
+    # The job name is the check name the ruleset requires. Keep it equal to the ruleset.
+    name: factory-batch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # PROJECT: a path pattern (extended regex) of paths that make a change guarded, as a second
+      # opinion that does not depend on the marker the lander writes. It must list at least
+      # .github/ and the manifests and lock files of the project.
+      GUARDED_PATHS: '^(\.github/|Cargo\.lock$|(.*/)?Cargo\.toml$)'
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Check out the batch
+        uses: actions/checkout@v4 # PROJECT: pin to a full commit SHA
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # FAIL CLOSED. A guarded entry needs a maintainer signature over the commit, checked against the
+      # maintainer keys listed on the default branch. That check is NOT BUILT YET. Until it is, this
+      # step fails whenever a guarded marker is present, either as the trailer
+      # "Factory-Guarded:" in a commit message of the batch or as a changed path that matches
+      # GUARDED_PATHS. The path rule exists because a taken over hub could leave the trailer out.
+      # When the signature check exists, replace this step with it and keep the failure for every
+      # case the check cannot verify.
+      - name: Guarded entries need a maintainer signature
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          RANGE="origin/${DEFAULT_BRANCH}..HEAD"
+          guarded=0
+          if git log --format='%B' "$RANGE" | grep -Eqi '^Factory-Guarded:'; then
+            echo "guarded marker found in a commit message"
+            guarded=1
+          fi
+          if git diff --name-only "$RANGE" | grep -Eq "$GUARDED_PATHS"; then
+            echo "a changed path matches GUARDED_PATHS"
+            guarded=1
+          fi
+          if [ "$guarded" -eq 1 ]; then
+            echo "FAIL: the maintainer signature check is not built yet. A guarded entry cannot pass."
+            exit 1
+          fi
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+      # PROJECT: the full workspace checks, once per batch.
+      - name: Format
+        run: cargo fmt --all --check # PROJECT
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings # PROJECT
+
+      - name: Tests
+        run: cargo test --workspace --locked # PROJECT
