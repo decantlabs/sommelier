@@ -6,6 +6,7 @@
 
 pub mod ops;
 mod tier;
+pub mod tier_table;
 
 use std::collections::BTreeMap;
 
