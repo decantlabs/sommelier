@@ -156,6 +156,8 @@ fn reason(status: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
         _ => "Error",
     }
 }
@@ -202,7 +204,30 @@ fn extract_token(head: &Head) -> (Option<String>, Option<String>) {
     (header, query_token)
 }
 
+fn key_reply(r: Result<serde_json::Value, (u16, String)>) -> Reply {
+    match r {
+        Ok(v) => Reply::json(200, &v),
+        Err((code, msg)) => Reply::json(code, &serde_json::json!({ "ok": false, "error": msg })),
+    }
+}
+
 async fn route(hub: &Arc<Hub>, head: &Head, body: &[u8]) -> Reply {
+    // Two doors without a token: a nonce, and the join of a new key (see PROTOCOL.md, Key members).
+    match (head.path.as_str(), head.method.as_str()) {
+        ("/api/challenge", "GET" | "HEAD") => return key_reply(hub.challenge()),
+        ("/api/join", "POST") => return key_reply(hub.join(body)),
+        ("/api/challenge" | "/api/join", _) => {
+            let allow = if head.path == "/api/join" {
+                "POST"
+            } else {
+                "GET, HEAD"
+            };
+            let mut r = Reply::text(405, &format!("only {allow}"));
+            r.extra.push(("Allow", allow.into()));
+            return r;
+        }
+        _ => {}
+    }
     if head.path == "/api/brief"
         || head.path.starts_with("/api/brief/")
         || (head.path.starts_with("/api/")
@@ -241,7 +266,14 @@ async fn route(hub: &Arc<Hub>, head: &Head, body: &[u8]) -> Reply {
     }
     if matches!(head.path.as_str(), "/api/state" | "/api/policy") {
         let (header, query_token) = extract_token(head);
-        return match hub.check_token(header, query_token) {
+        // Key members read the state too, the policy stays with tokens.
+        let checked = match head.headers.get("authorization") {
+            Some(raw) if head.path == "/api/state" && raw.starts_with("SommelierKey ") => {
+                hub.check_auth(Some(raw), None).map(|(m, _)| m)
+            }
+            _ => hub.check_token(header, query_token).map(|(m, _)| m),
+        };
+        return match checked {
             Ok(_) if head.path == "/api/policy" => Reply::json(200, &hub.policy_response()),
             Ok(_) => Reply::json(200, &hub.snapshot().await),
             Err((code, msg)) => Reply::json(code.as_u16(), &serde_json::json!({ "error": msg })),
