@@ -179,6 +179,49 @@ impl State {
     }
 }
 
+/// Lines of the log that one replay holds in memory at once, and the most `last` may ask for.
+const REPLAY_PAGE: usize = 1000;
+
+/// How long one frame may take to be taken by a client before the connection is dropped.
+const SEND_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A reader of the log that gives matching lines a page at a time, so that a replay holds one page and
+/// reads the next one only after the last was sent.
+struct LogCursor {
+    lines: Option<std::io::Lines<BufReader<File>>>,
+    from: u64,
+    upto: u64,
+    filter: Filter,
+}
+
+impl LogCursor {
+    /// The next at most `max` matching entries, empty at the end.
+    fn page(&mut self, max: usize) -> io::Result<Vec<Arc<Entry>>> {
+        let mut out = Vec::new();
+        let Some(lines) = self.lines.as_mut() else {
+            return Ok(out);
+        };
+        for line in lines.by_ref() {
+            let line = line?;
+            let Ok(msg) = serde_json::from_str::<Message>(&line) else {
+                continue;
+            };
+            if msg.id > self.upto {
+                self.lines = None;
+                break;
+            }
+            if msg.id < self.from || !self.filter.matches(&msg) {
+                continue;
+            }
+            out.push(Arc::new(Entry { msg, line }));
+            if out.len() >= max {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
 struct ConnInfo {
     name: String,
     role: Role,
@@ -836,6 +879,12 @@ impl Hub {
                 }
             }
         };
+        // A member with no tier at all is refused like a revoked key (docs/factory.md section 5).
+        if crate::stamp::ops::request_tier(self, member) < 0 {
+            return Err(unauthorized(
+                "this key has no standing: it was revoked or a finding of bad intent took its tier",
+            ));
+        }
         self.challenges
             .check(nonce, now_ms())
             .map_err(|e| unauthorized(&e))?;
@@ -861,6 +910,21 @@ impl Hub {
             token: None,
         };
         Ok((member, Credential(Cred::Key(public))))
+    }
+
+    /// Whether this credential gets the public view: no token at all, or a key below tier 2. Tokens
+    /// of every role see everything, observer tokens included (the dashboard and the witness).
+    fn public_view(&self, member: &str, cred: &Cred) -> bool {
+        match cred {
+            Cred::Public => true,
+            Cred::Key(_) => crate::stamp::ops::request_tier(self, member) < 2,
+            Cred::Token(_) => false,
+        }
+    }
+
+    /// [`Hub::public_view`] for the credential that `check_auth` returned.
+    pub(crate) fn credential_is_public(&self, member: &str, cred: &Credential) -> bool {
+        self.public_view(member, &cred.0)
     }
 
     /// The key this connection signed in with is still the current key of an active member.
@@ -1056,6 +1120,21 @@ impl Hub {
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| format!("reading the log: {e}"))
+    }
+
+    /// A cursor over the log for a replay that sends a page at a time.
+    fn open_cursor(&self, from: u64, upto: u64, filter: Filter) -> io::Result<LogCursor> {
+        let lines = match File::open(&self.log_path) {
+            Ok(f) => Some(BufReader::new(f).lines()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        Ok(LogCursor {
+            lines,
+            from,
+            upto,
+            filter,
+        })
     }
 
     /// The dashboard snapshot served at `/api/state`: members with presence and their
@@ -1291,9 +1370,17 @@ impl Hub {
                 };
                 match r {
                     Ok(entries) => {
+                        // A key below tier 2 reads the public view here too, not only on its stream.
+                        let public = tier.is_some_and(|t| t < 2);
                         let msgs: Vec<Value> = entries
                             .iter()
-                            .filter_map(|e| serde_json::to_value(&e.msg).ok())
+                            .filter_map(|e| {
+                                if public {
+                                    serde_json::to_value(crate::door::public_message(&e.msg)?).ok()
+                                } else {
+                                    serde_json::to_value(&e.msg).ok()
+                                }
+                            })
                             .collect();
                         out.insert("messages".into(), msgs.into());
                     }
@@ -1535,8 +1622,9 @@ async fn stopped(rx: &mut tokio::sync::watch::Receiver<bool>) {
 type Sink = SplitSink<WebSocketStream<crate::web::Sock>, WsMsg>;
 
 async fn send(sink: &mut Sink, text: String) -> Result<(), String> {
-    sink.send(WsMsg::text(text))
+    tokio::time::timeout(SEND_TIMEOUT, sink.send(WsMsg::text(text)))
         .await
+        .map_err(|_| "send: the client takes no data".to_string())?
         .map_err(|e| format!("send: {e}"))
 }
 
@@ -1547,6 +1635,15 @@ async fn close(sink: &mut Sink, code: CloseCode, reason: String) {
             reason: reason.into(),
         })))
         .await;
+}
+
+/// The line of `e` for this reader: as stored, or its public view, `None` when it is hidden.
+fn view(e: &Entry, redact: bool) -> Option<String> {
+    if redact {
+        crate::door::public_line(&e.msg, &e.line)
+    } else {
+        Some(e.line.clone())
+    }
 }
 
 async fn recv_live(
@@ -1568,6 +1665,8 @@ async fn connection(
     let (mut sink, mut stream) = ws.split();
     let tier0 = matches!(cred, Cred::Key(_));
     let filter = params.filter.to_filter(&member.name);
+    // The public view for a reader without a token and for a key below tier 2, read again every 2 s.
+    let mut redact = hub.public_view(&member.name, cred);
     // Subscribe and note the newest id under the state lock: older ids come from the
     // log, newer ones from the channel.
     let (rx, upto) = {
@@ -1578,16 +1677,41 @@ async fn connection(
     let mut last_sent = 0;
     if params.since.is_some() || params.last.is_some() {
         let from = params.since.unwrap_or(1);
-        let last = params.last.map(|n| n as usize);
-        for e in hub
-            .read_log_async(from, upto, filter.clone(), last, None)
-            .await?
-        {
-            last_sent = e.msg.id;
-            if matches!(cred, Cred::Public) && crate::door::hidden_from_public(&e.msg) {
-                continue;
+        if let Some(n) = params.last {
+            let n = usize::try_from(n).unwrap_or(usize::MAX).min(REPLAY_PAGE);
+            let entries = hub
+                .read_log_async(from, upto, filter.clone(), Some(n), None)
+                .await?;
+            for e in entries {
+                last_sent = e.msg.id;
+                if let Some(line) = view(&e, redact) {
+                    send(&mut sink, line).await?;
+                }
             }
-            send(&mut sink, e.line.clone()).await?;
+        } else {
+            // A page at a time: the next page is read when the last one was taken by the client.
+            let mut cursor = hub
+                .open_cursor(from, upto, filter.clone())
+                .map_err(|e| format!("reading the log: {e}"))?;
+            loop {
+                let (back, page) = tokio::task::spawn_blocking(move || {
+                    let page = cursor.page(REPLAY_PAGE);
+                    (cursor, page)
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+                cursor = back;
+                let page = page.map_err(|e| format!("reading the log: {e}"))?;
+                if page.is_empty() {
+                    break;
+                }
+                for e in page {
+                    last_sent = e.msg.id;
+                    if let Some(line) = view(&e, redact) {
+                        send(&mut sink, line).await?;
+                    }
+                }
+            }
         }
     }
     let mut ping = tokio::time::interval(hub.cfg.ping_every);
@@ -1620,11 +1744,11 @@ async fn connection(
             },
             ev = recv_live(&mut live) => match ev {
                 Ok(e) => {
-                    if e.msg.id > upto && filter.matches(&e.msg)
-                        && !(public && crate::door::hidden_from_public(&e.msg))
-                    {
+                    if e.msg.id > upto && filter.matches(&e.msg) {
                         last_sent = e.msg.id;
-                        send(&mut sink, e.line.clone()).await?;
+                        if let Some(line) = view(&e, redact) {
+                            send(&mut sink, line).await?;
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -1647,8 +1771,13 @@ async fn connection(
                         close(&mut sink, CloseCode::Policy, "key revoked".into()).await;
                         return Err("key revoked".into());
                     }
+                    Cred::Key(_) if crate::stamp::ops::request_tier(hub, &member.name) < 0 => {
+                        close(&mut sink, CloseCode::Policy, "no tier".into()).await;
+                        return Err("no tier".into());
+                    }
                     _ => {}
                 }
+                redact = hub.public_view(&member.name, cred);
             }
         }
     }

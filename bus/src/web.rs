@@ -387,16 +387,27 @@ async fn route(
         {
             return public_state(hub, ip).await;
         }
-        // Key members read the state too, the policy stays with tokens.
+        // Key members read the state too, the policy stays with tokens. A key below tier 2 gets the
+        // public view, the same as a reader without credentials.
+        let mut public_view = false;
         let checked = match head.headers.get("authorization") {
             Some(raw) if head.path == "/api/state" && raw.starts_with("SommelierKey ") => {
-                hub.check_auth(Some(raw), None).map(|(m, _)| m)
+                hub.check_auth(Some(raw), None).map(|(m, c)| {
+                    public_view = hub.credential_is_public(&m.name, &c);
+                    m
+                })
             }
             _ => hub.check_token(header, query_token).map(|(m, _)| m),
         };
         return match checked {
             Ok(_) if head.path == "/api/policy" => Reply::json(200, &hub.policy_response()),
-            Ok(_) => Reply::json(200, &hub.snapshot().await),
+            Ok(_) => {
+                let mut state = hub.snapshot().await;
+                if public_view {
+                    crate::door::redact_state(&mut state);
+                }
+                Reply::json(200, &state)
+            }
             Err((code, msg)) => Reply::json(code.as_u16(), &serde_json::json!({ "error": msg })),
         };
     }

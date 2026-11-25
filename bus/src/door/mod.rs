@@ -131,20 +131,199 @@ pub fn block_id(secret: &[u8], ip: IpAddr) -> String {
         .collect()
 }
 
-/// A FACT of the quota or spend meters. The public reader never gets one.
-pub fn hidden_from_public(msg: &Message) -> bool {
-    msg.kind == Kind::Fact && (msg.topic.starts_with("quota/") || msg.topic.starts_with("spend/"))
+/// Message kinds the public view carries as they are. FACT and ALERT have rules of their own.
+pub const PUBLIC_KINDS: [Kind; 18] = [
+    Kind::Ready,
+    Kind::Landed,
+    Kind::Fix,
+    Kind::Stuck,
+    Kind::Finding,
+    Kind::Claim,
+    Kind::Release,
+    Kind::Task,
+    Kind::Accept,
+    Kind::Decline,
+    Kind::RunRequest,
+    Kind::RunResult,
+    Kind::Hello,
+    Kind::Chat,
+    Kind::Status,
+    Kind::Policy,
+    Kind::Offer,
+    Kind::TaskUpdate,
+];
+
+/// Topic prefixes of the FACTs the public view carries: the log of orders, submissions, gates, verdicts,
+/// stamps and test reports (docs/factory.md 12.1). A FACT with any other topic, such as `quota/`, `spend/`,
+/// `estimate/`, `capacity/`, `pool/`, `owner/`, `class/`, `pause/`, `decision/` or `metric/`, is hidden.
+pub const PUBLIC_FACT_PREFIXES: [&str; 16] = [
+    "key/",
+    "submission/",
+    "gate/",
+    "verify/",
+    "review/",
+    "report/",
+    "runorder/",
+    "stamp/",
+    "tier/",
+    "land/",
+    "batch/",
+    "branch/",
+    "role/",
+    "task/",
+    "run/",
+    "wip/",
+];
+
+/// Alert codes the public view carries. Any other code, such as `COORD_BUDGET`, is hidden.
+pub const PUBLIC_ALERT_CODES: [&str; 14] = [
+    "IDLE",
+    "JOIN_FLOOD",
+    "LEASE_LOST",
+    "STUCK",
+    "CONSULT",
+    "DIRTY_WORKTREE",
+    "LOG_DIVERGED",
+    "MATRIX_REGRESSION",
+    "REGRESSION",
+    "VERIFY_BACKLOG",
+    "REVIEW_DISAGREE",
+    "REVIEW_SHORT",
+    "AUDIT_FAILED",
+    "KEY_REVOKED",
+];
+
+/// The keys of `/api/state` the public view carries. Everything else is dropped, so a key that a later
+/// module adds stays private until it is listed here.
+pub const PUBLIC_STATE_KEYS: [&str; 26] = [
+    "hub",
+    "as_of",
+    "members",
+    "agents",
+    "claims",
+    "recent",
+    "derived",
+    "alerts",
+    "tasks",
+    "leases",
+    "landing",
+    "batches",
+    "branches",
+    "submissions",
+    "reviews",
+    "review_counts",
+    "matrix",
+    "regress",
+    "run_orders",
+    "runs",
+    "standing",
+    "keys",
+    "roles",
+    "policies",
+    "pools",
+    "baselines",
+];
+
+/// A key name of an alert body that holds a meter value.
+fn is_meter_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    ["pct", "percent", "used", "spend", "quota", "burn", "budget"]
+        .iter()
+        .any(|w| k.contains(w))
 }
 
-/// Cuts the `/api/state` object down for a reader without a token: no meter rows, no spend, no
-/// estimates, each pool with its state and reset time only, no `quota/` or `spend/` FACT in `recent`.
+/// `text` without the numbers that stand before a percent sign.
+fn strip_percent(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut number = String::new();
+    for c in text.chars() {
+        if c.is_ascii_digit() || (c == '.' && !number.is_empty()) {
+            number.push(c);
+            continue;
+        }
+        if c == '%' && !number.is_empty() {
+            number.clear();
+            out.push_str("n/a%");
+            continue;
+        }
+        out.push_str(&number);
+        number.clear();
+        out.push(c);
+    }
+    out.push_str(&number);
+    out
+}
+
+fn scrub_value(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            o.retain(|k, _| !is_meter_key(k));
+            for x in o.values_mut() {
+                scrub_value(x);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(scrub_value),
+        Value::String(s) if s.contains('%') => *s = strip_percent(s),
+        _ => {}
+    }
+}
+
+/// The code of an alert topic `alert/<CODE>/<key>`.
+fn alert_code(topic: &str) -> Option<&str> {
+    topic.strip_prefix("alert/")?.split('/').next()
+}
+
+/// What the public view shows of `msg`: `None` when it is hidden, else the message with the meter values
+/// taken out of alerts. The view is built from the allow lists above, not from a list of hidden things.
+pub fn public_message(msg: &Message) -> Option<Message> {
+    match msg.kind {
+        Kind::Fact => PUBLIC_FACT_PREFIXES
+            .iter()
+            .any(|p| msg.topic.starts_with(p))
+            .then(|| msg.clone()),
+        Kind::Alert => {
+            let code = alert_code(&msg.topic)?;
+            if !PUBLIC_ALERT_CODES.contains(&code) {
+                return None;
+            }
+            let mut body: Value = serde_json::from_str(&msg.body).ok()?;
+            if !body.is_object() {
+                return None;
+            }
+            scrub_value(&mut body);
+            let mut out = msg.clone();
+            out.body = body.to_string();
+            Some(out)
+        }
+        k if PUBLIC_KINDS.contains(&k) => Some(msg.clone()),
+        _ => None,
+    }
+}
+
+/// The JSON line of `msg` for a public reader, `None` when it is hidden. A line that needs no change is
+/// sent as stored.
+pub fn public_line(msg: &Message, line: &str) -> Option<String> {
+    let shown = public_message(msg)?;
+    if shown.body == msg.body {
+        Some(line.to_owned())
+    } else {
+        serde_json::to_string(&shown).ok()
+    }
+}
+
+/// True when the public view hides `msg`.
+pub fn hidden_from_public(msg: &Message) -> bool {
+    public_message(msg).is_none()
+}
+
+/// Cuts the `/api/state` object down for a reader without a token or with a key below tier 2: only the
+/// keys of [`PUBLIC_STATE_KEYS`], each pool with its state and reset time only, only the messages and
+/// alerts of the public view.
 pub fn redact_state(state: &mut Value) {
     let Some(root) = state.as_object_mut() else {
         return;
     };
-    for key in ["quota", "spend", "estimates"] {
-        root.remove(key);
-    }
+    root.retain(|k, _| PUBLIC_STATE_KEYS.contains(&k.as_str()));
     if let Some(Value::Array(pools)) = root.get_mut("pools") {
         for p in pools.iter_mut() {
             let keep = |k: &str| p.get(k).cloned().unwrap_or(Value::Null);
@@ -157,11 +336,49 @@ pub fn redact_state(state: &mut Value) {
         }
     }
     if let Some(Value::Array(recent)) = root.get_mut("recent") {
-        recent.retain(|m| {
-            let topic = m.get("topic").and_then(Value::as_str).unwrap_or("");
-            let fact = m.get("kind").and_then(Value::as_str) == Some("FACT");
-            !(fact && (topic.starts_with("quota/") || topic.starts_with("spend/")))
-        });
+        let shown: Vec<Value> = recent
+            .drain(..)
+            .filter_map(|mut m| {
+                // Judged by kind, topic and body alone. A row that has none of them is dropped.
+                let probe = Message {
+                    id: 0,
+                    ts: String::new(),
+                    from: String::new(),
+                    role: Role::Hub,
+                    kind: serde_json::from_value(m.get("kind")?.clone()).ok()?,
+                    topic: m.get("topic")?.as_str()?.to_owned(),
+                    body: m
+                        .get("body")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    refs: vec![],
+                    to: vec![],
+                };
+                let shown = public_message(&probe)?;
+                if shown.body != probe.body {
+                    m["body"] = Value::String(shown.body);
+                }
+                Some(m)
+            })
+            .collect();
+        *recent = shown;
+    }
+    let alerts = |rows: &mut Value| {
+        if let Value::Array(a) = rows {
+            a.retain(|r| {
+                r.get("code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|c| PUBLIC_ALERT_CODES.contains(&c))
+            });
+            a.iter_mut().for_each(scrub_value);
+        }
+    };
+    if let Some(a) = root.get_mut("alerts") {
+        alerts(a);
+    }
+    if let Some(a) = root.get_mut("derived").and_then(|d| d.get_mut("alerts")) {
+        alerts(a);
     }
 }
 
@@ -626,10 +843,15 @@ fn open_db(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// Whether a member counts as tier 0 for the connection cap. `role` is `None` for a key member.
+/// Whether a member counts as tier 0 for the connection cap. `role` is `None` for a key member. A
+/// token is never low: it is the owner's own choice, observer tokens included (the dashboard and the
+/// witness), so fresh keys and anonymous readers cannot push them out. A key is low at tier 0.
 pub fn is_low(hub: &Hub, member: &str, role: Option<Role>) -> bool {
-    hub.with_store(|s| tier_from_table(s.connection(), member, role) <= 0)
-        .unwrap_or(role.is_none())
+    if role.is_some() {
+        return false;
+    }
+    hub.with_store(|s| tier_from_table(s.connection(), member, None) <= 0)
+        .unwrap_or(true)
 }
 
 /// The opaque address block a member was last seen in, or `None` when unknown. Two members with the
