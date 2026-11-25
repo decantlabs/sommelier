@@ -179,6 +179,49 @@ impl State {
     }
 }
 
+/// Lines of the log that one replay holds in memory at once, and the most `last` may ask for.
+const REPLAY_PAGE: usize = 1000;
+
+/// How long one frame may take to be taken by a client before the connection is dropped.
+const SEND_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A reader of the log that gives matching lines a page at a time, so that a replay holds one page and
+/// reads the next one only after the last was sent.
+struct LogCursor {
+    lines: Option<std::io::Lines<BufReader<File>>>,
+    from: u64,
+    upto: u64,
+    filter: Filter,
+}
+
+impl LogCursor {
+    /// The next at most `max` matching entries, empty at the end.
+    fn page(&mut self, max: usize) -> io::Result<Vec<Arc<Entry>>> {
+        let mut out = Vec::new();
+        let Some(lines) = self.lines.as_mut() else {
+            return Ok(out);
+        };
+        for line in lines.by_ref() {
+            let line = line?;
+            let Ok(msg) = serde_json::from_str::<Message>(&line) else {
+                continue;
+            };
+            if msg.id > self.upto {
+                self.lines = None;
+                break;
+            }
+            if msg.id < self.from || !self.filter.matches(&msg) {
+                continue;
+            }
+            out.push(Arc::new(Entry { msg, line }));
+            if out.len() >= max {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
 struct ConnInfo {
     name: String,
     role: Role,
@@ -251,21 +294,32 @@ fn load_hub_id(dir: &std::path::Path) -> io::Result<String> {
     Ok(id)
 }
 
-/// The secret that makes the nonces of this data folder, made at the first start. It is never
-/// logged and never sent. A hub that loses the file only invalidates the nonces in flight.
-fn load_nonce_secret(dir: &std::path::Path) -> io::Result<[u8; 32]> {
-    let path = dir.join("challenge_secret");
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        let text = text.trim();
-        if text.len() == 64
-            && let Some(raw) = (0..32)
-                .map(|i| u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok())
-                .collect::<Option<Vec<u8>>>()
-        {
-            let mut out = [0u8; 32];
-            out.copy_from_slice(&raw);
-            return Ok(out);
+/// Reads the 32 byte secret in `path` (64 hex characters). A missing file is made with a random secret,
+/// readable by the owner only on Unix. With `strict` a file that holds something else is an error, not
+/// replaced.
+fn load_secret_file(path: &std::path::Path, strict: bool) -> io::Result<[u8; 32]> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let text = text.trim();
+            if text.len() == 64
+                && let Some(raw) = (0..32)
+                    .map(|i| u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok())
+                    .collect::<Option<Vec<u8>>>()
+            {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&raw);
+                return Ok(out);
+            }
+            if strict {
+                return Err(io::Error::other(format!(
+                    "{} does not hold a secret of 64 hex characters, fix or remove it",
+                    path.display()
+                )));
+            }
         }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) if strict => return Err(e),
+        Err(_) => {}
     }
     let mut raw = [0u8; 32];
     getrandom::fill(&mut raw).map_err(|e| io::Error::other(e.to_string()))?;
@@ -279,14 +333,17 @@ fn load_nonce_secret(dir: &std::path::Path) -> io::Result<[u8; 32]> {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&path)?;
+        let mut f = opts.open(path)?;
         f.write_all(text.as_bytes())?;
-        f.write_all(
-            b"
-",
-        )?;
+        f.write_all(b"\n")?;
     }
     Ok(raw)
+}
+
+/// The secret that makes the nonces of this data folder, made at the first start. It is never
+/// logged and never sent. A hub that loses the file only invalidates the nonces in flight.
+fn load_nonce_secret(dir: &std::path::Path) -> io::Result<[u8; 32]> {
+    load_secret_file(&dir.join("challenge_secret"), false)
 }
 
 fn file_stamp(path: &std::path::Path) -> Option<(SystemTime, u64)> {
@@ -383,11 +440,14 @@ impl Hub {
         if let Some(ref mut s) = sqlite_store {
             let _ = s.catch_up_from_log(&log_path);
         }
-        let door = crate::door::Door::open(
-            cfg.door.clone(),
-            hmac_sha256(&nonce_secret, b"door-secret-v1"),
-            &cfg.data_dir,
-        );
+        // The key of the address blocks. By default it comes from `challenge_secret`, which sits beside
+        // door.db, so a copy of the data folder inverts every IPv4 block. `door.secret_file` keeps it
+        // elsewhere.
+        let door_secret = match &cfg.door.secret_file {
+            Some(path) => hmac_sha256(&load_secret_file(path, true)?, b"door-secret-v1"),
+            None => hmac_sha256(&nonce_secret, b"door-secret-v1"),
+        };
+        let door = crate::door::Door::open(cfg.door.clone(), door_secret, &cfg.data_dir);
         let hub = Arc::new(Hub {
             cfg,
             log_path,
@@ -770,7 +830,7 @@ impl Hub {
         Ok((m, token))
     }
 
-    /// Authenticates with the `Authorization` header: `SommelierKey <member>.<nonce>.<sig>` for
+    /// Authenticates with the `Authorization` header: `SommelierKey <member>.<nonce>.<address>.<sig>` for
     /// a key member, else a bearer token (or an observer token in the URL query).
     pub(crate) fn check_auth(
         &self,
@@ -797,13 +857,39 @@ impl Hub {
             ));
         }
         let mut parts = header.split('.');
-        let (Some(member), Some(nonce), Some(sig), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
+        let (Some(member), Some(nonce), Some(address), Some(sig), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
             return Err(unauthorized(
-                "malformed key credentials: send `Authorization: SommelierKey <member>.<nonce>.<signature>`",
+                "malformed key credentials: send `Authorization: SommelierKey <member>.<nonce>.<address>.<signature>`",
             ));
         };
+        // The address the client connected to is part of what it signs. A hub takes it only when it is
+        // one of its own public addresses, so a sign in made for a hostile hub is of no use here.
+        let address = crate::key::crypto::unb64(address)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .filter(|a| {
+                a.len() <= crate::key::addr::MAX_ADDRESS && a.bytes().all(|c| c.is_ascii_graphic())
+            })
+            .ok_or_else(|| unauthorized("the address in the key credentials is not valid"))?;
+        if !crate::key::addr::address_allowed(&address, &self.cfg.door.public_addresses) {
+            return Err(unauthorized(
+                &if self.cfg.door.public_addresses.is_empty() {
+                    format!(
+                        "this hub lists no public address (door.public_addresses), a key signs in only at a loopback address, not at {address}"
+                    )
+                } else {
+                    format!(
+                        "{address} is not a public address of this hub: this sign in was made for another address, it may have passed through a relay"
+                    )
+                },
+            ));
+        }
         let (public, joined_at) = {
             let st = lock(&self.state);
             match st.keys.lookup(member) {
@@ -819,6 +905,12 @@ impl Hub {
                 }
             }
         };
+        // A member with no tier at all is refused like a revoked key (docs/factory.md section 5).
+        if crate::stamp::ops::request_tier(self, member) < 0 {
+            return Err(unauthorized(
+                "this key has no standing: it was revoked or a finding of bad intent took its tier",
+            ));
+        }
         self.challenges
             .check(nonce, now_ms())
             .map_err(|e| unauthorized(&e))?;
@@ -828,7 +920,7 @@ impl Hub {
             .map_err(|_| unauthorized("the stored key is damaged"))?;
         crate::key::crypto::verify_bytes(
             &public_bytes,
-            crate::key::crypto::auth_text(&self.hub_id, nonce).as_bytes(),
+            crate::key::crypto::auth_text(&self.hub_id, &address, nonce).as_bytes(),
             &sig,
         )
         .map_err(|_| unauthorized("the key signature is wrong"))?;
@@ -844,6 +936,21 @@ impl Hub {
             token: None,
         };
         Ok((member, Credential(Cred::Key(public))))
+    }
+
+    /// Whether this credential gets the public view: no token at all, or a key below tier 2. Tokens
+    /// of every role see everything, observer tokens included (the dashboard and the witness).
+    fn public_view(&self, member: &str, cred: &Cred) -> bool {
+        match cred {
+            Cred::Public => true,
+            Cred::Key(_) => crate::stamp::ops::request_tier(self, member) < 2,
+            Cred::Token(_) => false,
+        }
+    }
+
+    /// [`Hub::public_view`] for the credential that `check_auth` returned.
+    pub(crate) fn credential_is_public(&self, member: &str, cred: &Credential) -> bool {
+        self.public_view(member, &cred.0)
     }
 
     /// The key this connection signed in with is still the current key of an active member.
@@ -912,14 +1019,27 @@ impl Hub {
         }
         let bad = |e: String| (400u16, e);
         let block = ip.map(|ip| self.door.block(ip));
+        // Garbage costs the sender a cheap, separate allowance. The join limit is charged only for a
+        // request that parsed and carried a valid proof of work and signature.
+        if let Some(block) = &block {
+            self.door
+                .check_bad_joins(block, now_ms())
+                .map_err(|e| (429u16, e))?;
+        }
+        let fail = |e: String| {
+            if let Some(block) = &block {
+                self.door.note_bad_join(block, now_ms());
+            }
+            bad(e)
+        };
+        let body: Value = serde_json::from_slice(raw)
+            .map_err(|e| fail(format!("the join body is not valid JSON: {e}")))?;
+        let req = crate::key::join::parse_join(&body).map_err(fail)?;
+        self.challenges.check(&req.nonce, now_ms()).map_err(fail)?;
+        crate::key::join::verify_join(&rules, &req, &body).map_err(fail)?;
         if let Some(block) = &block {
             crate::key::join::limit_join(&self.door, block, now_ms()).map_err(|e| (429u16, e))?;
         }
-        let body: Value = serde_json::from_slice(raw)
-            .map_err(|e| bad(format!("the join body is not valid JSON: {e}")))?;
-        let req = crate::key::join::parse_join(&body).map_err(bad)?;
-        self.challenges.check(&req.nonce, now_ms()).map_err(bad)?;
-        crate::key::join::verify_join(&rules, &req, &body).map_err(bad)?;
         self.challenges
             .mark_used(&req.nonce, now_ms())
             .map_err(bad)?;
@@ -1026,6 +1146,21 @@ impl Hub {
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| format!("reading the log: {e}"))
+    }
+
+    /// A cursor over the log for a replay that sends a page at a time.
+    fn open_cursor(&self, from: u64, upto: u64, filter: Filter) -> io::Result<LogCursor> {
+        let lines = match File::open(&self.log_path) {
+            Ok(f) => Some(BufReader::new(f).lines()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        Ok(LogCursor {
+            lines,
+            from,
+            upto,
+            filter,
+        })
     }
 
     /// The dashboard snapshot served at `/api/state`: members with presence and their
@@ -1261,16 +1396,45 @@ impl Hub {
                 };
                 match r {
                     Ok(entries) => {
+                        // A key below tier 2 reads the public view here too, not only on its stream.
+                        let public = tier.is_some_and(|t| t < 2);
                         let msgs: Vec<Value> = entries
                             .iter()
-                            .filter_map(|e| serde_json::to_value(&e.msg).ok())
+                            .filter_map(|e| {
+                                if public {
+                                    serde_json::to_value(crate::door::public_message(&e.msg)?).ok()
+                                } else {
+                                    serde_json::to_value(&e.msg).ok()
+                                }
+                            })
                             .collect();
                         out.insert("messages".into(), msgs.into());
                     }
                     Err(e) => return reply_err(op, rid, &e),
                 }
             }
-            Request::ModuleOp { op: mod_op, body } => {
+            Request::ModuleOp {
+                op: mod_op,
+                mut body,
+            } => {
+                // A signed key request names the hub it is for. The hub puts its own id in, so a request
+                // signed for another hub fails the signature check, and says why when it names one.
+                if matches!(mod_op.as_str(), "key.rotate" | "key.revoke") {
+                    if body
+                        .get("hub")
+                        .and_then(Value::as_str)
+                        .is_some_and(|h| h != self.hub_id)
+                    {
+                        return reply_err(
+                            op,
+                            rid,
+                            "this request is signed for another hub, sign it for this one",
+                        );
+                    }
+                    if let Some(o) = body.as_object_mut() {
+                        o.insert("hub".into(), json!(self.hub_id));
+                    }
+                }
                 let now = now_ms();
                 let mut caller = crate::hooks::OpCaller::from_member(member);
                 if tier0 {
@@ -1419,15 +1583,28 @@ fn error_response(code: StatusCode, msg: String) -> ErrorResponse {
 #[allow(clippy::result_large_err)]
 async fn handle(hub: Arc<Hub>, stream: TcpStream) -> Result<(), String> {
     let _ = stream.set_nodelay(true);
-    let head = crate::web::peek_head(&stream)
-        .await
-        .map_err(|e| format!("request head: {e}"))?;
+    let peer = stream.peer_addr().map_err(|e| format!("peer: {e}"))?.ip();
+    // Every connection is counted from the first byte until its answer or its upgrade. A peer that
+    // is not on this machine is counted by its own block at once, one behind a tunnel after the head.
+    let slot = hub
+        .door
+        .admit_http(
+            (!peer.to_canonical().is_loopback())
+                .then(|| hub.door.block(peer))
+                .as_deref(),
+        )
+        .map_err(|e| format!("door: {e}"))?;
+    let (stream, head) = crate::web::read_head(
+        stream,
+        Duration::from_secs(hub.door.config().head_timeout_secs.max(1)),
+    )
+    .await
+    .map_err(|e| format!("request head: {e}"))?;
     if !head.is_websocket() {
-        return crate::web::serve(&hub, stream, head)
+        return crate::web::serve(&hub, stream, head, slot)
             .await
             .map_err(|e| format!("http: {e}"));
     }
-    let peer = stream.peer_addr().map_err(|e| format!("peer: {e}"))?.ip();
     let ip = hub.door.client_ip(
         peer,
         hub.door
@@ -1451,6 +1628,8 @@ async fn handle(hub: Arc<Hub>, stream: TcpStream) -> Result<(), String> {
     let ws = tokio_tungstenite::accept_hdr_async_with_config(stream, cb, Some(wscfg))
         .await
         .map_err(|e| format!("handshake refused: {e}"))?;
+    // An upgraded connection is counted by `authorize`, not as plain HTTP any more.
+    drop(slot);
     let Some((member, params, cred, _slot)) = auth else {
         return Err("no credentials".into());
     };
@@ -1489,11 +1668,12 @@ async fn stopped(rx: &mut tokio::sync::watch::Receiver<bool>) {
     let _ = rx.wait_for(|s| *s).await.map(|_| ());
 }
 
-type Sink = SplitSink<WebSocketStream<TcpStream>, WsMsg>;
+type Sink = SplitSink<WebSocketStream<crate::web::Sock>, WsMsg>;
 
 async fn send(sink: &mut Sink, text: String) -> Result<(), String> {
-    sink.send(WsMsg::text(text))
+    tokio::time::timeout(SEND_TIMEOUT, sink.send(WsMsg::text(text)))
         .await
+        .map_err(|_| "send: the client takes no data".to_string())?
         .map_err(|e| format!("send: {e}"))
 }
 
@@ -1504,6 +1684,15 @@ async fn close(sink: &mut Sink, code: CloseCode, reason: String) {
             reason: reason.into(),
         })))
         .await;
+}
+
+/// The line of `e` for this reader: as stored, or its public view, `None` when it is hidden.
+fn view(e: &Entry, redact: bool) -> Option<String> {
+    if redact {
+        crate::door::public_line(&e.msg, &e.line)
+    } else {
+        Some(e.line.clone())
+    }
 }
 
 async fn recv_live(
@@ -1517,7 +1706,7 @@ async fn recv_live(
 
 async fn connection(
     hub: &Arc<Hub>,
-    ws: WebSocketStream<TcpStream>,
+    ws: WebSocketStream<crate::web::Sock>,
     member: &Member,
     params: ConnectParams,
     cred: &Cred,
@@ -1525,6 +1714,8 @@ async fn connection(
     let (mut sink, mut stream) = ws.split();
     let tier0 = matches!(cred, Cred::Key(_));
     let filter = params.filter.to_filter(&member.name);
+    // The public view for a reader without a token and for a key below tier 2, read again every 2 s.
+    let mut redact = hub.public_view(&member.name, cred);
     // Subscribe and note the newest id under the state lock: older ids come from the
     // log, newer ones from the channel.
     let (rx, upto) = {
@@ -1535,16 +1726,41 @@ async fn connection(
     let mut last_sent = 0;
     if params.since.is_some() || params.last.is_some() {
         let from = params.since.unwrap_or(1);
-        let last = params.last.map(|n| n as usize);
-        for e in hub
-            .read_log_async(from, upto, filter.clone(), last, None)
-            .await?
-        {
-            last_sent = e.msg.id;
-            if matches!(cred, Cred::Public) && crate::door::hidden_from_public(&e.msg) {
-                continue;
+        if let Some(n) = params.last {
+            let n = usize::try_from(n).unwrap_or(usize::MAX).min(REPLAY_PAGE);
+            let entries = hub
+                .read_log_async(from, upto, filter.clone(), Some(n), None)
+                .await?;
+            for e in entries {
+                last_sent = e.msg.id;
+                if let Some(line) = view(&e, redact) {
+                    send(&mut sink, line).await?;
+                }
             }
-            send(&mut sink, e.line.clone()).await?;
+        } else {
+            // A page at a time: the next page is read when the last one was taken by the client.
+            let mut cursor = hub
+                .open_cursor(from, upto, filter.clone())
+                .map_err(|e| format!("reading the log: {e}"))?;
+            loop {
+                let (back, page) = tokio::task::spawn_blocking(move || {
+                    let page = cursor.page(REPLAY_PAGE);
+                    (cursor, page)
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+                cursor = back;
+                let page = page.map_err(|e| format!("reading the log: {e}"))?;
+                if page.is_empty() {
+                    break;
+                }
+                for e in page {
+                    last_sent = e.msg.id;
+                    if let Some(line) = view(&e, redact) {
+                        send(&mut sink, line).await?;
+                    }
+                }
+            }
         }
     }
     let mut ping = tokio::time::interval(hub.cfg.ping_every);
@@ -1577,11 +1793,11 @@ async fn connection(
             },
             ev = recv_live(&mut live) => match ev {
                 Ok(e) => {
-                    if e.msg.id > upto && filter.matches(&e.msg)
-                        && !(public && crate::door::hidden_from_public(&e.msg))
-                    {
+                    if e.msg.id > upto && filter.matches(&e.msg) {
                         last_sent = e.msg.id;
-                        send(&mut sink, e.line.clone()).await?;
+                        if let Some(line) = view(&e, redact) {
+                            send(&mut sink, line).await?;
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -1604,8 +1820,13 @@ async fn connection(
                         close(&mut sink, CloseCode::Policy, "key revoked".into()).await;
                         return Err("key revoked".into());
                     }
+                    Cred::Key(_) if crate::stamp::ops::request_tier(hub, &member.name) < 0 => {
+                        close(&mut sink, CloseCode::Policy, "no tier".into()).await;
+                        return Err("no tier".into());
+                    }
                     _ => {}
                 }
+                redact = hub.public_view(&member.name, cred);
             }
         }
     }

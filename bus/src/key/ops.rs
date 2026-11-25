@@ -40,6 +40,14 @@ fn text<'a>(body: &'a Value, field: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("the request needs the text field `{field}`"))
 }
 
+/// The id of this hub that `handle_text` put into the body of the request.
+fn hub_of(body: &Value) -> Result<&str, String> {
+    body.get("hub")
+        .and_then(Value::as_str)
+        .filter(|h| super::book::is_hub_id(h))
+        .ok_or_else(|| "the request names no hub: sign it for the hub you send it to".to_string())
+}
+
 fn check_sig(body: &Value, request: &Value, public: &str) -> Result<(), String> {
     let public = unb64(public).map_err(|_| "the stored key is damaged".to_string())?;
     let sig = unb64(text(body, "sig")?).map_err(|e| format!("`sig` is {e}"))?;
@@ -79,11 +87,18 @@ fn rotate(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, S
     if public_known(ctx.store.connection(), new_pub)? {
         return Err("`new_pub` is a key that the hub already knows".into());
     }
-    check_sig(body, &rotate_request(&member, &current, new_pub), &current)?;
+    let hub_id = hub_of(body)?;
+    check_sig(
+        body,
+        &rotate_request(hub_id, &member, &current, new_pub),
+        &current,
+    )?;
     let sig = text(body, "sig")?.to_owned();
     let id = ctx.emit(fact(
         &member,
-        rotate_body(&member, &current, new_pub, &handle, &joined_at, &sig),
+        rotate_body(
+            hub_id, &member, &current, new_pub, &handle, &joined_at, &sig,
+        ),
     ))?;
     let mut out = Map::new();
     out.insert("member".into(), member.into());
@@ -133,7 +148,11 @@ fn revoke(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, S
     let name = ctx.caller.name.clone();
     let sig_text;
     let proof = if own {
-        check_sig(body, &revoke_request(&member, &current, &reason), &current)?;
+        check_sig(
+            body,
+            &revoke_request(hub_of(body)?, &member, &current, &reason),
+            &current,
+        )?;
         sig_text = text(body, "sig")?.to_owned();
         Proof::Signature(&sig_text)
     } else {
@@ -141,7 +160,15 @@ fn revoke(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, S
     };
     let id = ctx.emit(fact(
         &member,
-        revoke_body(&member, &current, &handle, &joined_at, &reason, proof),
+        revoke_body(
+            body.get("hub").and_then(Value::as_str).unwrap_or_default(),
+            &member,
+            &current,
+            &handle,
+            &joined_at,
+            &reason,
+            proof,
+        ),
     ))?;
     let mut out = Map::new();
     out.insert("member".into(), member.into());

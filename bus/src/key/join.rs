@@ -65,10 +65,16 @@ impl Default for Challenges {
 }
 
 impl Challenges {
-    /// Nonces under the given hub secret. The secret is never logged or sent.
+    /// Nonces under the given hub secret. The secret is never logged or sent. A random boot value of
+    /// this start goes into the key of the nonce MAC: the set of used nonces lives in memory only, so a
+    /// header captured before a restart must not be valid after it (it is refused as unknown).
     pub fn with_secret(secret: [u8; 32]) -> Self {
+        let mut boot = [0u8; 16];
+        getrandom::fill(&mut boot).expect("the OS has random numbers");
+        let mut input = b"nonce-boot-v1".to_vec();
+        input.extend_from_slice(&boot);
         Challenges {
-            secret,
+            secret: hmac_sha256(&secret, &input),
             used: Mutex::new(Used::default()),
         }
     }
@@ -250,6 +256,20 @@ mod tests {
         let flipped = format!("{}{}", &n[..20], if &n[20..21] == "0" { "1" } else { "0" });
         assert!(c.check(&format!("{flipped}{}", &n[21..]), 2_000).is_err());
         c.check(&n, 2_000).unwrap();
+    }
+
+    #[test]
+    fn a_nonce_from_before_a_restart_is_refused() {
+        let secret = [9u8; 32];
+        let before = Challenges::with_secret(secret);
+        let (nonce, _) = before.issue(1_000, NONCE_TTL_MS).unwrap();
+        before.check(&nonce, 2_000).unwrap();
+        // The same secret file, a new start: the used set is empty, the nonce must not work.
+        let after = Challenges::with_secret(secret);
+        assert!(after.check(&nonce, 2_000).is_err());
+        assert!(after.consume(&nonce, 2_000).is_err());
+        let (fresh, _) = after.issue(1_000, NONCE_TTL_MS).unwrap();
+        after.consume(&fresh, 2_000).unwrap();
     }
 
     #[test]

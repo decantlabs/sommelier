@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use super::addr::address_of_url;
 use super::book::{revoke_request, rotate_request};
 use super::crypto::{MemberKey, auth_text, b64, member_id, sign_request, solve_pow, unb64};
 use super::join::MAX_POW_BITS;
@@ -91,6 +92,15 @@ pub fn save(path: &Path, file: &KeyFile) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
 }
 
+/// A line for the output of `join` about who can read the key file, or `None` where the file mode
+/// already keeps it private. On Windows the file gets no access list of its own: it is as private as
+/// the folder it is in.
+pub fn privacy_note() -> Option<&'static str> {
+    cfg!(windows).then_some(
+        "on Windows the key file is as private as the folder it is in: keep it in a folder that only you can open",
+    )
+}
+
 /// Loads the key file of `data_dir` or makes one. The flag says whether it was made now.
 pub fn load_or_create(data_dir: &Path) -> Result<(KeyFile, bool), String> {
     let path = key_path(data_dir);
@@ -137,11 +147,22 @@ fn pin_name(raw_url: &str) -> String {
 }
 
 /// Checks the hub id that the hub at `raw_url` answered against the one pinned for that
-/// address in `pins`. An address with no pin yet is pinned now. A different id is refused:
-/// a hostile hub could otherwise relay a sign in to another hub.
+/// address in `pins`. An address with no pin yet is pinned now. A different id is refused,
+/// and so is an id that is already pinned under another address: a hostile hub at a new
+/// address could otherwise hand on the id of the real hub and relay a sign in to it.
+/// A pin file that cannot be read is an error and is never replaced.
 fn check_pin(pins: &Path, raw_url: &str, hub_id: &str) -> Result<(), String> {
     let name = pin_name(raw_url);
-    let text = std::fs::read_to_string(pins).unwrap_or_default();
+    let text = match std::fs::read_to_string(pins) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(format!(
+                "cannot read {}: {e}. Your pins are left as they are, fix the file and try again",
+                pins.display()
+            ));
+        }
+    };
     for line in text.lines() {
         if let Some((url, id)) = line.rsplit_once(' ')
             && url == name
@@ -155,12 +176,25 @@ fn check_pin(pins: &Path, raw_url: &str, hub_id: &str) -> Result<(), String> {
             ));
         }
     }
+    if let Some(other) = text
+        .lines()
+        .filter_map(|l| l.rsplit_once(' '))
+        .find(|(url, id)| *id == hub_id && *url != name)
+        .map(|(url, _)| url)
+    {
+        return Err(format!(
+            "the hub at {name} answers with the hub id of {other}, which you pinned before: one of the two is a relay. If both are really your hub, add the line `{name} {hub_id}` to {} yourself",
+            pins.display()
+        ));
+    }
     let mut out = text;
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
     out.push_str(&format!("{name} {hub_id}\n"));
-    std::fs::write(pins, out).map_err(|e| format!("cannot write {}: {e}", pins.display()))
+    let tmp = pins.with_extension("hubs.tmp");
+    std::fs::write(&tmp, out).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, pins).map_err(|e| format!("cannot replace {}: {e}", pins.display()))
 }
 
 /// `ws://host:port` and friends as the http URL of `path` on the same hub.
@@ -249,9 +283,28 @@ async fn header_for(raw_url: &str, file: &KeyFile, pins: &Path) -> Result<String
     let ch = fetch_challenge(raw_url)
         .await
         .map_err(|msg| AuthError { msg, fatal: false })?;
+    header_with(&ch, raw_url, file, pins)
+}
+
+/// [`header_for`] with the challenge already fetched.
+fn header_with(
+    ch: &Challenge,
+    raw_url: &str,
+    file: &KeyFile,
+    pins: &Path,
+) -> Result<String, AuthError> {
     check_pin(pins, raw_url, &ch.hub_id).map_err(|msg| AuthError { msg, fatal: true })?;
-    let sig = b64(&file.key.sign(auth_text(&ch.hub_id, &ch.nonce).as_bytes()));
-    Ok(format!("SommelierKey {}.{}.{sig}", file.member, ch.nonce))
+    // The address goes into the signed text: the hub checks it against its own public addresses.
+    let address = address_of_url(raw_url).map_err(|msg| AuthError { msg, fatal: true })?;
+    let sig = b64(&file
+        .key
+        .sign(auth_text(&ch.hub_id, &address, &ch.nonce).as_bytes()));
+    Ok(format!(
+        "SommelierKey {}.{}.{}.{sig}",
+        file.member,
+        ch.nonce,
+        b64(address.as_bytes())
+    ))
 }
 
 /// The `Authorization` header value for the key file that `token` names, made with a fresh
@@ -273,9 +326,15 @@ fn next_path(key: &Path) -> PathBuf {
     key.with_extension("key.next")
 }
 
+/// The file that names the hub a rotation was sent to, beside `member.key.next`.
+fn next_hub_path(key: &Path) -> PathBuf {
+    key.with_extension("key.next.hub")
+}
+
 /// When `member.key.next` exists, a rotation may have been written by the hub while its reply
-/// was lost. The new key then is the only key the hub takes. Tries it once: when the hub
-/// accepts it, it replaces the key file. Any other outcome leaves both files as they are.
+/// was lost. The new key then is the only key the hub takes. Tries it once at the hub the rotation
+/// was sent to: when that hub accepts it, it replaces the key file. A hub with another id, or any
+/// other outcome, leaves both files as they are.
 async fn settle_next(raw_url: &str, key: &Path) {
     let next = next_path(key);
     let (Ok(new), Ok(old)) = (load(&next), load(key)) else {
@@ -284,7 +343,16 @@ async fn settle_next(raw_url: &str, key: &Path) {
     if new.member != old.member {
         return;
     }
-    let Ok(header) = header_for(raw_url, &new, &pins_path(key)).await else {
+    let Ok(sent_to) = std::fs::read_to_string(next_hub_path(key)) else {
+        return;
+    };
+    let Ok(ch) = fetch_challenge(raw_url).await else {
+        return;
+    };
+    if ch.hub_id != sent_to.trim() {
+        return;
+    }
+    let Ok(header) = header_with(&ch, raw_url, &new, &pins_path(key)) else {
         return;
     };
     let (Ok(url), Ok(http)) = (http_url(raw_url, "/api/state"), http_client()) else {
@@ -296,8 +364,8 @@ async fn settle_next(raw_url: &str, key: &Path) {
         .send()
         .await
         .is_ok_and(|r| r.status().is_success());
-    if accepted {
-        let _ = std::fs::rename(&next, key);
+    if accepted && std::fs::rename(&next, key).is_ok() {
+        let _ = std::fs::remove_file(next_hub_path(key));
     }
 }
 
@@ -396,17 +464,40 @@ pub fn opts_for(url: &str, data_dir: &Path) -> Opts {
     }
 }
 
+/// The first of the hubs in `url_list` that answers, with its id checked against the pins: the hub id
+/// that a signed request is made for, and the address to send it to.
+async fn hub_of(url_list: &str, key: &Path) -> Result<(String, String), String> {
+    let mut last = String::from("no hub URL configured");
+    for raw in parse_urls(url_list) {
+        match fetch_challenge(&raw).await {
+            Ok(ch) => {
+                check_pin(&pins_path(key), &raw, &ch.hub_id)?;
+                return Ok((raw, ch.hub_id));
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 /// Replaces the key of this member by a new one. Returns the new public key.
 ///
 /// The new key waits in `member.key.next` until the hub confirms it. On any error the file
 /// stays: the hub may have written the rotation and lost only the reply, and the next sign in
 /// tries the new key (see `auth_header`).
-pub async fn rotate(url: &str, data_dir: &Path) -> Result<String, String> {
+pub async fn rotate(url_list: &str, data_dir: &Path) -> Result<String, String> {
     let path = key_path(data_dir);
+    let (url, hub_id) = hub_of(url_list, &path).await?;
+    let url = url.as_str();
     settle_next(url, &path).await;
     let old = load(&path)?;
     let new = MemberKey::generate()?;
-    let mut req = rotate_request(&old.member, &old.key.public_b64(), &new.public_b64());
+    let mut req = rotate_request(
+        &hub_id,
+        &old.member,
+        &old.key.public_b64(),
+        &new.public_b64(),
+    );
     let sig = sign_request(&old.key, &req);
     req["sig"] = json!(sig);
     let next = next_path(&path);
@@ -415,10 +506,13 @@ pub async fn rotate(url: &str, data_dir: &Path) -> Result<String, String> {
         key: new,
     };
     save(&next, &next_file)?;
-    let body =
-        json!({"op": "key.rotate", "new_pub": next_file.key.public_b64(), "sig": req["sig"]});
+    std::fs::write(next_hub_path(&path), format!("{hub_id}\n"))
+        .map_err(|e| format!("cannot write {}: {e}", next_hub_path(&path).display()))?;
+    let body = json!({"op": "key.rotate", "hub": hub_id, "new_pub": next_file.key.public_b64(),
+                      "sig": req["sig"]});
     match request_ok(&opts_for(url, data_dir), body).await {
         Ok(_) => {
+            let _ = std::fs::remove_file(next_hub_path(&path));
             std::fs::rename(&next, &path)
                 .map_err(|e| format!("the hub rotated the key but {} could not be replaced: {e}, the new key is in {}", path.display(), next.display()))?;
             Ok(next_file.key.public_b64())
@@ -431,11 +525,14 @@ pub async fn rotate(url: &str, data_dir: &Path) -> Result<String, String> {
 }
 
 /// Revokes this member's own key.
-pub async fn revoke(url: &str, data_dir: &Path, reason: &str) -> Result<(), String> {
+pub async fn revoke(url_list: &str, data_dir: &Path, reason: &str) -> Result<(), String> {
     let file = load(&key_path(data_dir))?;
-    let mut req = revoke_request(&file.member, &file.key.public_b64(), reason);
+    let (url, hub_id) = hub_of(url_list, &key_path(data_dir)).await?;
+    let mut req = revoke_request(&hub_id, &file.member, &file.key.public_b64(), reason);
     let sig = sign_request(&file.key, &req);
     req["sig"] = json!(sig);
-    let body = json!({"op": "key.revoke", "reason": reason, "sig": req["sig"]});
-    request_ok(&opts_for(url, data_dir), body).await.map(|_| ())
+    let body = json!({"op": "key.revoke", "hub": hub_id, "reason": reason, "sig": req["sig"]});
+    request_ok(&opts_for(&url, data_dir), body)
+        .await
+        .map(|_| ())
 }

@@ -56,14 +56,20 @@ pub struct KeyEvent {
     pub msg_id: u64,
 }
 
-/// The text a rotation signs, built by the member and rebuilt by the hub.
-pub fn rotate_request(member: &str, old_pub: &str, new_pub: &str) -> Value {
-    json!({"op": "key.rotate", "member": member, "old_pub": old_pub, "new_pub": new_pub})
+/// The text a rotation signs, built by the member and rebuilt by the hub. It names the hub, so the
+/// request cannot be replayed at another one.
+pub fn rotate_request(hub_id: &str, member: &str, old_pub: &str, new_pub: &str) -> Value {
+    json!({"op": "key.rotate", "hub": hub_id, "member": member, "old_pub": old_pub, "new_pub": new_pub})
 }
 
-/// The text a revocation signs.
-pub fn revoke_request(member: &str, public: &str, reason: &str) -> Value {
-    json!({"op": "key.revoke", "member": member, "pub": public, "reason": reason})
+/// The text a revocation signs. It names the hub as well.
+pub fn revoke_request(hub_id: &str, member: &str, public: &str, reason: &str) -> Value {
+    json!({"op": "key.revoke", "hub": hub_id, "member": member, "pub": public, "reason": reason})
+}
+
+/// True for the id of a hub: 32 hex characters.
+pub fn is_hub_id(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Body of the FACT that registers a member.
@@ -76,6 +82,7 @@ pub fn join_body(member: &str, public: &str, handle: &str, joined_at: &str) -> S
 /// Body of the FACT that replaces the key of a member. `sig` is the signature of the old
 /// key over [`rotate_request`].
 pub fn rotate_body(
+    hub_id: &str,
     member: &str,
     prev: &str,
     public: &str,
@@ -84,13 +91,15 @@ pub fn rotate_body(
     sig: &str,
 ) -> String {
     json!({"v": FACT_VERSION, "member": member, "pub": public, "handle": handle,
-           "state": "active", "joined_at": joined_at, "op": "rotate", "prev": prev, "sig": sig})
+           "state": "active", "joined_at": joined_at, "op": "rotate", "prev": prev, "sig": sig,
+           "hub": hub_id})
     .to_string()
 }
 
 /// Body of the FACT that revokes a key. `proof` is the signature of the member over
 /// [`revoke_request`], or the name of the orchestrator that revoked it.
 pub fn revoke_body(
+    hub_id: &str,
     member: &str,
     public: &str,
     handle: &str,
@@ -101,7 +110,10 @@ pub fn revoke_body(
     let mut v = json!({"v": FACT_VERSION, "member": member, "pub": public, "handle": handle,
            "state": "revoked", "joined_at": joined_at, "op": "revoke", "reason": reason});
     match proof {
-        Proof::Signature(sig) => v["sig"] = json!(sig),
+        Proof::Signature(sig) => {
+            v["sig"] = json!(sig);
+            v["hub"] = json!(hub_id);
+        }
         Proof::Owner(name) => v["by"] = json!(name),
     }
     v.to_string()
@@ -150,7 +162,8 @@ pub fn parse_fact(msg: &Message) -> Option<KeyEvent> {
         Some("rotate") => {
             let prev = text("prev")?;
             let prev_bytes = decode_public(&prev)?;
-            let request = rotate_request(&member, &prev, &public);
+            let hub = text("hub").filter(|h| is_hub_id(h))?;
+            let request = rotate_request(&hub, &member, &prev, &public);
             let mut signed = request;
             signed["sig"] = json!(text("sig")?);
             verify_request(&signed, &prev_bytes).ok()?;
@@ -159,7 +172,8 @@ pub fn parse_fact(msg: &Message) -> Option<KeyEvent> {
         Some("revoke") => {
             let reason = text("reason")?;
             if let Some(sig) = text("sig") {
-                let mut signed = revoke_request(&member, &public, &reason);
+                let hub = text("hub").filter(|h| is_hub_id(h))?;
+                let mut signed = revoke_request(&hub, &member, &public, &reason);
                 signed["sig"] = json!(sig);
                 verify_request(&signed, &decode_public(&public)?).ok()?;
             } else if text("by").is_none() {

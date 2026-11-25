@@ -44,6 +44,27 @@ pub struct DoorConfig {
     /// Refused joins within `join_flood_window_secs` that raise the alert JOIN_FLOOD. 0 is no alert.
     pub join_flood_refusals: u32,
     pub join_flood_window_secs: u64,
+    /// Plain HTTP connections the hub holds at most while it reads and answers a request head. They
+    /// are closed after one answer, a WebSocket leaves this count once it is upgraded. 0 is no limit.
+    pub max_http_conns: u32,
+    /// Plain HTTP connections one address block may hold. A loopback peer without a trusted header
+    /// is not counted. 0 is no limit.
+    pub http_conns_per_block: u32,
+    /// Seconds a connection may take to send its whole request head. Default 10.
+    pub head_timeout_secs: u64,
+    /// Bytes of upload bodies the hub holds in memory at once. 0 is no limit.
+    pub max_upload_bytes_in_flight: u64,
+    /// Failed join tries per address block and hour, counted apart from the joins that went through.
+    /// 0 is no limit.
+    pub bad_joins_per_block_per_hour: u32,
+    /// The public addresses of this hub as a client types them: `host`, which stands for the
+    /// default ports 443 and 80, or `host:port`. A key signs the address it connected to, and the hub
+    /// takes the sign in only when that address is listed here or is a loopback address. Empty: only
+    /// loopback sign ins work.
+    pub public_addresses: Vec<String>,
+    /// A file that holds the secret of the address blocks (64 hex characters), made at the first
+    /// start when it is missing. `None` derives the secret from `challenge_secret` in the data folder.
+    pub secret_file: Option<std::path::PathBuf>,
 }
 
 impl Default for DoorConfig {
@@ -59,6 +80,13 @@ impl Default for DoorConfig {
             keep_days: 0,
             join_flood_refusals: 20,
             join_flood_window_secs: 600,
+            max_http_conns: 512,
+            http_conns_per_block: 32,
+            head_timeout_secs: 10,
+            max_upload_bytes_in_flight: 64 * 1024 * 1024,
+            bad_joins_per_block_per_hour: 30,
+            public_addresses: Vec::new(),
+            secret_file: None,
         }
     }
 }
@@ -103,20 +131,199 @@ pub fn block_id(secret: &[u8], ip: IpAddr) -> String {
         .collect()
 }
 
-/// A FACT of the quota or spend meters. The public reader never gets one.
-pub fn hidden_from_public(msg: &Message) -> bool {
-    msg.kind == Kind::Fact && (msg.topic.starts_with("quota/") || msg.topic.starts_with("spend/"))
+/// Message kinds the public view carries as they are. FACT and ALERT have rules of their own.
+pub const PUBLIC_KINDS: [Kind; 18] = [
+    Kind::Ready,
+    Kind::Landed,
+    Kind::Fix,
+    Kind::Stuck,
+    Kind::Finding,
+    Kind::Claim,
+    Kind::Release,
+    Kind::Task,
+    Kind::Accept,
+    Kind::Decline,
+    Kind::RunRequest,
+    Kind::RunResult,
+    Kind::Hello,
+    Kind::Chat,
+    Kind::Status,
+    Kind::Policy,
+    Kind::Offer,
+    Kind::TaskUpdate,
+];
+
+/// Topic prefixes of the FACTs the public view carries: the log of orders, submissions, gates, verdicts,
+/// stamps and test reports (docs/factory.md 12.1). A FACT with any other topic, such as `quota/`, `spend/`,
+/// `estimate/`, `capacity/`, `pool/`, `owner/`, `class/`, `pause/`, `decision/` or `metric/`, is hidden.
+pub const PUBLIC_FACT_PREFIXES: [&str; 16] = [
+    "key/",
+    "submission/",
+    "gate/",
+    "verify/",
+    "review/",
+    "report/",
+    "runorder/",
+    "stamp/",
+    "tier/",
+    "land/",
+    "batch/",
+    "branch/",
+    "role/",
+    "task/",
+    "run/",
+    "wip/",
+];
+
+/// Alert codes the public view carries. Any other code, such as `COORD_BUDGET`, is hidden.
+pub const PUBLIC_ALERT_CODES: [&str; 14] = [
+    "IDLE",
+    "JOIN_FLOOD",
+    "LEASE_LOST",
+    "STUCK",
+    "CONSULT",
+    "DIRTY_WORKTREE",
+    "LOG_DIVERGED",
+    "MATRIX_REGRESSION",
+    "REGRESSION",
+    "VERIFY_BACKLOG",
+    "REVIEW_DISAGREE",
+    "REVIEW_SHORT",
+    "AUDIT_FAILED",
+    "KEY_REVOKED",
+];
+
+/// The keys of `/api/state` the public view carries. Everything else is dropped, so a key that a later
+/// module adds stays private until it is listed here.
+pub const PUBLIC_STATE_KEYS: [&str; 26] = [
+    "hub",
+    "as_of",
+    "members",
+    "agents",
+    "claims",
+    "recent",
+    "derived",
+    "alerts",
+    "tasks",
+    "leases",
+    "landing",
+    "batches",
+    "branches",
+    "submissions",
+    "reviews",
+    "review_counts",
+    "matrix",
+    "regress",
+    "run_orders",
+    "runs",
+    "standing",
+    "keys",
+    "roles",
+    "policies",
+    "pools",
+    "baselines",
+];
+
+/// A key name of an alert body that holds a meter value.
+fn is_meter_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    ["pct", "percent", "used", "spend", "quota", "burn", "budget"]
+        .iter()
+        .any(|w| k.contains(w))
 }
 
-/// Cuts the `/api/state` object down for a reader without a token: no meter rows, no spend, no
-/// estimates, each pool with its state and reset time only, no `quota/` or `spend/` FACT in `recent`.
+/// `text` without the numbers that stand before a percent sign.
+fn strip_percent(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut number = String::new();
+    for c in text.chars() {
+        if c.is_ascii_digit() || (c == '.' && !number.is_empty()) {
+            number.push(c);
+            continue;
+        }
+        if c == '%' && !number.is_empty() {
+            number.clear();
+            out.push_str("n/a%");
+            continue;
+        }
+        out.push_str(&number);
+        number.clear();
+        out.push(c);
+    }
+    out.push_str(&number);
+    out
+}
+
+fn scrub_value(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            o.retain(|k, _| !is_meter_key(k));
+            for x in o.values_mut() {
+                scrub_value(x);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(scrub_value),
+        Value::String(s) if s.contains('%') => *s = strip_percent(s),
+        _ => {}
+    }
+}
+
+/// The code of an alert topic `alert/<CODE>/<key>`.
+fn alert_code(topic: &str) -> Option<&str> {
+    topic.strip_prefix("alert/")?.split('/').next()
+}
+
+/// What the public view shows of `msg`: `None` when it is hidden, else the message with the meter values
+/// taken out of alerts. The view is built from the allow lists above, not from a list of hidden things.
+pub fn public_message(msg: &Message) -> Option<Message> {
+    match msg.kind {
+        Kind::Fact => PUBLIC_FACT_PREFIXES
+            .iter()
+            .any(|p| msg.topic.starts_with(p))
+            .then(|| msg.clone()),
+        Kind::Alert => {
+            let code = alert_code(&msg.topic)?;
+            if !PUBLIC_ALERT_CODES.contains(&code) {
+                return None;
+            }
+            let mut body: Value = serde_json::from_str(&msg.body).ok()?;
+            if !body.is_object() {
+                return None;
+            }
+            scrub_value(&mut body);
+            let mut out = msg.clone();
+            out.body = body.to_string();
+            Some(out)
+        }
+        k if PUBLIC_KINDS.contains(&k) => Some(msg.clone()),
+        _ => None,
+    }
+}
+
+/// The JSON line of `msg` for a public reader, `None` when it is hidden. A line that needs no change is
+/// sent as stored.
+pub fn public_line(msg: &Message, line: &str) -> Option<String> {
+    let shown = public_message(msg)?;
+    if shown.body == msg.body {
+        Some(line.to_owned())
+    } else {
+        serde_json::to_string(&shown).ok()
+    }
+}
+
+/// True when the public view hides `msg`.
+pub fn hidden_from_public(msg: &Message) -> bool {
+    public_message(msg).is_none()
+}
+
+/// Cuts the `/api/state` object down for a reader without a token or with a key below tier 2: only the
+/// keys of [`PUBLIC_STATE_KEYS`], each pool with its state and reset time only, only the messages and
+/// alerts of the public view.
 pub fn redact_state(state: &mut Value) {
     let Some(root) = state.as_object_mut() else {
         return;
     };
-    for key in ["quota", "spend", "estimates"] {
-        root.remove(key);
-    }
+    root.retain(|k, _| PUBLIC_STATE_KEYS.contains(&k.as_str()));
     if let Some(Value::Array(pools)) = root.get_mut("pools") {
         for p in pools.iter_mut() {
             let keep = |k: &str| p.get(k).cloned().unwrap_or(Value::Null);
@@ -129,11 +336,49 @@ pub fn redact_state(state: &mut Value) {
         }
     }
     if let Some(Value::Array(recent)) = root.get_mut("recent") {
-        recent.retain(|m| {
-            let topic = m.get("topic").and_then(Value::as_str).unwrap_or("");
-            let fact = m.get("kind").and_then(Value::as_str) == Some("FACT");
-            !(fact && (topic.starts_with("quota/") || topic.starts_with("spend/")))
-        });
+        let shown: Vec<Value> = recent
+            .drain(..)
+            .filter_map(|mut m| {
+                // Judged by kind, topic and body alone. A row that has none of them is dropped.
+                let probe = Message {
+                    id: 0,
+                    ts: String::new(),
+                    from: String::new(),
+                    role: Role::Hub,
+                    kind: serde_json::from_value(m.get("kind")?.clone()).ok()?,
+                    topic: m.get("topic")?.as_str()?.to_owned(),
+                    body: m
+                        .get("body")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    refs: vec![],
+                    to: vec![],
+                };
+                let shown = public_message(&probe)?;
+                if shown.body != probe.body {
+                    m["body"] = Value::String(shown.body);
+                }
+                Some(m)
+            })
+            .collect();
+        *recent = shown;
+    }
+    let alerts = |rows: &mut Value| {
+        if let Value::Array(a) = rows {
+            a.retain(|r| {
+                r.get("code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|c| PUBLIC_ALERT_CODES.contains(&c))
+            });
+            a.iter_mut().for_each(scrub_value);
+        }
+    };
+    if let Some(a) = root.get_mut("alerts") {
+        alerts(a);
+    }
+    if let Some(a) = root.get_mut("derived").and_then(|d| d.get_mut("alerts")) {
+        alerts(a);
     }
 }
 
@@ -153,6 +398,13 @@ struct DState {
     /// Open connections of tier 0 or anonymous.
     low: u32,
     next_purge: u64,
+    /// Plain HTTP connections in their head and answer phase, in total and per block.
+    http_total: u32,
+    http_blocks: HashMap<String, u32>,
+    /// Bytes of upload bodies reserved right now.
+    upload_bytes: u64,
+    /// Failed join tries per block, newest last (epoch ms).
+    bad_joins: HashMap<String, VecDeque<u64>>,
 }
 
 struct Inner {
@@ -196,6 +448,59 @@ impl Drop for Slot {
                 s.members.remove(&self.member);
             }
         }
+    }
+}
+
+/// One plain HTTP connection counted by the door. Dropping it gives the place back.
+pub struct HttpSlot {
+    door: Door,
+    block: Option<String>,
+}
+
+impl Drop for HttpSlot {
+    fn drop(&mut self) {
+        let mut s = lock(&self.door.inner.state);
+        s.http_total = s.http_total.saturating_sub(1);
+        if let Some(b) = self.block.take()
+            && let Some(n) = s.http_blocks.get_mut(&b)
+        {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                s.http_blocks.remove(&b);
+            }
+        }
+    }
+}
+
+impl HttpSlot {
+    /// Counts the connection against `block` too, once. Refuses when the block holds too many.
+    pub fn bind_block(&mut self, block: &str) -> Result<(), String> {
+        if self.block.is_some() {
+            return Ok(());
+        }
+        let limit = self.door.inner.cfg.http_conns_per_block;
+        let mut s = lock(&self.door.inner.state);
+        if limit > 0 && s.http_blocks.get(block).copied().unwrap_or(0) >= limit {
+            return Err(format!(
+                "connection limit: {limit} plain HTTP connections per address block"
+            ));
+        }
+        *s.http_blocks.entry(block.to_owned()).or_default() += 1;
+        self.block = Some(block.to_owned());
+        Ok(())
+    }
+}
+
+/// Bytes of an upload body reserved in memory. Dropping it gives them back.
+pub struct UploadGuard {
+    door: Door,
+    bytes: u64,
+}
+
+impl Drop for UploadGuard {
+    fn drop(&mut self) {
+        let mut s = lock(&self.door.inner.state);
+        s.upload_bytes = s.upload_bytes.saturating_sub(self.bytes);
     }
 }
 
@@ -280,6 +585,83 @@ impl Door {
         Ok(())
     }
 
+    /// Counts one plain HTTP connection. `block` is the block of the socket peer when it is known at
+    /// accept time. Refuses over the total or over the block, the caller closes the socket.
+    pub fn admit_http(&self, block: Option<&str>) -> Result<HttpSlot, String> {
+        let cfg = &self.inner.cfg;
+        {
+            let mut s = lock(&self.inner.state);
+            if cfg.max_http_conns > 0 && s.http_total >= cfg.max_http_conns {
+                return Err(format!(
+                    "connection limit: the hub holds {} plain HTTP connections",
+                    cfg.max_http_conns
+                ));
+            }
+            s.http_total += 1;
+        }
+        let mut slot = HttpSlot {
+            door: self.clone(),
+            block: None,
+        };
+        if let Some(b) = block {
+            slot.bind_block(b)?;
+        }
+        Ok(slot)
+    }
+
+    /// Reserves `bytes` of upload body memory. Refuses over `max_upload_bytes_in_flight`.
+    pub fn reserve_upload(&self, bytes: u64) -> Result<UploadGuard, String> {
+        let limit = self.inner.cfg.max_upload_bytes_in_flight;
+        let mut s = lock(&self.inner.state);
+        if limit > 0 && s.upload_bytes.saturating_add(bytes) > limit {
+            return Err(format!(
+                "the hub holds {limit} bytes of uploads in flight already, try again in {CONN_RETRY_SECS} s"
+            ));
+        }
+        s.upload_bytes += bytes;
+        Ok(UploadGuard {
+            door: self.clone(),
+            bytes,
+        })
+    }
+
+    /// Refuses a join try of `block` that has failed too often in the last hour. Nothing is counted.
+    pub fn check_bad_joins(&self, block: &str, now_ms: u64) -> Result<(), String> {
+        let limit = self.inner.cfg.bad_joins_per_block_per_hour as usize;
+        if limit == 0 {
+            return Ok(());
+        }
+        let mut s = lock(&self.inner.state);
+        self.purge(&mut s, now_ms);
+        let Some(q) = s.bad_joins.get_mut(block) else {
+            return Ok(());
+        };
+        while q.front().is_some_and(|t| *t + HOUR_MS <= now_ms) {
+            q.pop_front();
+        }
+        if q.len() >= limit {
+            let wait = retry_in(q[0], HOUR_MS, now_ms);
+            s.refusals.push_back(now_ms);
+            return Err(format!(
+                "join limit: {limit} failed join tries per hour from one address block, try again in {wait} s"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Counts one failed join try of `block`, apart from the joins that went through.
+    pub fn note_bad_join(&self, block: &str, now_ms: u64) {
+        if self.inner.cfg.bad_joins_per_block_per_hour == 0 {
+            return;
+        }
+        let mut s = lock(&self.inner.state);
+        self.purge(&mut s, now_ms);
+        s.bad_joins
+            .entry(block.to_owned())
+            .or_default()
+            .push_back(now_ms);
+    }
+
     /// Counts one connection or state read of the public reader.
     pub fn charge_read(&self, block: &str, now_ms: u64) -> Result<(), String> {
         let limit = self.inner.cfg.public_reads_per_block_per_min as usize;
@@ -346,7 +728,7 @@ impl Door {
     }
 
     fn purge(&self, s: &mut DState, now: u64) {
-        let over = s.joins.len() + s.reads.len() > WINDOW_MAP_SOFT_CAP;
+        let over = s.joins.len() + s.reads.len() + s.bad_joins.len() > WINDOW_MAP_SOFT_CAP;
         if now < s.next_purge && !over {
             return;
         }
@@ -461,10 +843,15 @@ fn open_db(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// Whether a member counts as tier 0 for the connection cap. `role` is `None` for a key member.
+/// Whether a member counts as tier 0 for the connection cap. `role` is `None` for a key member. A
+/// token is never low: it is the owner's own choice, observer tokens included (the dashboard and the
+/// witness), so fresh keys and anonymous readers cannot push them out. A key is low at tier 0.
 pub fn is_low(hub: &Hub, member: &str, role: Option<Role>) -> bool {
-    hub.with_store(|s| tier_from_table(s.connection(), member, role) <= 0)
-        .unwrap_or(role.is_none())
+    if role.is_some() {
+        return false;
+    }
+    hub.with_store(|s| tier_from_table(s.connection(), member, None) <= 0)
+        .unwrap_or(true)
 }
 
 /// The opaque address block a member was last seen in, or `None` when unknown. Two members with the

@@ -5,11 +5,13 @@
 //! machine and connects as a tier 0 member that may do very little.
 //!
 //! * [`crypto`]: Ed25519 through `ring`, the member id, canonical signing, the proof of work.
+//! * [`addr`]: the address a sign in names, and the addresses a hub lists as its own.
 //! * [`book`]: the key facts of the log, the hub's in memory book and the KEY table.
 //! * [`join`]: the join rules, the nonces and the checks of a join request.
 //! * [`ops`]: the requests `key.rotate` and `key.revoke`.
 //! * [`client`]: the key file, joining and signing in from a client.
 
+pub mod addr;
 pub mod book;
 pub mod client;
 pub mod crypto;
