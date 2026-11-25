@@ -1147,6 +1147,7 @@ unless --kind STATUS or --all is given.
         "submit" => return Some(sommelier::cli::submit::help().to_owned()),
         "review" => return Some(sommelier::cli::review::help().to_owned()),
         "verify" => return Some(sommelier::cli::verify::help().to_owned()),
+        "factory" | "op" => return Some(sommelier::cli::factory::help().to_owned()),
         "test" => return Some(sommelier::cli::test::help().to_owned()),
         "standing" => return Some(sommelier::cli::standing::help().to_owned()),
         "who" => ("sommelier who [--json]", "Lists open connections: name, role, listening or request.\n", true),
@@ -1313,7 +1314,19 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match rt.block_on(run(args)) {
+    // The command futures are large in a debug build and overflow the 1 MiB stack of the main thread
+    // on Windows (`sommelier task list` did). The commands run on a thread with room.
+    let worker = std::thread::Builder::new()
+        .name("sommelier".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || rt.block_on(run(args)));
+    let result = match worker {
+        Ok(handle) => handle
+            .join()
+            .unwrap_or_else(|_| Err("a command panicked".into())),
+        Err(e) => Err(format!("cannot start the command thread: {e}")),
+    };
+    match result {
         Ok(code) => code,
         Err(e) => {
             eprintln!("sommelier: error: {e}");

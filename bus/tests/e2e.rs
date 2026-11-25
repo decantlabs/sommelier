@@ -487,6 +487,14 @@ async fn the_factory_runs_from_join_to_landing_and_the_log_replays() {
     client::request_ok(&stranger.opts, json!({"op": "task.work", "task": "t1"}))
         .await
         .unwrap();
+    // A key member reads the brief of its order, which only a token could do before.
+    sommelier::brief::put_brief_http(&w.orch, "t1", b"Add two().\n", None)
+        .await
+        .unwrap();
+    let (brief, _) = sommelier::brief::get_brief_http(&stranger.opts, "t1", None)
+        .await
+        .unwrap();
+    assert_eq!(brief, "Add two().\n");
     let text = "pub fn one() -> u32 {\n    1\n}\n\npub fn two() -> u32 {\n    2\n}\n";
     let (file, sha) = r.bundle(out.path(), "good", &[("src/lib.rs", text.to_owned())]);
     fake.set_runs(vec![run(77, &sha, "success")]);

@@ -13,7 +13,7 @@ use crate::task::{board_row_to_task_payload, parse_board_tsv};
 
 const USAGE: &str = "\
 usage:
-  sommelier task add --kind K --title T --scope G --done-when D --brief FILE [--id ID] [--priority P] [--after ID] [--branch B] [--accepts C] [--size S] [--risk low|normal] [--min-trust 0-3] [--review RULE] [--credit handle|none] [--prior-art] [--brief-sha256 H] [--json]
+  sommelier task add --kind K --title T --scope G --done-when D --brief FILE [--id ID] [--priority P] [--after ID] [--branch B] [--accepts C] [--size S] [--base SHA] [--risk low|normal] [--min-trust 0-3] [--review RULE] [--credit handle|none] [--prior-art] [--brief-sha256 H] [--json]
   sommelier task list [--state S] [--mine] [--json]
   sommelier task show ID [--json]
   sommelier task cancel ID [--reason TEXT] [--json]
@@ -222,6 +222,7 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
             "accepts",
             "track",
             "size",
+            "base",
             "risk",
             "min-trust",
             "review",
@@ -304,6 +305,10 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
     }
     if let Some(size) = a.get("size") {
         payload["size"] = json!(size);
+    }
+    // The commit the lease starts from. The gates of a submission check its bundle against it.
+    if let Some(base) = a.get("base") {
+        payload["base_sha"] = json!(base);
     }
 
     match call_op(&opts, "task.add", payload).await {

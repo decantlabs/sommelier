@@ -220,13 +220,21 @@ pub async fn get_brief_http(
 ) -> Result<(String, String), String> {
     let url = brief_http_url(&opts.url, id_or_sha, None)?;
     crate::client::init();
+    // A key member signs in with its key, a token member sends the token.
+    let auth = if crate::key::client::marker_path(&opts.token).is_some() {
+        crate::key::client::auth_header(&opts.url, &opts.token)
+            .await
+            .map_err(|e| e.msg)?
+    } else {
+        format!("Bearer {}", opts.token.trim())
+    };
     let resp = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?
         .get(url)
-        .bearer_auth(opts.token.trim())
+        .header("authorization", auth)
         .send()
         .await
         .map_err(|e| e.without_url().to_string())?;

@@ -4,9 +4,16 @@ For the owner of a hub. The design is `docs/factory.md`. The hub itself is `bus/
 **owner's hands** cannot be done by an agent or by the hub: they are GitHub settings or a rented server. Where a
 command does not exist yet, this page says what is planned and invents no flags.
 
-Status today: the key modules, gates, bundles, stamps, review choice, reports and the clean build state machine are
-built as libraries. Joining with a key works. Submitting, reviewing and testing are being built. Nothing of the
-factory is on by default.
+Status today: every part of the factory is wired into the hub and tested together (`bus/tests/e2e.rs`). Nothing of it
+is on by default. A hub is switched on with `sommelier serve --factory FILE`, a local TOML file (see
+`swarm/factory.example.toml`, one table per part, every key explained). The numbers that are policy (tier rules,
+review rule, audit share, verify limits, quorum, proof of work bits) come from the published policy when the hub
+starts, and a policy switch that says `off` vetoes a part the file enables. At start the hub prints one line,
+`factory: join on, intake on, verify off, ...`. To watch the whole way once, run `sh swarm/factory-demo.sh PORT`: it
+builds the binary, starts a throwaway hub with no GitHub (the owner marks the clean build with `sommelier verify
+override`), and walks one patch from the join of a stranger to its landing, then a test order with three reports.
+`sommelier factory status --data DIR` prints the submissions, reviews, landing queue, tiers and run orders of a hub
+data folder, and `sommelier op OP JSON` sends one module request.
 
 ## 1. Before the repositories go public (phase F0)
 
@@ -35,8 +42,8 @@ Joining is off by default. A hub that is upgraded behaves as before.
 4. To stop joins, restart with `--join off`. Be aware that `--join off` also refuses keys that joined earlier, so
    it is a lock for everybody with a key, not only for new ones.
 
-Reading these settings from the policy file is a later step. The limits per address block and the public read of
-the bus are being built.
+With `--factory` the proof of work comes from the policy `[join]` table, and `--join-pow-bits` still wins when given.
+The limits per address block and the public read of the bus are the `[door]` table of the factory file.
 
 ## 3. Where the secrets live
 

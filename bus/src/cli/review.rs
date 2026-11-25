@@ -37,7 +37,7 @@ pub(crate) struct Flags {
     url: Option<String>,
     token: Option<String>,
     token_file: Option<String>,
-    data: PathBuf,
+    pub(crate) data: PathBuf,
     file: Option<String>,
     decision: Option<String>,
     pub(crate) reason: Option<String>,

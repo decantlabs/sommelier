@@ -152,3 +152,30 @@ fn one_policy_file_holds_both_kinds_of_switches() {
     );
     assert!(Snapshot::parse(&bad).is_err());
 }
+
+#[test]
+fn factory_status_reads_a_data_folder_and_op_refuses_a_body_that_is_no_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sommelier"))
+        .args(["factory", "status", "--data", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for part in [
+        "submissions:",
+        "reviews:",
+        "landing queue:",
+        "tiers and stamps:",
+        "run orders:",
+    ] {
+        assert!(text.contains(part), "{text}");
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_sommelier"))
+        .args(["op", "report.send", "not json", "--token", "x"])
+        .env("SOMMELIER_URL", "ws://127.0.0.1:1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no JSON"));
+}

@@ -521,6 +521,9 @@ The requests and the tick read the bundles and diffs from the store of the intak
 
 **`/api/state`.** `reviews` lists the open reviews, `review_counts` the number of reviews by state.
 
+**Briefs.** `GET /api/brief/<id>` answers a token member and also a key member (`Authorization: SommelierKey ...`), so a
+tier 0 member can read the order it holds. `PUT` stays with the orchestrator.
+
 **`review.resolve`** `{"task","n","decision","reason"}` (a maintainer: an orchestrator, a member that the hub config lists, or
 a key member at tier 3). It settles a review that waits for ever, an escalated review or an audit that disagrees.
 `decision` is `pass` or `fail`. The hub writes a FACT `review/<task>/<n>` that changes the verdict of the answered

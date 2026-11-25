@@ -270,8 +270,15 @@ async fn route(hub: &Arc<Hub>, head: &Head, body: &[u8], ip: IpAddr) -> Reply {
             && !matches!(head.path.as_str(), "/api/state" | "/api/policy"))
     {
         let (header, query_token) = extract_token(head);
-        let caller = match hub.check_token(header, query_token) {
-            Ok((m, _)) => Some(m),
+        // A key member reads the brief of its order too, so the briefs accept a key as well as a token.
+        let checked = if head.path == "/api/brief" || head.path.starts_with("/api/brief/") {
+            let auth = head.headers.get("authorization").map(String::as_str);
+            hub.check_auth(auth, query_token).map(|(m, _)| m)
+        } else {
+            hub.check_token(header, query_token).map(|(m, _)| m)
+        };
+        let caller = match checked {
+            Ok(m) => Some(m),
             Err((code, msg)) => {
                 return Reply::json(
                     code.as_u16(),
