@@ -5,7 +5,8 @@
 # This is the only template with write permissions, and only for the jobs that publish. It holds no
 # secret of its own: it uses the token GitHub gives each run.
 #
-# Never add to this file: a secret, or the pull request target trigger.
+# Never add to this file: a secret, the pull request target trigger, or a cache action. A cache is shared
+# state: code of a patch could write an entry that this workflow restores later, into a release build.
 
 name: release
 
