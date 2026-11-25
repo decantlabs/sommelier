@@ -248,7 +248,23 @@ fn signed(t: &Tester, r: &Report) -> Value {
     v
 }
 
+/// Asks `test.next` as the tester does, so the order of the report is handed to this member. A
+/// report counts only for an order that `test.next` handed out.
+async fn handed(opts: &Opts, report: &Value) {
+    let got = client::request_ok(
+        opts,
+        json!({"op": "test.next", "machine": report["machine"], "profiles": [report["profile"]]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        got["order"]["id"], report["run"],
+        "test.next handed another order: {got}"
+    );
+}
+
 async fn send(opts: &Opts, report: Value) -> Result<Value, String> {
+    handed(opts, &report).await;
     client::request_ok(opts, json!({"op": "report.send", "report": report})).await
 }
 

@@ -17,7 +17,9 @@ use crate::hooks::OpContext;
 use crate::hub::Hub;
 use crate::msg::{Kind, Message, Role};
 use crate::report::types::Outcome;
-use crate::report::{QuorumRules, ReportView, Verdict, cell, classify, query_reports};
+use crate::report::{
+    QuorumRules, ReportView, Verdict, cell, classify, counted_members, query_reports,
+};
 use crate::review::query_reviews;
 use crate::time::parse_ms;
 
@@ -277,7 +279,7 @@ fn run_rules(
     conn: &Connection,
     cfg: &StampConfig,
     now: u64,
-    blocks: &BTreeMap<String, Option<String>>,
+    _blocks: &BTreeMap<String, Option<String>>,
     rules: &mut Rules,
 ) {
     let subs = submissions(conn);
@@ -329,8 +331,22 @@ fn run_rules(
         }
     }
 
-    // run_agreed and run_outlier: a report against a settled cell of the matrix.
+    // run_agreed and run_outlier: a report against a settled cell of the matrix. Only a report whose
+    // sender had a known address block can be judged: the block was taken when the report arrived
+    // and is kept in the side store. Of the reports of one block only the one that counts toward the
+    // cell is judged. A cell lifts its members only when at least one agreeing report comes from a
+    // member of tier 1 or above, so a ring of fresh keys cannot lift itself.
     let reports = query_reports(conn).unwrap_or_default();
+    let report_blocks = crate::report::side::blocks_of(conn);
+    let key_members: BTreeSet<String> = key_rows(conn).into_iter().map(|k| k.member).collect();
+    let tier_of_reporter = |member: &str| -> u8 {
+        if key_members.contains(member) {
+            tier_from_table(conn, member, None).clamp(0, 3) as u8
+        } else {
+            // A token member was vouched for by the owner of the hub, as a tier 2 member is.
+            2
+        }
+    };
     let mut cells: BTreeMap<CellKey<'_>, Vec<(usize, ReportView)>> = BTreeMap::new();
     for (i, r) in reports.iter().enumerate() {
         let Some(outcome) = outcome_of(&r.outcome) else {
@@ -338,8 +354,10 @@ fn run_rules(
         };
         let view = ReportView {
             member: r.member.clone(),
-            tier: tier_from_table(conn, &r.member, None).clamp(0, 3) as u8,
-            block: blocks.get(&r.member).cloned().flatten(),
+            tier: tier_of_reporter(&r.member),
+            block: report_blocks
+                .get(&(r.run.clone(), r.member.clone()))
+                .cloned(),
             outcome,
             at: r.at,
         };
@@ -352,12 +370,19 @@ fn run_rules(
     for group in cells.values() {
         let views: Vec<ReportView> = group.iter().map(|(_, v)| v.clone()).collect();
         let settled = cell(&views, &quorum);
+        let counted = counted_members(&views);
+        let lifted = group.iter().any(|(_, v)| {
+            counted.contains(&v.member) && v.tier >= 1 && classify(v, &settled) == Verdict::Agreed
+        });
         for (i, view) in group {
+            if !counted.contains(&view.member) {
+                continue;
+            }
             let row = &reports[*i];
             let kind = match classify(view, &settled) {
-                Verdict::Agreed => StampKind::RunAgreed,
+                Verdict::Agreed if lifted => StampKind::RunAgreed,
+                Verdict::Agreed | Verdict::None => continue,
                 Verdict::Outlier => StampKind::RunOutlier,
-                Verdict::None => continue,
             };
             // A report is judged once.
             let judged = [StampKind::RunAgreed, StampKind::RunOutlier]

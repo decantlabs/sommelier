@@ -8,12 +8,21 @@ use sommelier::report::{find_private, scrub};
 fn privacy_scan_finds_what_the_review_named() {
     let samples = [
         (r"cache C:\Users\Jane Roe\AppData\Local\x\y.bin end", "Roe"),
-        (r"sync C:\Users\jroe\OneDrive - Acme Corp\Games\x end", "Acme"),
+        (
+            r"sync C:\Users\jroe\OneDrive - Acme Corp\Games\x end",
+            "Acme",
+        ),
         (r"sync D:\OneDrive - Acme Corp\Games end", "Acme"),
         (r"wine Z:\home\jroe\.wine\drive_c end", "jroe"),
         (r"wine \home\jroe\.wine end", "jroe"),
-        (r"owner S-1-5-21-1004336348-1177238915-682003330-1001 end", "1004336348"),
-        (r"dev {123e4567-e89b-12d3-a456-426614174000} end", "426614174000"),
+        (
+            r"owner S-1-5-21-1004336348-1177238915-682003330-1001 end",
+            "1004336348",
+        ),
+        (
+            r"dev {123e4567-e89b-12d3-a456-426614174000} end",
+            "426614174000",
+        ),
         ("adapter 00:1A:2B:3C:4D:5E up", "3C:4D"),
         ("adapter 00-1a-2b-3c-4d-5e up", "3c-4d"),
         ("peer 203.0.113.77 reset", "203.0.113"),

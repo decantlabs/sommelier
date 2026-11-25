@@ -1,7 +1,8 @@
 //! Machine classes, the quorum of a matrix cell, outlier marks and matrix regressions.
 //!
 //! One report is a hint. A cell is settled when `quorum` independent owners agree. Independent means
-//! distinct members in distinct address blocks. Every function here is pure and does not depend on
+//! distinct members in distinct address blocks. A report whose sender has no known block is a hint
+//! and never counts. Every function here is pure and does not depend on
 //! the order of its input.
 
 use std::collections::BTreeMap;
@@ -68,7 +69,7 @@ pub struct ReportView {
     pub member: String,
     /// Tier of the member. Carried for callers, the quorum does not weigh it.
     pub tier: u8,
-    /// Opaque address block of the member, `None` when unknown.
+    /// Opaque address block of the member when the report arrived, `None` when unknown.
     pub block: Option<String>,
     pub outcome: Outcome,
     /// UTC epoch seconds.
@@ -137,47 +138,76 @@ fn newer_key(r: &ReportView) -> (u64, u8, &str) {
     (r.at, rank, r.member.as_str())
 }
 
-/// The state of one cell from the reports of one profile, machine key and build.
-///
-/// Inconclusive reports are ignored. A member counts once with the newest report. Members of one
-/// address block count once with the newest report of the block. A report without a block is its
-/// own block.
-pub fn cell(reports: &[ReportView], rules: &QuorumRules) -> Cell {
-    let quorum = rules.quorum.max(1);
-
+/// The members whose report counts toward the quorum of a cell: one per address block, the newest
+/// of the block, never an inconclusive one, and never a report without a block.
+fn counted<'a>(reports: &'a [ReportView]) -> BTreeMap<String, &'a ReportView> {
     let mut by_member: BTreeMap<&str, &ReportView> = BTreeMap::new();
     for r in reports
         .iter()
-        .filter(|r| r.outcome != Outcome::Inconclusive)
+        .filter(|r| r.outcome != Outcome::Inconclusive && r.block.is_some())
     {
         let slot = by_member.entry(r.member.as_str()).or_insert(r);
         if newer_key(r) > newer_key(slot) {
             *slot = r;
         }
     }
-
-    // Key of a block: its name, or the member for a report without a block. The two forms cannot
-    // collide because of the prefix.
     let mut by_block: BTreeMap<String, &ReportView> = BTreeMap::new();
     for r in by_member.values() {
-        let key = match &r.block {
-            Some(b) => format!("b:{b}"),
-            None => format!("m:{}", r.member),
-        };
-        let slot = by_block.entry(key).or_insert(r);
+        let Some(b) = &r.block else { continue };
+        let slot = by_block.entry(b.clone()).or_insert(r);
         if newer_key(r) > newer_key(slot) {
             *slot = r;
         }
     }
+    by_block
+        .into_values()
+        .map(|r| (r.member.clone(), r))
+        .collect()
+}
 
-    let works = by_block
+/// The members whose report counts in this cell, see [`cell`]. Only these can be judged.
+pub fn counted_members(reports: &[ReportView]) -> Vec<String> {
+    counted(reports).into_keys().collect()
+}
+
+/// The state of one cell from the reports of one profile, machine key and build.
+///
+/// Inconclusive reports are ignored. A member counts once with the newest report. Members of one
+/// address block count once with the newest report of the block. A report without a block never
+/// counts toward a quorum: it is a hint and shows only as `hint_works` or `hint_fails`.
+pub fn cell(reports: &[ReportView], rules: &QuorumRules) -> Cell {
+    let quorum = rules.quorum.max(1);
+    let counted = counted(reports);
+    let works = counted
         .values()
         .filter(|r| r.outcome == Outcome::Works)
         .count();
-    let fails = by_block
+    let fails = counted
         .values()
         .filter(|r| r.outcome == Outcome::Fails)
         .count();
+
+    // The newest report of each member without a block, as a hint.
+    let mut loose: BTreeMap<&str, &ReportView> = BTreeMap::new();
+    for r in reports
+        .iter()
+        .filter(|r| r.outcome != Outcome::Inconclusive && r.block.is_none())
+    {
+        let slot = loose.entry(r.member.as_str()).or_insert(r);
+        if newer_key(r) > newer_key(slot) {
+            *slot = r;
+        }
+    }
+    let hint_works = works
+        + loose
+            .values()
+            .filter(|r| r.outcome == Outcome::Works)
+            .count();
+    let hint_fails = fails
+        + loose
+            .values()
+            .filter(|r| r.outcome == Outcome::Fails)
+            .count();
 
     let state = if works >= quorum && fails >= quorum {
         CellState::Mixed
@@ -185,9 +215,9 @@ pub fn cell(reports: &[ReportView], rules: &QuorumRules) -> Cell {
         CellState::Works
     } else if fails >= quorum {
         CellState::Fails
-    } else if works > fails {
+    } else if hint_works > hint_fails {
         CellState::HintWorks
-    } else if fails > works {
+    } else if hint_fails > hint_works {
         CellState::HintFails
     } else {
         CellState::Unknown
@@ -217,6 +247,10 @@ pub enum Verdict {
 
 /// Compares a report with a cell. Only a cell that is `works` or `fails` judges.
 pub fn classify(report: &ReportView, cell: &Cell) -> Verdict {
+    // A report without a block is a hint. It is never judged.
+    if report.block.is_none() {
+        return Verdict::None;
+    }
     let settled = match cell.state {
         CellState::Works => Outcome::Works,
         CellState::Fails => Outcome::Fails,

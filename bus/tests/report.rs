@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use sommelier::msg::{Kind, Message, Role};
+use sommelier::report::side::{Claim, Side};
 use sommelier::report::types::{MachineClass, Outcome, Report};
 use sommelier::report::{
     Cell, CellState, QuorumRules, ReportLimits, ReportView, Verdict, cell, classify, find_private,
@@ -224,20 +225,39 @@ fn cell_cases() -> Vec<Case> {
             0,
         ),
         (
-            "missing block is its own block",
-            vec![("a", None, W, 1), ("b", None, W, 2), ("c", None, W, 3)],
-            Works,
+            "reports without a block never settle, however many",
+            vec![
+                ("a", None, W, 1),
+                ("b", None, W, 2),
+                ("c", None, W, 3),
+                ("d", None, W, 4),
+                ("e", None, W, 5),
+            ],
+            HintWorks,
+            0,
+            0,
             3,
-            0,
-            0,
         ),
         (
-            "missing block does not merge with a named one",
-            vec![("a", None, W, 1), ("b", Some("none"), W, 2)],
+            "reports without a block do not fill the quorum beside named blocks",
+            vec![
+                ("a", Some("1"), W, 1),
+                ("b", Some("2"), W, 2),
+                ("c", None, W, 3),
+                ("d", None, W, 4),
+            ],
             HintWorks,
             2,
             0,
             1,
+        ),
+        (
+            "a report without a block is a hint beside a named one",
+            vec![("a", None, W, 1), ("b", Some("none"), W, 2)],
+            HintWorks,
+            1,
+            0,
+            2,
         ),
         (
             "mixed when both sides reach the quorum",
@@ -344,13 +364,15 @@ fn cell_table() {
 #[test]
 fn cell_quorum_is_a_rule() {
     let r = QuorumRules { quorum: 1 };
-    let got = cell(&[view("a", None, W, 1)], &r);
+    let got = cell(&[view("a", Some("1"), W, 1)], &r);
     assert_eq!(got.state, CellState::Works);
+    let got = cell(&[view("a", None, W, 1)], &r);
+    assert_eq!(got.state, CellState::HintWorks);
     let r = QuorumRules { quorum: 0 };
     let got = cell(&[], &r);
     assert_eq!((got.state, got.need_more), (CellState::Unknown, 1));
     let r = QuorumRules { quorum: 5 };
-    let got = cell(&[view("a", None, W, 1)], &r);
+    let got = cell(&[view("a", Some("1"), W, 1)], &r);
     assert_eq!((got.state, got.need_more), (CellState::HintWorks, 4));
 }
 
@@ -413,8 +435,11 @@ fn classify_table() {
         (Mixed, F, No),
     ];
     for (state, outcome, want) in table {
-        let got = classify(&view("a", None, outcome, 1), &cell_of(state));
+        let got = classify(&view("a", Some("1"), outcome, 1), &cell_of(state));
         assert_eq!(got, want, "{state:?} {outcome:?}");
+        // A report without a block is a hint and is never judged.
+        let got = classify(&view("a", None, outcome, 1), &cell_of(state));
+        assert_eq!(got, No, "no block, {state:?} {outcome:?}");
     }
 }
 
@@ -848,7 +873,7 @@ fn replay_gives_equal_report_tables_and_skips_bad_lines() {
 }
 
 #[test]
-fn matrix_counts_by_member() {
+fn matrix_counts_by_block_and_says_how_many_reports_had_one() {
     let mut log = Vec::new();
     for (i, m) in ["m1", "m2", "m3"].iter().enumerate() {
         let run = format!("r{i}");
@@ -861,7 +886,26 @@ fn matrix_counts_by_member() {
     let mut other = report("r9", "m9", Outcome::Fails);
     other.build = "def5678".into();
     log.push(fact(4, "r9", &line(&other)));
-    let store = replay(&log);
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    for m in &log {
+        store.apply(m).unwrap();
+    }
+    // The blocks of r0 to r2 were taken when the reports arrived. The report of m9 had none.
+    let mut side = Side::open(dir.path()).unwrap();
+    for (i, m) in ["m1", "m2", "m3"].iter().enumerate() {
+        let run = format!("r{i}");
+        side.hand(m, &run, "windows/rtx 4080", 1).unwrap();
+        let block = format!("block{i}");
+        assert_eq!(
+            side.claim(m, &run, "windows/rtx 4080", &block, 2, 1_000_000)
+                .unwrap(),
+            Claim::Taken
+        );
+    }
+    side.hand("m9", "r9", "windows/rtx 4080", 1).unwrap();
+    side.claim("m9", "r9", "windows/rtx 4080", "", 2, 1_000_000)
+        .unwrap();
     let state = store.api_state(2_000).unwrap();
     let matrix = state["matrix"].as_array().unwrap();
     assert_eq!(matrix.len(), 2);
@@ -870,8 +914,39 @@ fn matrix_counts_by_member() {
     assert_eq!(settled["machine_key"], "windows/rtx 4080");
     assert_eq!(settled["state"], "works");
     assert_eq!(settled["works"], 3);
-    assert_eq!(settled["counted_by"], "member");
+    assert_eq!(settled["counted_by"], "block");
+    assert_eq!(settled["reports"], 3);
+    assert_eq!(settled["with_block"], 3);
     let hint = matrix.iter().find(|r| r["build"] == "def5678").unwrap();
     assert_eq!(hint["state"], "hint_fails");
-    assert_eq!(hint["need_more"], 2);
+    assert_eq!(hint["need_more"], 3);
+    assert_eq!(hint["with_block"], 0);
+    assert_eq!(hint["reports"], 1);
+    assert_eq!(state["matrix_blocks"]["kept"], true);
+}
+
+#[test]
+fn matrix_without_blocks_shows_hints_and_says_why() {
+    let mut log = Vec::new();
+    for (i, m) in ["m1", "m2", "m3", "m4"].iter().enumerate() {
+        let run = format!("r{i}");
+        log.push(fact(
+            i as u64 + 1,
+            &run,
+            &line(&report(&run, m, Outcome::Works)),
+        ));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    for m in &log {
+        store.apply(m).unwrap();
+    }
+    let state = store.api_state(2_000).unwrap();
+    let row = &state["matrix"].as_array().unwrap()[0];
+    assert_eq!(row["state"], "hint_works");
+    assert_eq!(row["with_block"], 0);
+    assert_eq!(row["reports"], 4);
+    assert_eq!(state["matrix_blocks"]["kept"], false);
+    let lines = sommelier::report::status_lines(store.connection());
+    assert!(lines.iter().any(|l| l.contains("keeps no address blocks")));
 }

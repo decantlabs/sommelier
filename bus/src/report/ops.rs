@@ -15,6 +15,7 @@
 //! newer one.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
@@ -22,10 +23,11 @@ use serde_json::{Map, Value, json};
 use super::orders::{
     self, MAX_WANTED, Needs, OrderRow, check_order_fields, query_orders, report_counts, reported_by,
 };
+use super::side::{self, Claim, Side};
 use super::types::{MachineClass, Outcome, Report};
 use super::{
-    Cell, CellState, QuorumRules, ReportLimits, ReportView, cell, query_reports, regressions,
-    validate_report,
+    Cell, CellState, QuorumRules, ReportLimits, ReportView, cell, machine_key, query_reports,
+    regressions, validate_report,
 };
 use crate::hooks::OpContext;
 use crate::hub::Hub;
@@ -48,7 +50,8 @@ pub struct TestConfig {
     /// 4096 bytes, because a message body of the hub is at most 4096 bytes.
     pub limits: ReportLimits,
     /// How many open orders a member may hold at once: orders handed to it by `test.next` and not
-    /// answered yet. At the limit `test.next` hands out only orders it already handed.
+    /// answered yet. At the limit `test.next` hands out only orders it already handed. The hand
+    /// outs live in the private side store ([`side`]), so a restart keeps them.
     pub max_handed_per_member: usize,
     /// How long a handed order counts against that limit, in seconds.
     pub hand_hold_secs: u64,
@@ -56,12 +59,10 @@ pub struct TestConfig {
     pub order_ttl_secs: u64,
     /// Most open orders at one time.
     pub max_open_orders: usize,
-    /// Test hook: address blocks by member. `door::block_of` answers None in the first wave two
-    /// build, so tests name the blocks here. A member in this table uses its entry before the door.
+    /// Test hook: address blocks by member. A member in this table uses its entry before the
+    /// front door. A report takes the block of its sender when it arrives and keeps it in the side
+    /// store, so a later change of address does not make the sender look new.
     pub blocks: Arc<Mutex<BTreeMap<String, String>>>,
-    /// Orders handed out and not answered: (member, order) to the time of the hand out in ms.
-    /// Memory only, a restart forgets it.
-    pub handed: Arc<Mutex<BTreeMap<(String, String), u64>>>,
 }
 
 impl Default for TestConfig {
@@ -75,7 +76,6 @@ impl Default for TestConfig {
             order_ttl_secs: 7 * 24 * 3600,
             max_open_orders: 200,
             blocks: Arc::new(Mutex::new(BTreeMap::new())),
-            handed: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -245,6 +245,11 @@ fn close(
     Ok(out)
 }
 
+fn data_dir(ctx: &OpContext<'_>) -> Result<PathBuf, String> {
+    side::data_dir_of(ctx.store.connection())
+        .ok_or_else(|| "the hub keeps no data folder for the test network".to_string())
+}
+
 fn next(
     ctx: &mut OpContext<'_>,
     body: &Value,
@@ -269,6 +274,7 @@ fn next(
         _ => return Err("the request needs `profiles`, a list of at most 64 profile ids".into()),
     };
     let member = ctx.caller.name.clone();
+    let side = Side::open(&data_dir(ctx)?)?;
     let conn = ctx.store.connection();
     let all = query_orders(conn)?;
     let counts = report_counts(conn)?;
@@ -276,25 +282,23 @@ fn next(
     let mut candidates = orders::candidates(&all, &counts, &reported, &machine, &profiles);
 
     let now = ctx.now_ms;
-    let mut handed = lock(&cfg.handed);
-    handed.retain(|(m, o), at| {
-        m != &member
-            || (now.saturating_sub(*at) <= cfg.hand_hold_secs * 1000
-                && all.iter().any(|x| &x.id == o && x.state == "open")
-                && !reported.contains(o))
-    });
-    let mine: BTreeSet<String> = handed
-        .keys()
-        .filter(|(m, _)| m == &member)
-        .map(|(_, o)| o.clone())
-        .collect();
+    side.prune_member(
+        &member,
+        &|run| {
+            all.iter().any(|x| x.id == run && x.state == "open")
+                && !reported.iter().any(|r| r == run)
+        },
+        now,
+        cfg.hand_hold_secs.saturating_mul(1000),
+    )?;
+    let mine: BTreeSet<String> = side.handed_to(&member)?.into_keys().collect();
     if mine.len() >= cfg.max_handed_per_member.max(1) {
         candidates.retain(|o| mine.contains(&o.id));
     }
     let mut out = Map::new();
     match candidates.first() {
         Some(o) => {
-            handed.entry((member, o.id.clone())).or_insert(now);
+            side.hand(&member, &o.id, &machine_key(&machine), now)?;
             out.insert(
                 "order".into(),
                 json!({
@@ -347,6 +351,7 @@ fn send(
         let public = unb64(&public).map_err(|_| "the stored key is damaged".to_string())?;
         verify_request(raw, &public).map_err(|e| format!("report.sig is wrong: {e}"))?;
     }
+    let dir = data_dir(ctx)?;
     let conn = ctx.store.connection();
     let order = query_orders(conn)?
         .into_iter()
@@ -373,6 +378,12 @@ fn send(
             order.id
         ));
     }
+    if !order.needs.matches(&report.machine) {
+        return Err(format!(
+            "the machine of the report does not fit what run order `{}` needs",
+            order.id
+        ));
+    }
     if reported_by(conn, &member)?.contains(&order.id) {
         return Err(format!(
             "you reported on run order `{}` already, one report per order",
@@ -381,8 +392,46 @@ fn send(
     }
     validate_report(&report, &cfg.limits)?;
     let line = serde_json::to_string(&report).map_err(|e| e.to_string())?;
-    let id = ctx.emit(hub_fact(format!("report/{}", report.run), line, ctx.now_ms))?;
-    lock(&cfg.handed).remove(&(member, order.id.clone()));
+
+    // The order must have been handed to this member for this machine. The claim, the block of the
+    // sender and the one report per order are decided together in the side store.
+    let key = machine_key(&report.machine);
+    let block = lock(&cfg.blocks)
+        .get(&member)
+        .cloned()
+        .or_else(|| side::door_block(&dir, &member))
+        .unwrap_or_default();
+    let mut side = Side::open(&dir)?;
+    let handed_at = side.handed_at(&member, &order.id).unwrap_or(0);
+    let hold = cfg.hand_hold_secs.saturating_mul(1000);
+    match side.claim(&member, &order.id, &key, &block, ctx.now_ms, hold)? {
+        Claim::Taken => {}
+        Claim::NotHanded => {
+            return Err(format!(
+                "run order `{}` was not handed to you, or too long ago: ask `test.next` first",
+                order.id
+            ));
+        }
+        Claim::OtherMachine(_) => {
+            return Err(format!(
+                "run order `{}` was handed to another machine class than the one in the report",
+                order.id
+            ));
+        }
+        Claim::Sent => {
+            return Err(format!(
+                "you reported on run order `{}` already, one report per order",
+                order.id
+            ));
+        }
+    }
+    let id = match ctx.emit(hub_fact(format!("report/{}", report.run), line, ctx.now_ms)) {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = side.release(&member, &order.id, &key, handed_at);
+            return Err(e);
+        }
+    };
     let mut out = Map::new();
     out.insert("run".into(), json!(order.id));
     out.insert("id".into(), json!(id));
@@ -402,6 +451,10 @@ struct Snapshot {
     orders: Vec<OrderRow>,
     reports: Vec<super::ReportRow>,
     raised: BTreeSet<String>,
+    /// The block of each report that has one, by (run, member). Taken when the report arrived.
+    blocks: BTreeMap<(String, String), String>,
+    /// The data folder, to prune the hand outs after the lock is released.
+    data_dir: Option<PathBuf>,
 }
 
 fn snapshot(conn: &rusqlite::Connection) -> Result<Snapshot, String> {
@@ -417,6 +470,8 @@ fn snapshot(conn: &rusqlite::Connection) -> Result<Snapshot, String> {
         orders: query_orders(conn)?,
         reports: query_reports(conn)?,
         raised,
+        blocks: side::blocks_of(conn),
+        data_dir: side::data_dir_of(conn),
     })
 }
 
@@ -444,8 +499,8 @@ fn plain_key(s: &str, max: usize) -> String {
 
 /// Called on every hub tick. Returns messages for the hub to append.
 ///
-/// It reads the tables once, asks the front door for the blocks, and computes in memory. Nothing
-/// slow runs under the state lock.
+/// It reads the tables and the side store once and computes in memory. Hand outs that no longer
+/// count are dropped for every member. Nothing slow runs under the state lock.
 pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     let cfg = &hub.config().test;
     if !cfg.enabled {
@@ -454,31 +509,30 @@ pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     let Some(Ok(snap)) = hub.with_store(|s| snapshot(s.connection())) else {
         return Vec::new();
     };
-    let mut blocks: BTreeMap<String, Option<String>> = BTreeMap::new();
-    for r in &snap.reports {
-        blocks
-            .entry(r.member.clone())
-            .or_insert_with(|| block_for(hub, cfg, &r.member));
+    if let Some(dir) = &snap.data_dir
+        && let Some(side) = Side::open_existing(dir)
+    {
+        let _ = side.prune_all(
+            &|run| snap.orders.iter().any(|o| o.id == run && o.state == "open"),
+            now_ms,
+            cfg.hand_hold_secs.saturating_mul(1000),
+        );
     }
-    plan_tick(&snap, &blocks, cfg, now_ms)
+    plan_tick(&snap, cfg, now_ms)
 }
 
-fn view(r: &super::ReportRow, blocks: &BTreeMap<String, Option<String>>) -> Option<ReportView> {
+fn view(r: &super::ReportRow, blocks: &BTreeMap<(String, String), String>) -> Option<ReportView> {
     Some(ReportView {
         member: r.member.clone(),
         tier: 0,
-        block: blocks.get(&r.member).cloned().flatten(),
+        block: blocks.get(&(r.run.clone(), r.member.clone())).cloned(),
         outcome: outcome_of(&r.outcome)?,
         at: r.at,
     })
 }
 
-fn plan_tick(
-    snap: &Snapshot,
-    blocks: &BTreeMap<String, Option<String>>,
-    cfg: &TestConfig,
-    now_ms: u64,
-) -> Vec<Message> {
+fn plan_tick(snap: &Snapshot, cfg: &TestConfig, now_ms: u64) -> Vec<Message> {
+    let blocks = &snap.blocks;
     let now_s = now_ms / 1000;
     let mut out = Vec::new();
 

@@ -182,12 +182,7 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
             any,
         ),
         // A Windows security identifier, the account behind a profile.
-        pattern(
-            HitKind::Machine,
-            r"(?i)\bS-1-\d+(?:-\d+){2,}\b",
-            0,
-            any,
-        ),
+        pattern(HitKind::Machine, r"(?i)\bS-1-\d+(?:-\d+){2,}\b", 0, any),
         // A GUID: machine ids, adapter ids, profile ids.
         pattern(
             HitKind::Machine,
