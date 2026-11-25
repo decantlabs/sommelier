@@ -121,7 +121,18 @@ async fn connect_one(
         .as_str()
         .into_client_request()
         .map_err(|e| fatal(format!("bad hub URL `{raw_url}`: {e}")))?;
-    let auth = HeaderValue::from_str(&format!("Bearer {}", token.trim()))
+    // A token that names a key file signs in with the key: the key never leaves the file.
+    let value = if crate::key::client::marker_path(token).is_some() {
+        crate::key::client::auth_header(raw_url, token)
+            .await
+            .map_err(|e| ConnectError {
+                msg: e.msg,
+                fatal: e.fatal,
+            })?
+    } else {
+        format!("Bearer {}", token.trim())
+    };
+    let auth = HeaderValue::from_str(&value)
         .map_err(|_| fatal("the token contains characters a header cannot carry".into()))?;
     req.headers_mut().insert("authorization", auth);
     match tokio_tungstenite::connect_async(req).await {
@@ -164,6 +175,9 @@ pub async fn fetch_policy(opts: &Opts) -> Result<crate::policy::Snapshot, String
 }
 
 async fn fetch_policy_one(raw_url: &str, token: &str) -> Result<crate::policy::Snapshot, String> {
+    if crate::key::client::marker_path(token).is_some() {
+        return Err("the policy is for token members, a key member does not fetch it".into());
+    }
     let mut url = reqwest::Url::parse(raw_url.trim()).map_err(|_| "invalid hub URL")?;
     let scheme = match url.scheme() {
         "ws" | "http" => "http",
@@ -356,6 +370,9 @@ pub async fn tail(
                                     eprintln!("sommelier: hub closed the connection: {}", f.reason);
                                     if f.reason.as_str() == "token revoked" {
                                         return Err("token revoked".into());
+                                    }
+                                    if f.reason.as_str() == "key revoked" {
+                                        return Err("key revoked".into());
                                     }
                                 }
                                 break;

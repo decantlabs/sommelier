@@ -350,3 +350,64 @@ while True:
         continue
     print(f["id"], f["from"], f["kind"], f["topic"], f["body"])
 ```
+
+## 10. Key members
+
+A person with no token and no account can join with a key (`docs/factory.md` section 4). It is off by
+default: a hub behaves as before until its owner starts it with `sommelier serve --join on`
+(`--join-pow-bits N` sets the proof of work, default 20). A key member acts as `name` = its member id,
+role `member`, and has **tier 0**.
+
+**Member id.** `m` plus the first 16 characters of the lower case base32 (no padding) of the SHA 256 of the
+FIRST public key of the member. A rotation does not change it.
+
+**Signing.** A request is signed with Ed25519 over the compact UTF 8 JSON of the request with the keys sorted
+in every object and without the field `sig`. Keys and signatures travel as base64url without padding.
+
+**`GET /api/challenge`** (no authentication) answers `{"hub_id", "nonce", "expires", "pow_bits"}`. A nonce is
+random, lives 60 seconds, is kept in memory and is used once. `hub_id` is a random id that the hub keeps in its
+data folder.
+
+**`POST /api/join`** (no authentication) takes `{"pub", "handle", "nonce", "counter", "sig"}`:
+
+* `pub` is the 32 byte public key, `handle` has 1 to 32 characters (letters, digits, `.`, `-`, `_`).
+* The proof of work: SHA 256 over the nonce text, the public key bytes and `counter` (8 bytes, big endian)
+  must start with `pow_bits` zero bits.
+* `sig` signs the other four fields.
+
+The hub refuses with 403 while joining is off and with 400 for a bad handle, signature, proof of work or a
+nonce that is unknown, used or expired. A good join writes ONE message: a FACT from `hub` with topic
+`key/<member>` and a one line JSON body
+
+    {"v":1,"member":"m...","pub":"...","handle":"...","state":"active","joined_at":"2026-11-25T10:00:00.000Z"}
+
+and answers `{"member", "joined": true, "id"}`. A key that is known (also a rotated one) answers
+`{"member", "joined": false}` and writes nothing. No network address of a client is stored anywhere.
+
+**Signing in.** On the WebSocket upgrade, and on `GET /api/state`, instead of a bearer token:
+
+    Authorization: SommelierKey <member>.<nonce>.<signature>
+
+The signature (base64url) covers three lines: `sommelier-auth-v1`, the hub id and the nonce. The nonce comes
+from `/api/challenge` and is used once, so a replayed header is refused with 401. The key must be `active`
+and the signature must match its current public key. Observer style tokens in the URL are not available for
+keys. `whoami` of a key member also answers `"tier": 0`.
+
+**Tier 0 may send only** `whoami`, `heartbeat`, `log`, `roster`, `who`, `claims`, the message kind `HELLO`
+and the two key requests below. Everything else (other kinds, `idle`, every module op such as `task.add`) is
+refused with one line that names the tier, for example `tier 0 may not use the message kind CHAT: a new key may
+only use ...`. The list is `key::TIER0_ALLOWED`, later phases extend it. Token members keep their rights.
+
+**`key.rotate`** (module op, key members only): `{"op":"key.rotate","new_pub","sig"}`. `sig` is the signature
+of the CURRENT key over `{"member","new_pub","old_pub","op":"key.rotate"}`. The hub writes a FACT `key/<member>`
+with the same fields as a join plus `"op":"rotate"`, `"prev"` (the old key) and `"sig"`. The old key is refused
+from then on and its open connections close.
+
+**`key.revoke`** (module op): a key member sends `{"op":"key.revoke","reason","sig"}` where `sig` signs
+`{"member","op":"key.revoke","pub","reason"}` with its own key. An orchestrator token sends
+`{"op":"key.revoke","member","reason"}` (the reason is required). The hub writes a FACT `key/<member>` with
+`"state":"revoked"`, `"op":"revoke"`, `"reason"` and `"sig"` or `"by"` (the orchestrator). A revoked key is refused
+at connect and an open connection is closed with the reason `key revoked`, the way a revoked token is.
+
+**Only the hub writes `key/` facts.** A `send` of a FACT with a topic under `key/` is refused, and the KEY table
+is projected only from FACT messages of the hub, so a replay of the log gives the same table.

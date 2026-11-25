@@ -23,13 +23,18 @@ details for one command: sommelier help <command>  or  sommelier <command> --hel
 HUB OWNER
   sommelier serve [--listen 127.0.0.1:7300] [--data DIR] [--rate 2] [--burst 30]
                [--policy PATH] [--claim-ttl MINUTES] [--max-body BYTES] [--kind-limit KIND=CHARS] [--quiet]
+               [--join on|off] [--join-pow-bits N]
   sommelier token add NAME [--role member|orchestrator|observer] [--data DIR]
   sommelier token rotate NAME [--data DIR]
   sommelier token revoke NAME [--data DIR]
   sommelier token list [--data DIR]
   sommelier policy publish FILE | policy rollback VERSION [--data DIR]
 
-CLIENTS (need --url and --token, or SOMMELIER_URL and SOMMELIER_TOKEN)
+KEY MEMBERS (no token, no account)
+  sommelier join [--handle H] [--url URL] [--data DIR]
+  sommelier key show | rotate | revoke --yes [--reason TEXT]
+
+CLIENTS (need --url and --token, or SOMMELIER_URL and SOMMELIER_TOKEN, or a key from `sommelier join`)
   sommelier send KIND [BODY...] [--topic T] [--ref R]... [--re ID]... [--to NAME]...
                  body from the arguments, or from stdin with BODY `-` or --stdin
                  (stdin lines are joined with ` | `)
@@ -184,9 +189,13 @@ fn client_token(a: &Args) -> Result<String, String> {
     ) {
         (Some(t), _) => t,
         (None, file) => {
-            let path = file.map(str::to_owned).or_else(|| env("SOMMELIER_TOKEN_FILE")).ok_or(
-                "no token: pass --token, --token-file, or set SOMMELIER_TOKEN (the hub owner issues it with `sommelier token add`)",
-            )?;
+            let path = file
+                .map(str::to_owned)
+                .or_else(|| env("SOMMELIER_TOKEN_FILE"))
+                .or_else(sommelier::key::client::default_marker_file)
+                .ok_or(
+                    "no token: pass --token, --token-file, or set SOMMELIER_TOKEN (the hub owner issues it with `sommelier token add`), or run `sommelier join` for a key",
+                )?;
             std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read token file {path}: {e}"))?
                 .trim()
@@ -261,6 +270,8 @@ async fn cmd_serve(raw: &[String]) -> Result<(), String> {
             "max-body",
             "kind-limit",
             "ui",
+            "join",
+            "join-pow-bits",
         ],
         &["quiet", "no-ui"],
     )?;
@@ -287,6 +298,20 @@ async fn cmd_serve(raw: &[String]) -> Result<(), String> {
             cfg.limits.kind_chars.insert(kind, n);
         }
     }
+    match a.get("join") {
+        None | Some("off") => {}
+        Some("on") => cfg.join.enabled = true,
+        Some(other) => return Err(format!("--join needs `on` or `off`, got `{other}`")),
+    }
+    if let Some(bits) = a.num::<u32>("join-pow-bits")? {
+        if bits > sommelier::key::join::MAX_POW_BITS {
+            return Err(format!(
+                "--join-pow-bits {bits} is too hard, the largest is {}",
+                sommelier::key::join::MAX_POW_BITS
+            ));
+        }
+        cfg.join.proof_of_work_bits = bits;
+    }
     cfg.verbose = !a.flag("quiet");
     cfg.ui_dir = if a.flag("no-ui") {
         None
@@ -304,6 +329,7 @@ async fn cmd_serve(raw: &[String]) -> Result<(), String> {
     };
     let data = cfg.data_dir.clone();
     let ui = cfg.ui_dir.clone();
+    let cfg_join = cfg.join;
     let hub = hub::Hub::open(cfg).map_err(|e| format!("cannot open {}: {e}", data.display()))?;
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
@@ -323,6 +349,12 @@ async fn cmd_serve(raw: &[String]) -> Result<(), String> {
     match &ui {
         Some(d) => eprintln!("dashboard from {}", d.display()),
         None => eprintln!("no dashboard: no ui folder next to the executable, see --ui"),
+    }
+    if cfg_join.enabled {
+        eprintln!(
+            "joining with a key is ON ({} bit proof of work)",
+            cfg_join.proof_of_work_bits
+        );
     }
     if members == 0 {
         eprintln!("no tokens yet: sommelier token add <name> --role orchestrator");
@@ -925,12 +957,18 @@ async fn cmd_simple(op: &str, raw: &[String]) -> Result<(), String> {
     }
     let s = |v: &Value| v.as_str().unwrap_or("").to_owned();
     match op {
-        "whoami" => println!(
-            "{} {} (hub at #{})",
-            s(&v["name"]),
-            s(&v["role"]),
-            v["last_id"]
-        ),
+        "whoami" => {
+            let tier = v["tier"]
+                .as_u64()
+                .map(|t| format!(" tier {t}"))
+                .unwrap_or_default();
+            println!(
+                "{} {}{tier} (hub at #{})",
+                s(&v["name"]),
+                s(&v["role"]),
+                v["last_id"]
+            );
+        }
         "heartbeat" => println!("ok, {} claims kept alive", v["claims"]),
         _ => {
             for c in v["connections"].as_array().into_iter().flatten() {
@@ -974,6 +1012,8 @@ fn sub_help(cmd: &str) -> Option<String> {
   --kind-limit K=N    repeatable or K=N,K=N: body limit of a kind in characters. Defaults:
                       ACCEPT and DECLINE 200, CHAT TASK RUN_REQUEST CLAIM RELEASE HELLO 600,
                       READY FIX STUCK RUN_RESULT FINDING LANDED 1200. STATUS has none
+  --join on|off       let people without a token join with a key (`sommelier join`), default off
+  --join-pow-bits N   proof of work a join must solve, default 20 (seconds of CPU), at most 40
   --quiet             do not print connects and disconnects
   --ui DIR            dashboard files served over plain HTTP on the same port, default:
                       a ui folder next to the executable or two levels up from it
@@ -1088,6 +1128,7 @@ unless --kind STATUS or --all is given.
             "Checks a READY or STUCK result and optionally a saved git ls-remote listing. Validation failures exit 3.\n",
             false,
         ),
+        "join" | "key" => return Some(sommelier::cli::key::help(cmd).to_owned()),
         "who" => ("sommelier who [--json]", "Lists open connections: name, role, listening or request.\n", true),
         "whoami" => ("sommelier whoami [--json]", "Shows your name, role and the newest message id.\n", true),
         "heartbeat" => (
