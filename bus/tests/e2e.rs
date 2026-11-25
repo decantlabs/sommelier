@@ -586,10 +586,7 @@ async fn the_factory_runs_from_join_to_landing_and_the_log_replays() {
     let order_id = order["id"].as_str().unwrap().to_owned();
     // Two fresh keys and the token member carol, who is vouched for by the owner. A ring of fresh
     // keys would not lift itself: one agreeing report must come from a member of tier 1 or above.
-    let testers = [
-        person(&w.url, "t-one").await,
-        person(&w.url, "t-two").await,
-    ];
+    let testers = [person(&w.url, "t-one").await, person(&w.url, "t-two").await];
     let carol = call_from(
         &w.url,
         &w.carol,

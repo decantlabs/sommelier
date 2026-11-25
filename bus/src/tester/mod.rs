@@ -6,7 +6,8 @@
 //! * [`profile`]: the title profile file and its validation, and [`profile::check_title`].
 //! * [`machine`]: the machine class of a test machine, with the GPU behind a [`machine::Probe`].
 //! * [`cmd`]: the small [`cmd::CommandRunner`] trait for outside commands, and the real runner.
-//! * [`verify`]: the provenance check of a build, [`verify::verify_build`].
+//! * [`verify`]: the provenance check of a build archive and its unpacking into a fresh folder,
+//!   [`verify::verify_build`] and [`verify::prepare_build`].
 //! * [`run`]: [`run::build_report`], which turns a run folder and a log into a
 //!   [`crate::report::types::Report`]. The caller signs the report.
 //!
@@ -29,4 +30,4 @@ pub use machine::{
 };
 pub use profile::{Executable, Input, Milestone, Profile, Scenario, check_title};
 pub use run::{RunInput, build_report};
-pub use verify::verify_build;
+pub use verify::{prepare_build, verify_build};

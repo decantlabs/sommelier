@@ -12,7 +12,8 @@ use sommelier::tester::machine::{
 use sommelier::tester::run::EXCERPT_MAX;
 use sommelier::tester::{
     CmdOutput, CommandProbe, CommandRunner, GpuOutput, GpuSource, Probe, Profile, RunError,
-    RunInput, build_report, check_title, machine_class, machine_class_with, verify_build,
+    RunInput, build_report, check_title, machine_class, machine_class_with, prepare_build,
+    verify_build,
 };
 
 fn fixture(rel: &str) -> PathBuf {
@@ -333,13 +334,20 @@ fn command_probe_picks_the_command_of_the_system() {
 
 // ---------------------------------------------------------------- verify_build
 
+const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
 const OK_TEXT: &str = "Loaded digest sha256:ab for file\nLoaded 1 attestation from GitHub API\n\nThe following policy criteria will be enforced:\n\n✓ Verification succeeded!\n";
 
 #[test]
 fn verify_build_passes_on_clean_success() {
     let fake = Fake::new(vec![("gh", out(0, OK_TEXT, ""))]);
     assert_eq!(
-        verify_build(Path::new("build.zip"), "example-org/example-repo", &fake),
+        verify_build(
+            Path::new("build.zip"),
+            "example-org/example-repo",
+            COMMIT,
+            &fake
+        ),
         Ok(())
     );
     let calls = fake.calls.borrow();
@@ -352,37 +360,43 @@ fn verify_build_passes_on_clean_success() {
             "verify",
             "build.zip",
             "--repo",
-            "example-org/example-repo"
+            "example-org/example-repo",
+            "--source-digest",
+            COMMIT,
+            "--source-ref",
+            "refs/heads/main",
+            "--signer-workflow",
+            "example-org/example-repo/.github/workflows/release.yml",
         ]
     );
     // gh prints to the error stream in some versions.
     let fake = Fake::new(vec![("gh", out(0, "", OK_TEXT))]);
-    assert!(verify_build(Path::new("build.zip"), "o/r", &fake).is_ok());
+    assert!(verify_build(Path::new("build.zip"), "o/r", COMMIT, &fake).is_ok());
 }
 
 #[test]
 fn verify_build_fails_closed() {
     let a = Path::new("build.zip");
     let missing = Fake::new(vec![("gh", Err(RunError::NotFound))]);
-    let e1 = verify_build(a, "o/r", &missing).unwrap_err();
+    let e1 = verify_build(a, "o/r", COMMIT, &missing).unwrap_err();
     assert!(
         e1.contains("not installed") && e1.contains("install"),
         "{e1}"
     );
 
     let failing = Fake::new(vec![("gh", out(1, "", "no attestations found"))]);
-    let e2 = verify_build(a, "o/r", &failing).unwrap_err();
+    let e2 = verify_build(a, "o/r", COMMIT, &failing).unwrap_err();
     assert!(
         e2.contains("does not verify") && e2.contains("exit code 1"),
         "{e2}"
     );
 
     let odd = Fake::new(vec![("gh", out(0, "all good, trust me\n", ""))]);
-    let e3 = verify_build(a, "o/r", &odd).unwrap_err();
+    let e3 = verify_build(a, "o/r", COMMIT, &odd).unwrap_err();
     assert!(e3.contains("did not report"), "{e3}");
 
     let hung = Fake::new(vec![("gh", Err(RunError::Failed("timed out".into())))]);
-    let e4 = verify_build(a, "o/r", &hung).unwrap_err();
+    let e4 = verify_build(a, "o/r", COMMIT, &hung).unwrap_err();
     assert!(e4.contains("could not run"), "{e4}");
 
     let signal = Fake::new(vec![(
@@ -393,7 +407,7 @@ fn verify_build_fails_closed() {
             stderr: String::new(),
         }),
     )]);
-    assert!(verify_build(a, "o/r", &signal).is_err());
+    assert!(verify_build(a, "o/r", COMMIT, &signal).is_err());
 
     let msgs = [e1, e2, e3, e4];
     for (i, m) in msgs.iter().enumerate() {
@@ -408,12 +422,109 @@ fn verify_build_refuses_bad_input_before_running() {
     let fake = Fake::new(vec![("gh", out(0, OK_TEXT, ""))]);
     for repo in ["", "noslash", "a/b/c", "--flag/x", "a/b c", "a/-b"] {
         assert!(
-            verify_build(Path::new("b.zip"), repo, &fake).is_err(),
+            verify_build(Path::new("b.zip"), repo, COMMIT, &fake).is_err(),
             "{repo}"
         );
     }
-    assert!(verify_build(Path::new("--help"), "o/r", &fake).is_err());
+    assert!(verify_build(Path::new("--help"), "o/r", COMMIT, &fake).is_err());
+    // The commit of the order is checked too: it goes into a command line.
+    for commit in [
+        "",
+        "abc",
+        "--help",
+        "ABCDEF1",
+        "0123456789abcdef; rm",
+        "g123456",
+    ] {
+        assert!(
+            verify_build(Path::new("b.zip"), "o/r", commit, &fake).is_err(),
+            "{commit}"
+        );
+    }
     assert!(fake.calls.borrow().is_empty());
+}
+
+/// A runner that plays `gh` and `tar`. `tar` writes the files in `unpack` into the folder after `-C`.
+struct Archive {
+    gh: Result<CmdOutput, RunError>,
+    tar_code: i32,
+    unpack: Vec<(&'static str, &'static str)>,
+    seen: RefCell<Vec<(String, Vec<String>)>>,
+}
+
+impl CommandRunner for Archive {
+    fn run(&self, program: &str, args: &[String]) -> Result<CmdOutput, RunError> {
+        self.seen
+            .borrow_mut()
+            .push((program.to_owned(), args.to_vec()));
+        match program {
+            "gh" => self.gh.clone(),
+            "tar" => {
+                let at = args.iter().position(|a| a == "-C").unwrap();
+                let folder = Path::new(&args[at + 1]);
+                for (name, text) in &self.unpack {
+                    let file = folder.join(name);
+                    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    std::fs::write(file, text).unwrap();
+                }
+                out(self.tar_code, "", "")
+            }
+            _ => Err(RunError::NotFound),
+        }
+    }
+}
+
+fn archive(gh: Result<CmdOutput, RunError>, tar_code: i32) -> Archive {
+    Archive {
+        gh,
+        tar_code,
+        unpack: vec![("title/decant.exe", "x"), ("readme.txt", "y")],
+        seen: RefCell::new(vec![]),
+    }
+}
+
+#[test]
+fn prepare_build_verifies_then_unpacks_into_a_fresh_folder() {
+    let base = tempfile::tempdir().unwrap();
+    let fake = archive(out(0, OK_TEXT, ""), 0);
+    let a = prepare_build(Path::new("build.zip"), "o/r", COMMIT, base.path(), &fake).unwrap();
+    let b = prepare_build(Path::new("build.zip"), "o/r", COMMIT, base.path(), &fake).unwrap();
+    assert_ne!(a, b, "every run gets a fresh folder");
+    assert!(a.starts_with(base.path()));
+    assert!(a.join("title/decant.exe").is_file());
+    // gh first, then tar into the fresh folder.
+    let seen = fake.seen.borrow();
+    assert_eq!(seen[0].0, "gh");
+    assert_eq!(seen[1].0, "tar");
+    assert!(seen[1].1.contains(&"build.zip".to_owned()));
+    assert!(seen[1].1.contains(&a.to_string_lossy().into_owned()));
+}
+
+#[test]
+fn prepare_build_unpacks_nothing_when_the_attestation_fails() {
+    let base = tempfile::tempdir().unwrap();
+    let fake = archive(out(1, "", "no matching attestation"), 0);
+    let e = prepare_build(Path::new("build.zip"), "o/r", COMMIT, base.path(), &fake).unwrap_err();
+    assert!(e.contains("does not verify"), "{e}");
+    assert!(
+        fake.seen.borrow().iter().all(|(p, _)| p == "gh"),
+        "tar ran after a failed check"
+    );
+    assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn prepare_build_leaves_nothing_behind_when_unpacking_fails() {
+    let base = tempfile::tempdir().unwrap();
+    let fake = archive(out(0, OK_TEXT, ""), 2);
+    let e = prepare_build(Path::new("build.zip"), "o/r", COMMIT, base.path(), &fake).unwrap_err();
+    assert!(e.contains("could not be unpacked"), "{e}");
+    assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
+    let mut none = archive(out(0, OK_TEXT, ""), 0);
+    none.unpack.clear();
+    let e = prepare_build(Path::new("build.zip"), "o/r", COMMIT, base.path(), &none).unwrap_err();
+    assert!(e.contains("empty"), "{e}");
+    assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
 }
 
 // ---------------------------------------------------------------- build_report

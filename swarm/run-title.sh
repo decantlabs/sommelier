@@ -27,6 +27,10 @@
 set -u
 if [ $# -lt 3 ]; then sed -n '2,25p' "$0"; exit 2; fi
 worktree=$1; SECS=$2; LABEL=$3; shift 3
+# The label becomes a part of a folder name. It must not lead out of $SOMMELIER_RUNS.
+case "$LABEL" in
+  ''|*/*|*\\*|*..*) printf 'run-title: the label must not be empty and must not hold a slash, a backslash or two dots: %s\n' "$LABEL" >&2; exit 2 ;;
+esac
 HERE=$(cd "$(dirname "$0")" && pwd)
 for kv in "$@"; do
   case "$kv" in
