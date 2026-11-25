@@ -203,13 +203,17 @@ impl StoreModule for StampModule {
     fn api(
         &self,
         conn: &Connection,
-        _now_sec: u64,
+        now_sec: u64,
         state: &mut Map<String, Value>,
     ) -> Result<(), String> {
-        let rows: Vec<Value> = standing(conn)?
-            .into_iter()
-            .map(|r| json!({ "member": r.member, "counts": r.counts }))
-            .collect();
+        // A hub with standing on adds the tier and what is missing, see `ops::api_rows`.
+        let rows: Vec<Value> = match ops::api_rows(conn, now_sec) {
+            Some(rows) => rows,
+            None => standing(conn)?
+                .into_iter()
+                .map(|r| json!({ "member": r.member, "counts": r.counts }))
+                .collect(),
+        };
         state.insert("standing".to_owned(), Value::Array(rows));
         Ok(())
     }
