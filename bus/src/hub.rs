@@ -28,7 +28,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 
 use crate::claims::Claims;
-use crate::key::book::Lookup;
+use crate::key::book::{Lookup, Standing};
 use crate::key::{Challenges, JoinRules, KeyBook};
 use crate::lock;
 use crate::msg::{
@@ -235,6 +235,44 @@ fn load_hub_id(dir: &std::path::Path) -> io::Result<String> {
     Ok(id)
 }
 
+/// The secret that makes the nonces of this data folder, made at the first start. It is never
+/// logged and never sent. A hub that loses the file only invalidates the nonces in flight.
+fn load_nonce_secret(dir: &std::path::Path) -> io::Result<[u8; 32]> {
+    let path = dir.join("challenge_secret");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let text = text.trim();
+        if text.len() == 64
+            && let Some(raw) = (0..32)
+                .map(|i| u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok())
+                .collect::<Option<Vec<u8>>>()
+        {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&raw);
+            return Ok(out);
+        }
+    }
+    let mut raw = [0u8; 32];
+    getrandom::fill(&mut raw).map_err(|e| io::Error::other(e.to_string()))?;
+    let text: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&path)?;
+        f.write_all(text.as_bytes())?;
+        f.write_all(
+            b"
+",
+        )?;
+    }
+    Ok(raw)
+}
+
 fn file_stamp(path: &std::path::Path) -> Option<(SystemTime, u64)> {
     let md = std::fs::metadata(path).ok()?;
     Some((md.modified().ok()?, md.len()))
@@ -258,6 +296,7 @@ impl Hub {
         let tokens = TokenFile::load(&tokens_path)?;
         let tokens_stamp = file_stamp(&tokens_path);
         let hub_id = load_hub_id(&cfg.data_dir)?;
+        let nonce_secret = load_nonce_secret(&cfg.data_dir)?;
 
         let store = PolicyStore::new(&cfg.data_dir);
         store.initialize(cfg.policy_path.as_deref())?;
@@ -352,7 +391,7 @@ impl Hub {
             next_conn: AtomicU64::new(1),
             stop: tokio::sync::watch::channel(false).0,
             hub_id,
-            challenges: Challenges::default(),
+            challenges: Challenges::with_secret(nonce_secret),
         });
         hub.reload_policy().map_err(io::Error::other)?;
         Ok(hub)
@@ -726,6 +765,11 @@ impl Hub {
     /// text and the nonce was handed out by this hub and is still unused.
     fn check_key(&self, header: &str) -> Result<(Member, Credential), (StatusCode, String)> {
         let unauthorized = |m: &str| (StatusCode::UNAUTHORIZED, m.to_string());
+        if !self.cfg.join.enabled {
+            return Err(unauthorized(
+                "key sign in is switched off on this hub, the owner turns it on with `sommelier serve --join on`",
+            ));
+        }
         let mut parts = header.split('.');
         let (Some(member), Some(nonce), Some(sig), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
@@ -749,6 +793,9 @@ impl Hub {
                 }
             }
         };
+        self.challenges
+            .check(nonce, now_ms())
+            .map_err(|e| unauthorized(&e))?;
         let sig = crate::key::crypto::unb64(sig)
             .map_err(|_| unauthorized("the signature is not valid base64url"))?;
         let public_bytes = crate::key::crypto::unb64(&public)
@@ -760,7 +807,7 @@ impl Hub {
         )
         .map_err(|_| unauthorized("the key signature is wrong"))?;
         self.challenges
-            .consume(nonce, now_ms())
+            .mark_used(nonce, now_ms())
             .map_err(|e| unauthorized(&e))?;
         let member = Member {
             name: member.to_owned(),
@@ -798,6 +845,12 @@ impl Hub {
 
     /// `GET /api/challenge`: a nonce that lives a short time and is used once.
     pub fn challenge(&self) -> Result<Value, (u16, String)> {
+        if !self.cfg.join.enabled {
+            return Err((
+                403,
+                "this hub serves no challenge while joining is switched off, the owner turns it on with `sommelier serve --join on`".into(),
+            ));
+        }
         let now = now_ms();
         let (nonce, expires) = self
             .challenges
@@ -822,8 +875,11 @@ impl Hub {
         let body: Value = serde_json::from_slice(raw)
             .map_err(|e| bad(format!("the join body is not valid JSON: {e}")))?;
         let req = crate::key::join::parse_join(&body).map_err(bad)?;
-        self.challenges.consume(&req.nonce, now_ms()).map_err(bad)?;
+        self.challenges.check(&req.nonce, now_ms()).map_err(bad)?;
         crate::key::join::verify_join(&rules, &req, &body).map_err(bad)?;
+        self.challenges
+            .mark_used(&req.nonce, now_ms())
+            .map_err(bad)?;
         let member = crate::key::crypto::member_id(&req.public);
         if self
             .tokens
@@ -835,8 +891,16 @@ impl Hub {
             return Err(bad(format!("the member id `{member}` is taken by a token")));
         }
         let mut st = lock(&self.state);
-        if let Some(existing) = st.keys.member_of_pub(&req.public_b64) {
-            return Ok(json!({"member": existing, "joined": false}));
+        match st.keys.standing(&member, &req.public_b64) {
+            Standing::Known(existing) => {
+                return Ok(json!({"member": existing, "joined": false}));
+            }
+            Standing::Taken => {
+                return Err(bad(format!(
+                    "the member id `{member}` already belongs to another key"
+                )));
+            }
+            Standing::New => {}
         }
         let joined_at = rfc3339(now_ms());
         let msg = Message {

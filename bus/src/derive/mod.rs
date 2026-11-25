@@ -196,7 +196,7 @@ impl DeriveStore {
                                 && (w.class.is_empty() || w.class == "default"))
                     })
                     .collect();
-                for idx in 0..count {
+                for idx in 0..count.min(capacity::MAX_CLASS_SLOTS) {
                     let slot_num = idx + 1;
                     let key = format!("{owner}/{class}/{slot_num}");
                     if let Some(w) = matching.get(idx as usize) {

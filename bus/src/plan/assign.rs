@@ -132,9 +132,11 @@ impl AssignContext {
 
         // Record total declared useful parallel slots per owner.
         for cap in state.capacities.values() {
-            *ctx.owner_total_parallel
+            let total = ctx
+                .owner_total_parallel
                 .entry(cap.owner.clone())
-                .or_insert(0) += cap.useful_parallel;
+                .or_insert(0);
+            *total = total.saturating_add(cap.useful_parallel);
         }
 
         // Seed externally held locks.
@@ -369,7 +371,10 @@ pub fn build_free_slots(
             .get(&(cap.owner.clone(), cap.machine.clone(), cap.class.clone()))
             .copied()
             .unwrap_or(0);
-        let free = cap.useful_parallel.saturating_sub(used);
+        let free = cap
+            .useful_parallel
+            .saturating_sub(used)
+            .min(crate::derive::capacity::MAX_CLASS_SLOTS);
         let class_spec = policy.classes.get(&cap.class);
         let pools = if !cap.pools.is_empty() {
             cap.pools.clone()
@@ -666,7 +671,7 @@ pub fn evaluate_slot_for_task(
 pub fn trust_allows_kind(trust: &str, kind: &str, policy: &PlanPolicy) -> bool {
     match trust {
         "owner" | "orchestrator" | "hub" => true,
-        "observer" => false,
+        "observer" | "tier0" => false,
         other => {
             if let Some(spec) = policy.trust.get(other) {
                 spec.may_claim.contains("*") || spec.may_claim.contains(kind)

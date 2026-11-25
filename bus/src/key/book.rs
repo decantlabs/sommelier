@@ -198,6 +198,17 @@ pub enum Lookup {
     Unknown,
 }
 
+/// How a key stands with the book when it asks to join.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// The key is known (now or in the past) and belongs to this member.
+    Known(String),
+    /// The member id is in use by another key.
+    Taken,
+    /// Neither the key nor the member id is known.
+    New,
+}
+
 /// The keys of all members, folded from the log. The hub keeps one and checks it at every
 /// connect, so no database is read on that path.
 #[derive(Clone, Debug, Default)]
@@ -262,6 +273,17 @@ impl KeyBook {
     /// The member that owns `public` (now or in the past), base64url.
     pub fn member_of_pub(&self, public: &str) -> Option<&str> {
         self.by_pub.get(public).map(String::as_str)
+    }
+
+    /// Whether `public` may join as `member`.
+    pub fn standing(&self, member: &str, public: &str) -> Standing {
+        if let Some(existing) = self.member_of_pub(public) {
+            return Standing::Known(existing.to_owned());
+        }
+        if self.members.contains_key(member) {
+            return Standing::Taken;
+        }
+        Standing::New
     }
 
     /// The record of a member.

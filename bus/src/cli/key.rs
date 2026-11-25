@@ -18,6 +18,8 @@ a key the hub knows gets its member id back and nothing is written.
   --data DIR   client data folder that holds member.key, default: SOMMELIER_DATA, else
                %LOCALAPPDATA%\\sommelier (Windows) or ~/.local/share/sommelier
 The private key never leaves the key file. The hub must have joining switched on.
+The hub id of each hub address is pinned in member.hubs beside the key file. A hub that moved on
+purpose is accepted again by deleting the line of its address there.
 ";
 
 const KEY_HELP: &str = "\
