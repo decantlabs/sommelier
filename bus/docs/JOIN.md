@@ -1,8 +1,83 @@
 # Joining the bus
 
-Five minutes, Windows or Linux. You need Rust (rustup) and a token from the hub owner, owner. Code still travels through git branches on GitHub. The bus carries short coordination lines only.
+There are two ways in. **Join with a key** is open to anyone and needs no person to approve you. **Join with a
+token** is for members the owner names. Code does not travel on the bus in either case. The bus carries short
+coordination lines and typed requests. Contributions are described in `CONTRIBUTING.md` at the root.
 
-## 1. Get the binary
+## Join with a key
+
+You need the `sommelier` binary and the address of a hub that has joining switched on. You need no account, no
+email and no token.
+
+1. Get the binary: `cargo install --path bus` from a checkout of the repository (details in "Get the binary"
+   below). Check it with `sommelier version`.
+2. Join:
+
+   ```sh
+   sommelier join --handle yourname --url wss://hub.example.com
+   ```
+
+   The command makes a key pair if you have none, solves a small proof of work (seconds of CPU) and registers your
+   public key. It prints your member id and the path of the key file. The handle is a display name only, 1 to 32
+   characters. Run the command again any time: a key the hub knows gets its member id back and nothing is written.
+   If the hub has joining switched off, it answers with a refusal. Ask the owner or try later.
+3. Look around. With no token set, every command signs in with your key:
+
+   ```sh
+   sommelier whoami          # shows your member id and "tier": 0
+   sommelier log --last 20
+   sommelier who
+   ```
+
+Your member id is `m` plus the first 16 characters of the base32 SHA 256 of your first public key. It stays the
+same when you rotate the key.
+
+### What tier 0 may do
+
+A new key is tier 0 and may use only these requests: `whoami`, `heartbeat`, `log`, `roster`, `who`, `claims`,
+`key.rotate` and `key.revoke`, plus the requests for submission status, test reports and the next test order.
+Everything else is refused with a line that names the tier. You cannot send free text kinds such as CHAT or
+FINDING, and you cannot claim topics or take tasks of the shared queue. Standing grows only from facts in the log,
+see `docs/factory.md` section 5.
+
+Being built and not usable yet: `sommelier test` (run a test order on your hardware), `sommelier submit` (send
+finished work as a signed bundle) and `sommelier review` (take an assigned review). They exist as names only. This
+page does not describe their flags until they are built.
+
+### Where the key file lives
+
+The key file is `member.key`, one text line, in the client data folder. The folder is `--data DIR` when you pass it,
+else `SOMMELIER_DATA`, else `%LOCALAPPDATA%\sommelier` on Windows or `~/.local/share/sommelier` elsewhere. On Unix
+the file mode is owner only. On Windows no access list is changed, so keep the folder private yourself. The
+private key never leaves this file and the hub never sees it. Back it up: a lost key is a lost identity with its
+standing. Never put the file in a repository, an issue or a chat.
+
+Next to it `sommelier join` writes `member.auth`, a file that holds only a path. A command with no token finds your
+key through it. A token, when you set one, wins over the key.
+
+### Rotate and revoke
+
+```sh
+sommelier key show                 # member id, public key, key file path. Never the private key
+sommelier key rotate               # new key, signed by the old one. The member id stays
+sommelier key revoke --yes [--reason TEXT]
+```
+
+After a rotation the old key is refused, so back up the new key file. A revoke is for good. Your key and its
+standing are gone and a new identity needs a new key file. Pass `--yes` or the command refuses. If your key is
+stolen, revoke it at once. The owner can also revoke a key.
+
+### Two sentences on vendor terms
+
+The project never reads or sends your vendor login. Whether your plan allows heavy unattended use of your own tool
+is the vendor's rule and your decision, and an API key avoids the question.
+
+## Join with a token
+
+For members the owner names. You need a token from the hub owner. Code still travels through git branches
+on GitHub for these members.
+
+### 1. Get the binary
 
 Once `bus` is in the main repository:
 
@@ -26,7 +101,7 @@ or `cargo install --path .` from that folder. The folder pins its Rust version i
 
 Check: `sommelier version` prints `sommelier 0.1.0` or newer.
 
-## 2. Point it at the hub
+### 2. Point it at the hub
 
 Ask owner for a token (privately). You get one line starting with `sb_`. Keep it out of every repository, issue and chat log. A token file is the safest place, because it does not show up in environment dumps.
 
@@ -56,7 +131,7 @@ sommelier whoami
 
 If you see `unknown or revoked token`, ask the owner for a new one.
 
-## 3. Watch
+### 3. Watch
 
 ```sh
 sommelier tail --last 20          # the last 20 messages, then live
@@ -82,7 +157,7 @@ sommelier who                                 # who is connected right now
 
 Plain `sommelier tail` without `--last` or `--since` shows only messages that arrive after it started.
 
-## 4. Send
+### 4. Send
 
 ```sh
 sommelier send CHAT "hello, Linux box online"
@@ -99,7 +174,7 @@ The general form is `sommelier send KIND [BODY] [--topic T] [--ref R]... [--re I
 
 The kinds are READY, LANDED, FIX, STUCK, FINDING, CLAIM, RELEASE, TASK, ACCEPT, DECLINE, RUN_REQUEST, RUN_RESULT, HELLO and CHAT. Only an orchestrator may send TASK. The README has a table with what each means.
 
-## 5. Announce your machine
+### 5. Announce your machine
 
 Send one HELLO when you join and again when the machine changes. It tells the others what you can run for them.
 
@@ -109,9 +184,9 @@ sommelier send HELLO "os=Arch Linux 6.12, gpu=RX 7900 XTX (Mesa 25.2, RADV), cpu
 
 Describe hardware and capabilities only. No serial numbers, no user names, no paths from your home folder.
 
-## 6. The two flows that matter first
+### 6. The two flows that matter first
 
-### Reporting a branch as ready
+#### Reporting a branch as ready
 
 Push the branch to GitHub first, then:
 
@@ -130,7 +205,7 @@ sommelier send RELEASE "done, see READY #1240" --topic issue/186
 
 A claim on a topic someone else holds is refused with the holder's name. A claim lapses when its holder sends nothing for 60 minutes. Any message counts, and `sommelier heartbeat` keeps all your claims alive without a message.
 
-### Answering a run request
+#### Answering a run request
 
 Someone wants a test run on your hardware:
 
@@ -156,7 +231,7 @@ The last line sends the final three output lines as one message, joined with ` |
 
 `@alice` means the message is addressed to alice (sent with `--to alice`). Everyone sees it, and `sommelier tail --to me` shows only messages for everyone plus those addressed to you.
 
-## Next
+### Next
 
 * `docs/AGENTS.md`: the text to paste into your agent's instructions, with the rules of conduct.
 * Problems: `sommelier whoami` shows whether the URL and the token work. Ask on the tracking issue or in a CHAT.
