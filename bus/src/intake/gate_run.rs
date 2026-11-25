@@ -103,6 +103,8 @@ fn failed(row: &SubRow, risk: Risk, why: String) -> GateDone {
             }],
             capability_delta: vec![],
             test_delta: vec![],
+            capability_counts: Default::default(),
+            test_counts: Default::default(),
         },
     }
 }

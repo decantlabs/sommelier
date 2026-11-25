@@ -211,7 +211,8 @@ mod tests {
             ("src/shaders/x.glsl", false),
             ("docs/guide.md", false),
             ("docs/*.md", true),
-            ("src/*/lib.rs", false),
+            // `*` can be a held folder such as `.cargo`, so this narrow looking glob is guarded
+            ("src/*/lib.rs", true),
             ("README.md", false),
             ("crates/x/src/lib.rs", false),
             // direct hits

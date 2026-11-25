@@ -85,6 +85,7 @@ fn parsed_diff(sha: &str, hostile: &str) -> ParsedDiff {
         base: "b".repeat(40),
         head: "c".repeat(40),
         commits: vec![],
+        base_paths: vec![],
         files: vec![FileChange {
             path: "src/lib.rs".into(),
             old_path: None,
@@ -92,6 +93,8 @@ fn parsed_diff(sha: &str, hostile: &str) -> ParsedDiff {
             mode: FileMode::Regular,
             binary: false,
             size_after: 10,
+            old_mode: Some(FileMode::Regular),
+            content: vec![],
             added: vec![
                 Line {
                     no: 3,
