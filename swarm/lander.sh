@@ -8,6 +8,12 @@
 #          ($SOMMELIER_INTEGRATE), for example origin/feature/some-fix or upstream/guest/some-fix
 #          (a guest's branch). Append a line to queue a branch: echo origin/foo >> $SOMMELIER_RUNS/landing.queue
 #
+#          A line can also be a bundle entry of the public factory:
+#          bundle:<sha256> <head sha> [member_handle=.. member_id=.. order=.. submission=.. email=..] [title=<rest of line>]
+#          The lander downloads the bundle, checks it, and lands the submission as ONE commit with credit trailers.
+#   SOMMELIER_SECOND_LOCK=1   pushes the checked batch as landing/<batch id> and pushes main only after GitHub
+#                             reports success for the check SOMMELIER_BATCH_CHECK (see swarm/README.md)
+#
 # A batch: every queued branch is rebased onto the current main in the landing worktree (a branch
 # that conflicts is left out and reported), then the repository check, the workspace tests and
 # clippy run on that exact tree, then it is pushed to main and announced on the bus as LANDED.
@@ -63,6 +69,15 @@ RUN
       *) GPU_DRY_ELAPSED=$((GPU_DRY_ELAPSED + 60)); GPU_DRY_NEXT="gpu-slow-b gpu-fast-c" ;;
     esac
   done
+  _dry_hash=0000000000000000000000000000000000000000000000000000000000000000
+  _dry_entry="bundle:$_dry_hash 1111111111111111111111111111111111111111 member_handle=ada member_id=m1 order=t412 submission=$_dry_hash title=Fix the thing"
+  printf 'Bundle entry: download <hub>/api/bundle/<sha256>, check the hash, fetch into refs/submissions/<sha256>, check the head, squash onto the batch base with this message:\n'
+  lander_commit_message "$_dry_entry" | sed 's/^/  | /'
+  if [ "${SOMMELIER_SECOND_LOCK:-0}" = 1 ]; then
+    printf 'Second lock: push landing/<batch id>, ask GitHub for the check %s every %s s for up to %s s, push main only on success, delete the landing branch\n' "${SOMMELIER_BATCH_CHECK:-factory-batch}" "${SOMMELIER_BATCH_CHECK_PAUSE:-15}" "${SOMMELIER_BATCH_CHECK_SECS:-1800}"
+  else
+    printf 'Second lock: off (SOMMELIER_SECOND_LOCK is not 1), main is pushed as before\n'
+  fi
   exit 0
 fi
 

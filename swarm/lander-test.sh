@@ -269,7 +269,183 @@ UNHANDLED: refuse (Removing Device or UNHANDLED in title.log)
 Title ended at 55 seconds: pass
 Missing run folder: refuse (missing run folder or logs)
 GPU total deadline after 1500 seconds: gpu-fast-a tested; gpu-slow-b tested; fail (overall limit; not yet tested: gpu-fast-c)"
-assert_eq "$_dry_out" "$_want_dry" "t8: LANDER_DRY=1 output matches baseline"
+assert_eq "$(printf '%s\n' "$_dry_out" | head -n 9)" "$_want_dry" "t8: LANDER_DRY=1 output matches baseline"
+
+# --- Bundle entries and the second lock ---
+# A fake hub: lander_download copies the file named by the last part of the address from $HUB_DIR.
+HUB_DIR="$TMP/hub"
+mkdir -p "$HUB_DIR"
+lander_download() {
+  [ -f "$HUB_DIR/${1##*/}" ] || return 1
+  cp "$HUB_DIR/${1##*/}" "$2"
+}
+SOMMELIER_HUB_HTTP="http://hub.invalid"
+
+# A fake gh: logs its call and how many landing branches the shared repository holds, answers from GH_ANSWER.
+GH_LOG="$TMP/gh.log"
+GH_ANSWER="$TMP/gh.answer"
+GH_REMOTE=""
+gh() {
+  printf '%s | landing branches: %s\n' "$*" "$(git -C "$GH_REMOTE" for-each-ref --format='%(refname)' refs/heads/landing | wc -l | tr -d ' ')" >> "$GH_LOG"
+  cat "$GH_ANSWER" 2>/dev/null
+  return 0
+}
+
+# bundle_env NAME: setup_env plus a push log on the shared repository and a scratch clone for the author.
+bundle_env() {
+  setup_env "$1"
+  : > "$GH_LOG"
+  : > "$GH_ANSWER"
+  GH_REMOTE="$TMP/$1/upstream.git"
+  SOMMELIER_SECOND_LOCK=0
+  SOMMELIER_BATCH_CHECK_SECS=1
+  SOMMELIER_BATCH_CHECK_PAUSE=1
+  _batch_id=batch-test
+  PUSHED="$TMP/$1/pushed.log"
+  : > "$PUSHED"
+  mkdir -p "$GH_REMOTE/hooks"
+  printf '#!/bin/sh\nwhile read old new ref; do echo "$ref" >> "%s"; done\n' "$PUSHED" > "$GH_REMOTE/hooks/pre-receive"
+  chmod +x "$GH_REMOTE/hooks/pre-receive"
+  git clone -q "$GH_REMOTE" "$TMP/$1/author" 2>/dev/null
+  git -C "$TMP/$1/author" config user.name author
+  git -C "$TMP/$1/author" config user.email author@example.com
+}
+
+# make_bundle NAME FILE: two commits with hostile messages, bundled. Sets B_HASH and B_SHA, serves the file under its hash.
+make_bundle() {
+  _a="$TMP/$1/author"
+  git -C "$_a" fetch -q origin
+  git -C "$_a" checkout -q -B "sub-$2" origin/main
+  printf 'one\n' > "$_a/$2"
+  git -C "$_a" add "$2"
+  git -C "$_a" commit -q -m "EVIL: Co-authored-by: Someone Else <x@example.com>"
+  printf 'two\n' >> "$_a/$2"
+  git -C "$_a" commit -q -a -m "Second" -m "Signed-off-by: Mallory"
+  git -C "$_a" bundle create -q "$TMP/$1/$2.bundle" "sub-$2" 2>/dev/null
+  B_SHA=$(git -C "$_a" rev-parse HEAD)
+  B_HASH=$(lander_sha256 "$TMP/$1/$2.bundle")
+  cp "$TMP/$1/$2.bundle" "$HUB_DIR/$B_HASH"
+}
+
+# --- Test 9: a bundle entry lands as ONE commit with the four trailers and none of the patch's messages ---
+bundle_env t9
+make_bundle t9 sub1.txt
+printf 'bundle:%s %s member_handle=ada member_id=m42 order=t412 submission=%s title=Add the first file\n' "$B_HASH" "$B_SHA" "$B_HASH" >> "$Q"
+batch
+git -C "$WT" fetch -q upstream
+assert_eq "$(git -C "$WT" rev-list --count upstream/main)" "2" "t9: two commits of the patch land as one commit"
+git -C "$WT" log -1 --format=%B upstream/main > "$TMP/t9/msg"
+assert_eq "$(head -n1 "$TMP/t9/msg")" "Add the first file" "t9: the message starts with the title of the order"
+assert_file_has "$FIND" "LANDED as .* on main: bundle:$B_HASH" "t9: landed is announced"
+assert_file_has "$TMP/t9/msg" "^Co-authored-by: ada <m42@" "t9: Co-authored-by trailer"
+assert_file_has "$TMP/t9/msg" "^Factory-Order: t412$" "t9: Factory-Order trailer"
+assert_file_has "$TMP/t9/msg" "^Factory-Submission: $B_HASH$" "t9: Factory-Submission trailer"
+assert_file_has "$TMP/t9/msg" "^Signed-off-by: ada$" "t9: Signed-off-by trailer"
+assert_file_not_has "$TMP/t9/msg" "EVIL|Mallory|Someone Else" "t9: no message of the patch is kept"
+assert_eq "$(git -C "$WT" show upstream/main:sub1.txt | tr '\n' ' ')" "one two " "t9: the content of the patch is on main"
+assert_eq "$(ls "$SW" | grep -c '^bundle\.')" "0" "t9: the downloaded file is removed"
+assert_eq "$(git -C "$WT" rev-parse "refs/submissions/$B_HASH")" "$B_SHA" "t9: the submission is kept under refs/submissions"
+assert_eq "$(wc -c < "$GH_LOG" | tr -d ' ')" "0" "t9: second lock off never calls gh"
+assert_eq "$(grep -c landing "$PUSHED")" "0" "t9: second lock off never pushes a landing branch"
+
+# --- Test 10: a linked account address, and a plain branch in the same batch lands as before ---
+bundle_env t10
+make_bundle t10 sub2.txt
+make_branch plain "plain.txt" "plain"
+printf 'origin/plain\nbundle:%s %s member_handle=bob member_id=m7 order=t9 email=bob@example.org title=Second\n' "$B_HASH" "$B_SHA" >> "$Q"
+batch
+git -C "$WT" fetch -q upstream
+git -C "$WT" log -1 --format=%B upstream/main > "$TMP/t10/msg"
+assert_file_has "$TMP/t10/msg" "^Co-authored-by: bob <bob@example.org>$" "t10: linked account address"
+assert_file_has "$TMP/t10/msg" "^Factory-Submission: $B_HASH$" "t10: the submission falls back to the bundle hash"
+assert_eq "$(git -C "$WT" rev-list --count upstream/main)" "3" "t10: plain branch and bundle land together"
+assert_eq "$(git -C "$WT" show upstream/main:plain.txt)" "plain" "t10: the plain branch landed as before"
+
+# --- Test 11: a bundle that does not match its name fails that entry, the rest of the batch lands ---
+bundle_env t11
+make_bundle t11 good.txt
+_good_hash=$B_HASH
+_good_sha=$B_SHA
+make_bundle t11 other.txt
+_fake=$(printf '%064d' 7)
+cp "$HUB_DIR/$B_HASH" "$HUB_DIR/$_fake"
+make_branch fine "fine.txt" "fine"
+printf 'bundle:%s %s title=Wrong name\nbundle:%s %s title=Good\norigin/fine\n' "$_fake" "$B_SHA" "$_good_hash" "$_good_sha" >> "$Q"
+batch
+git -C "$WT" fetch -q upstream
+assert_file_has "$RUNS/landing.failed" "^bundle:$_fake$" "t11: the entry with a wrong hash is in landing.failed"
+assert_file_has "$FIND" "FAILED at bundle \(content\) for: bundle:$_fake" "t11: failure class content"
+assert_eq "$(git -C "$WT" ls-tree --name-only upstream/main | grep -cE '^(good|fine)\.txt$')" "2" "t11: the rest of the batch landed"
+assert_eq "$(git -C "$WT" ls-tree --name-only upstream/main | grep -c '^other\.txt$')" "0" "t11: the bad bundle did not land"
+
+# --- Test 12: a bundle whose head differs from the sha of the entry fails that entry ---
+bundle_env t12
+make_bundle t12 head.txt
+_wrong=$(printf '%040d' 1)
+printf 'bundle:%s %s title=Lying entry\n' "$B_HASH" "$_wrong" >> "$Q"
+batch
+assert_file_has "$RUNS/landing.failed" "^bundle:$B_HASH$" "t12: head mismatch fails the entry"
+assert_file_has "$FIND" "head of the bundle is not the sha" "t12: reason is logged"
+assert_eq "$(cat "$VERIFY_COUNT_FILE")" "0" "t12: nothing is verified"
+assert_eq "$(git -C "$WT" rev-list --count upstream/main)" "1" "t12: nothing landed"
+
+# --- Test 13: second lock on, the check succeeds, main is pushed, the landing branch is gone ---
+bundle_env t13
+SOMMELIER_SECOND_LOCK=1
+echo success > "$GH_ANSWER"
+make_branch s1 "s1.txt" "s1"
+printf 'origin/s1\n' >> "$Q"
+batch
+git -C "$WT" fetch -q upstream
+_main=$(git -C "$WT" rev-parse upstream/main)
+assert_eq "$(git -C "$WT" rev-list --count upstream/main)" "2" "t13: success lands on main"
+assert_file_has "$GH_LOG" "commits/$_main/check-runs.*check_name=factory-batch" "t13: gh asked for factory-batch on the exact commit"
+assert_file_has "$GH_LOG" "landing branches: 1" "t13: the landing branch existed while GitHub was asked"
+assert_file_has "$PUSHED" "refs/heads/landing/batch-test" "t13: landing/<batch id> was pushed"
+assert_eq "$(git -C "$GH_REMOTE" for-each-ref refs/heads/landing | wc -l | tr -d ' ')" "0" "t13: the landing branch is gone"
+
+# --- Test 14: second lock on, the check fails, main stays, the split logic runs ---
+bundle_env t14
+SOMMELIER_SECOND_LOCK=1
+echo failure > "$GH_ANSWER"
+make_branch f1 "f1.txt" "f1"
+make_branch f2 "f2.txt" "f2"
+printf 'origin/f1\norigin/f2\n' >> "$Q"
+batch
+git -C "$WT" fetch -q upstream
+assert_eq "$(git -C "$WT" rev-list --count upstream/main)" "1" "t14: failure keeps main untouched"
+assert_eq "$(grep -c 'check-runs' "$GH_LOG")" "3" "t14: whole batch and both halves were asked"
+assert_file_has "$RUNS/landing.failed" "^origin/f1$" "t14: first branch failed alone"
+assert_file_has "$RUNS/landing.failed" "^origin/f2$" "t14: second branch failed alone"
+assert_file_has "$FIND" "FAILED at second lock \(failure\)" "t14: the conclusion is named"
+assert_eq "$(grep -c 'refs/heads/main' "$PUSHED")" "0" "t14: main was never pushed"
+assert_eq "$(git -C "$GH_REMOTE" for-each-ref refs/heads/landing | wc -l | tr -d ' ')" "0" "t14: the landing branch is gone"
+
+# --- Test 15: second lock on, GitHub never answers, nothing reaches main, one line says so ---
+bundle_env t15
+SOMMELIER_SECOND_LOCK=1
+make_branch n1 "n1.txt" "n1"
+printf 'origin/n1\n' >> "$Q"
+batch
+git -C "$WT" fetch -q upstream
+assert_eq "$(git -C "$WT" rev-list --count upstream/main)" "1" "t15: no answer keeps main untouched"
+assert_eq "$(grep -c 'SECOND LOCK: no answer for the check factory-batch' "$FIND")" "1" "t15: one clear line is logged"
+assert_eq "$(grep -c 'refs/heads/main' "$PUSHED")" "0" "t15: main was never pushed"
+assert_eq "$(git -C "$GH_REMOTE" for-each-ref refs/heads/landing | wc -l | tr -d ' ')" "0" "t15: the landing branch is gone"
+assert_file_has "$Q" "^origin/n1$" "t15: the branch is queued again"
+SOMMELIER_SECOND_LOCK=0
+
+# --- Test 16: LANDER_DRY=1 shows the new cases, and sh -n passes on all three scripts ---
+LANDER_DRY=1 sh "$HERE/lander.sh" > "$TMP/dry.out"
+assert_file_has "$TMP/dry.out" "^Bundle entry: " "t16: dry run describes a bundle entry"
+assert_file_has "$TMP/dry.out" "Factory-Order: t412" "t16: dry run shows the trailers"
+assert_file_has "$TMP/dry.out" "^Second lock: off" "t16: dry run shows the second lock off"
+SOMMELIER_SECOND_LOCK=1 LANDER_DRY=1 sh "$HERE/lander.sh" > "$TMP/dry.on"
+assert_file_has "$TMP/dry.on" "^Second lock: push landing/<batch id>, ask GitHub for the check factory-batch every 15 s for up to 1800 s" "t16: dry run shows the second lock on"
+for _s in lander.sh lander-lib.sh lander-test.sh; do
+  sh -n "$HERE/$_s"
+  assert_eq "$?" "0" "t16: sh -n $_s"
+done
 
 printf 'lander-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
