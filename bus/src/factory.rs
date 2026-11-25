@@ -109,6 +109,13 @@ pub struct DoorFile {
     pub keep_days: Option<u32>,
     pub join_flood_refusals: Option<u32>,
     pub join_flood_window_secs: Option<u64>,
+    pub head_timeout_secs: Option<u64>,
+    pub max_http_conns: Option<u32>,
+    pub http_conns_per_block: Option<u32>,
+    pub max_upload_bytes_in_flight: Option<u64>,
+    pub bad_joins_per_block_per_hour: Option<u32>,
+    pub public_addresses: Option<Vec<String>>,
+    pub secret_file: Option<std::path::PathBuf>,
 }
 
 impl DoorFile {
@@ -123,6 +130,13 @@ impl DoorFile {
             || self.keep_days.is_some()
             || self.join_flood_refusals.is_some()
             || self.join_flood_window_secs.is_some()
+            || self.head_timeout_secs.is_some()
+            || self.max_http_conns.is_some()
+            || self.http_conns_per_block.is_some()
+            || self.max_upload_bytes_in_flight.is_some()
+            || self.bad_joins_per_block_per_hour.is_some()
+            || self.public_addresses.is_some()
+            || self.secret_file.is_some()
     }
 }
 
@@ -359,6 +373,25 @@ pub fn apply(
     if let Some(n) = d.join_flood_window_secs {
         door.join_flood_window_secs = n;
     }
+    if let Some(n) = d.head_timeout_secs {
+        door.head_timeout_secs = n;
+    }
+    if let Some(n) = d.max_http_conns {
+        door.max_http_conns = n;
+    }
+    if let Some(n) = d.http_conns_per_block {
+        door.http_conns_per_block = n;
+    }
+    if let Some(n) = d.max_upload_bytes_in_flight {
+        door.max_upload_bytes_in_flight = n;
+    }
+    if let Some(n) = d.bad_joins_per_block_per_hour {
+        door.bad_joins_per_block_per_hour = n;
+    }
+    if let Some(list) = &d.public_addresses {
+        door.public_addresses = list.clone();
+    }
+    door.secret_file = d.secret_file.clone();
     out.door = d.is_set();
     Ok(out)
 }

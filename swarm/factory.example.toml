@@ -72,10 +72,10 @@ max_open_orders = 200
 trust_header = "CF-Connecting-IP"
 # Joins one address block may try per hour. 0 is no limit. Default: the policy join.per_block_per_hour.
 joins_per_block_per_hour = 5
-# Connections one member may hold at once. 0 is no limit.
-conns_per_member = 0
-# Connections the hub holds at most. 0 is no limit.
-max_conns = 0
+# Connections one member may hold at once. 0 is no limit. A copy of this file keeps a limit.
+conns_per_member = 4
+# Connections the hub holds at most. 0 is no limit. Size it to the memory of the machine.
+max_conns = 400
 # The share of max_conns that tier 0 and anonymous readers can never fill, from 0 to 1.
 reserved_share = 0.25
 # Whether a WebSocket or /api/state without credentials reads as an anonymous observer.
@@ -84,6 +84,23 @@ public_read = false
 public_reads_per_block_per_min = 60
 # Days an address block stays in door.db. 0 records no block at all.
 keep_days = 14
+# The public addresses of this hub as members type them: a host name (ports 443 and 80) or host:port.
+# A key signs the address it connected to and the hub takes the sign in only for an address listed here
+# (loopback addresses always work). Change this to the name of your hub before key sign in is switched on.
+public_addresses = ["hub.example.org"]
+# Seconds a connection may take to send its request head. Default 10.
+head_timeout_secs = 10
+# Plain HTTP connections the hub holds at most, and per address block. 0 is no limit.
+max_http_conns = 512
+http_conns_per_block = 32
+# Bytes of upload bodies held in memory at once. 0 is no limit.
+max_upload_bytes_in_flight = 67108864
+# Failed join tries per address block and hour, counted apart from the joins that went through.
+bad_joins_per_block_per_hour = 30
+# Where the secret of the address blocks lives. Left out, it is derived from challenge_secret in the data
+# folder, and a copy of that folder then reveals every address block. Point it at a file outside the data
+# folder (and outside its backups) to keep the blocks safe from such a copy. Made at the first start.
+# secret_file = "/etc/sommelier/door-secret"
 # Refused joins within the window below that raise the alert JOIN_FLOOD. 0 is no alert.
 join_flood_refusals = 20
 join_flood_window_secs = 600

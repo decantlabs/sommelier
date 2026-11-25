@@ -929,14 +929,27 @@ impl Hub {
         }
         let bad = |e: String| (400u16, e);
         let block = ip.map(|ip| self.door.block(ip));
+        // Garbage costs the sender a cheap, separate allowance. The join limit is charged only for a
+        // request that parsed and carried a valid proof of work and signature.
+        if let Some(block) = &block {
+            self.door
+                .check_bad_joins(block, now_ms())
+                .map_err(|e| (429u16, e))?;
+        }
+        let fail = |e: String| {
+            if let Some(block) = &block {
+                self.door.note_bad_join(block, now_ms());
+            }
+            bad(e)
+        };
+        let body: Value = serde_json::from_slice(raw)
+            .map_err(|e| fail(format!("the join body is not valid JSON: {e}")))?;
+        let req = crate::key::join::parse_join(&body).map_err(fail)?;
+        self.challenges.check(&req.nonce, now_ms()).map_err(fail)?;
+        crate::key::join::verify_join(&rules, &req, &body).map_err(fail)?;
         if let Some(block) = &block {
             crate::key::join::limit_join(&self.door, block, now_ms()).map_err(|e| (429u16, e))?;
         }
-        let body: Value = serde_json::from_slice(raw)
-            .map_err(|e| bad(format!("the join body is not valid JSON: {e}")))?;
-        let req = crate::key::join::parse_join(&body).map_err(bad)?;
-        self.challenges.check(&req.nonce, now_ms()).map_err(bad)?;
-        crate::key::join::verify_join(&rules, &req, &body).map_err(bad)?;
         self.challenges
             .mark_used(&req.nonce, now_ms())
             .map_err(bad)?;
@@ -1434,15 +1447,28 @@ fn error_response(code: StatusCode, msg: String) -> ErrorResponse {
 #[allow(clippy::result_large_err)]
 async fn handle(hub: Arc<Hub>, stream: TcpStream) -> Result<(), String> {
     let _ = stream.set_nodelay(true);
-    let head = crate::web::peek_head(&stream)
-        .await
-        .map_err(|e| format!("request head: {e}"))?;
+    let peer = stream.peer_addr().map_err(|e| format!("peer: {e}"))?.ip();
+    // Every connection is counted from the first byte until its answer or its upgrade. A peer that
+    // is not on this machine is counted by its own block at once, one behind a tunnel after the head.
+    let slot = hub
+        .door
+        .admit_http(
+            (!peer.to_canonical().is_loopback())
+                .then(|| hub.door.block(peer))
+                .as_deref(),
+        )
+        .map_err(|e| format!("door: {e}"))?;
+    let (stream, head) = crate::web::read_head(
+        stream,
+        Duration::from_secs(hub.door.config().head_timeout_secs.max(1)),
+    )
+    .await
+    .map_err(|e| format!("request head: {e}"))?;
     if !head.is_websocket() {
-        return crate::web::serve(&hub, stream, head)
+        return crate::web::serve(&hub, stream, head, slot)
             .await
             .map_err(|e| format!("http: {e}"));
     }
-    let peer = stream.peer_addr().map_err(|e| format!("peer: {e}"))?.ip();
     let ip = hub.door.client_ip(
         peer,
         hub.door
@@ -1466,6 +1492,8 @@ async fn handle(hub: Arc<Hub>, stream: TcpStream) -> Result<(), String> {
     let ws = tokio_tungstenite::accept_hdr_async_with_config(stream, cb, Some(wscfg))
         .await
         .map_err(|e| format!("handshake refused: {e}"))?;
+    // An upgraded connection is counted by `authorize`, not as plain HTTP any more.
+    drop(slot);
     let Some((member, params, cred, _slot)) = auth else {
         return Err("no credentials".into());
     };
@@ -1504,7 +1532,7 @@ async fn stopped(rx: &mut tokio::sync::watch::Receiver<bool>) {
     let _ = rx.wait_for(|s| *s).await.map(|_| ());
 }
 
-type Sink = SplitSink<WebSocketStream<TcpStream>, WsMsg>;
+type Sink = SplitSink<WebSocketStream<crate::web::Sock>, WsMsg>;
 
 async fn send(sink: &mut Sink, text: String) -> Result<(), String> {
     sink.send(WsMsg::text(text))
@@ -1532,7 +1560,7 @@ async fn recv_live(
 
 async fn connection(
     hub: &Arc<Hub>,
-    ws: WebSocketStream<TcpStream>,
+    ws: WebSocketStream<crate::web::Sock>,
     member: &Member,
     params: ConnectParams,
     cred: &Cred,

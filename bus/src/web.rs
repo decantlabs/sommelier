@@ -9,10 +9,12 @@ use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::task::{Context, Poll};
+use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
 use crate::hub::Hub;
@@ -61,31 +63,92 @@ impl Head {
     }
 }
 
-/// Waits until the whole request head has arrived and parses it without consuming it.
-pub async fn peek_head(stream: &TcpStream) -> io::Result<Head> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut buf = vec![0u8; MAX_HEAD];
-    loop {
-        let n = stream.peek(&mut buf).await?;
-        if n == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        if let Some(p) = buf[..n].windows(4).position(|w| w == b"\r\n\r\n") {
-            let raw = String::from_utf8_lossy(&buf[..p]);
-            return Head::parse(&raw, p + 4)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad request line"));
-        }
-        if n == buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "request head too large",
-            ));
-        }
-        if Instant::now() > deadline {
-            return Err(io::ErrorKind::TimedOut.into());
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+/// A connection that gives back the bytes read while the head was parsed before it reads on.
+pub struct Sock {
+    pre: Vec<u8>,
+    pos: usize,
+    inner: TcpStream,
+}
+
+impl Sock {
+    pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+        self.inner.peer_addr()
     }
+}
+
+impl AsyncRead for Sock {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.pos < self.pre.len() {
+            let n = (self.pre.len() - self.pos).min(buf.remaining());
+            let start = self.pos;
+            buf.put_slice(&self.pre[start..start + n]);
+            self.pos += n;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Sock {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Reads the whole request head with one timeout, parses it and gives the connection back with the
+/// bytes it already read. A peer that sends nothing or too little costs one timer and no wakeups.
+pub async fn read_head(mut stream: TcpStream, timeout: Duration) -> io::Result<(Sock, Head)> {
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    let found = tokio::time::timeout(timeout, async {
+        let mut chunk = [0u8; 2048];
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
+            // The end of the head may straddle two reads: look from three bytes before the new data.
+            let from = buf.len().saturating_sub(3);
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(p) = buf[from..].windows(4).position(|w| w == b"\r\n\r\n") {
+                return Ok(from + p);
+            }
+            if buf.len() >= MAX_HEAD {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "request head too large",
+                ));
+            }
+        }
+    })
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    let raw = String::from_utf8_lossy(&buf[..found]).into_owned();
+    let head = Head::parse(&raw, found + 4)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad request line"))?;
+    Ok((
+        Sock {
+            pre: buf,
+            pos: 0,
+            inner: stream,
+        },
+        head,
+    ))
 }
 
 fn content_type(path: &Path) -> &'static str {
@@ -212,7 +275,13 @@ fn key_reply(r: Result<serde_json::Value, (u16, String)>) -> Reply {
     }
 }
 
-async fn route(hub: &Arc<Hub>, head: &Head, body: &[u8], ip: IpAddr) -> Reply {
+async fn route(
+    hub: &Arc<Hub>,
+    head: &Head,
+    body: &[u8],
+    ip: IpAddr,
+    signed_in: Option<crate::tokens::Member>,
+) -> Reply {
     // Two doors without a token: a nonce, and the join of a new key (see PROTOCOL.md, Key members).
     match (head.path.as_str(), head.method.as_str()) {
         ("/api/challenge", "GET" | "HEAD") => return key_reply(hub.challenge()),
@@ -235,8 +304,9 @@ async fn route(hub: &Arc<Hub>, head: &Head, body: &[u8], ip: IpAddr) -> Reply {
         || head.path.starts_with("/api/bundle/")
         || head.path.starts_with("/api/order/")
     {
-        let mut caller = None;
-        if head.path.starts_with("/api/submit/") {
+        // `serve` signs a submission in before it reads the body: a key nonce works once.
+        let mut caller = signed_in;
+        if head.path.starts_with("/api/submit/") && caller.is_none() {
             let auth = head.headers.get("authorization").map(String::as_str);
             match hub.check_auth(auth, None) {
                 Ok((m, _)) => caller = Some(m),
@@ -367,8 +437,35 @@ async fn public_state(hub: &Arc<Hub>, ip: IpAddr) -> Reply {
     Reply::json(200, &state)
 }
 
-/// Answers one plain HTTP request and closes the connection.
-pub async fn serve(hub: &Arc<Hub>, mut stream: TcpStream, head: Head) -> io::Result<()> {
+/// How long a body may take to arrive.
+const BODY_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the body of an upload may take to arrive.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reads and drops what the peer sends for a moment, so that an early refusal reaches a client
+/// that is still writing its body instead of ending in a reset.
+async fn drain(stream: &mut Sock) {
+    let mut sink = [0u8; 8192];
+    let mut left = 256 * 1024usize;
+    let _ = tokio::time::timeout(Duration::from_millis(300), async {
+        while left > 0 {
+            match stream.read(&mut sink).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => left = left.saturating_sub(n),
+            }
+        }
+    })
+    .await;
+}
+
+/// Answers one plain HTTP request and closes the connection. `slot` is the place the door counted for
+/// this connection, it is given back when the answer is sent.
+pub async fn serve(
+    hub: &Arc<Hub>,
+    mut stream: Sock,
+    head: Head,
+    mut slot: crate::door::HttpSlot,
+) -> io::Result<()> {
     let peer = stream.peer_addr()?.ip();
     let ip = hub.door().client_ip(
         peer,
@@ -385,28 +482,79 @@ pub async fn serve(hub: &Arc<Hub>, mut stream: TcpStream, head: Head) -> io::Res
         .get("content-length")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    // A submission may be as large as the cap of the highest tier, the handler applies the own cap of the caller.
-    let max_body = if head.path.starts_with("/api/submit/") && hub.config().intake.enabled {
-        MAX_BODY.max(usize::try_from(hub.config().intake.max_body_bytes()).unwrap_or(MAX_BODY))
-    } else {
-        MAX_BODY
-    };
-    let r = if content_len > max_body {
-        Reply::json(
+    let mut early: Option<Reply> = None;
+    // Behind a tunnel the peer is the loopback address: the block is known from the header only now.
+    if !ip.to_canonical().is_loopback()
+        && let Err(e) = slot.bind_block(&hub.door().block(ip))
+    {
+        early = Some(Reply::json(
+            429,
+            &serde_json::json!({ "ok": false, "error": e }),
+        ));
+    }
+    // A submission is checked from the head alone: who the caller is, whether it holds the lease and
+    // how much it may send. Only then the body is read, up to that cap.
+    let mut signed_in = None;
+    let mut max_body = MAX_BODY;
+    let mut timeout = BODY_TIMEOUT;
+    if early.is_none() && head.path.starts_with("/api/submit/") && hub.config().intake.enabled {
+        let auth = head.headers.get("authorization").map(String::as_str);
+        match hub.check_auth(auth, None) {
+            Ok((m, _)) => match crate::intake::upload_allowance(hub, &m, &head.path) {
+                Ok(cap) => {
+                    max_body = usize::try_from(cap).unwrap_or(usize::MAX).max(MAX_BODY);
+                    timeout = UPLOAD_TIMEOUT;
+                    signed_in = Some(m);
+                }
+                Err(e) => {
+                    early = Some(Reply::json(
+                        403,
+                        &serde_json::json!({ "ok": false, "error": e }),
+                    ));
+                }
+            },
+            Err((code, msg)) => {
+                early = Some(Reply::json(
+                    code.as_u16(),
+                    &serde_json::json!({ "ok": false, "error": msg }),
+                ));
+            }
+        }
+    }
+    if early.is_none() && content_len > max_body {
+        early = Some(Reply::json(
             413,
             &serde_json::json!({
                 "ok": false,
                 "error": format!("payload is {content_len} bytes, maximum is {max_body} bytes{}", if max_body == MAX_BODY { " (64 KiB)" } else { "" })
             }),
-        )
+        ));
+    }
+    let mut _reserved = None;
+    if early.is_none() && content_len > 0 {
+        match hub.door().reserve_upload(content_len as u64) {
+            Ok(g) => _reserved = Some(g),
+            Err(e) => {
+                early = Some(Reply::json(
+                    429,
+                    &serde_json::json!({ "ok": false, "error": e }),
+                ));
+            }
+        }
+    }
+    let r = if let Some(r) = early {
+        if content_len > 0 {
+            drain(&mut stream).await;
+        }
+        r
     } else {
         let mut body = vec![0u8; content_len];
         if content_len > 0 {
-            tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut body))
+            tokio::time::timeout(timeout, stream.read_exact(&mut body))
                 .await
                 .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
         }
-        route(hub, &head, &body, ip).await
+        route(hub, &head, &body, ip, signed_in).await
     };
     let mut out = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\

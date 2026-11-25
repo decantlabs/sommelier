@@ -44,6 +44,27 @@ pub struct DoorConfig {
     /// Refused joins within `join_flood_window_secs` that raise the alert JOIN_FLOOD. 0 is no alert.
     pub join_flood_refusals: u32,
     pub join_flood_window_secs: u64,
+    /// Plain HTTP connections the hub holds at most while it reads and answers a request head. They
+    /// are closed after one answer, a WebSocket leaves this count once it is upgraded. 0 is no limit.
+    pub max_http_conns: u32,
+    /// Plain HTTP connections one address block may hold. A loopback peer without a trusted header
+    /// is not counted. 0 is no limit.
+    pub http_conns_per_block: u32,
+    /// Seconds a connection may take to send its whole request head. Default 10.
+    pub head_timeout_secs: u64,
+    /// Bytes of upload bodies the hub holds in memory at once. 0 is no limit.
+    pub max_upload_bytes_in_flight: u64,
+    /// Failed join tries per address block and hour, counted apart from the joins that went through.
+    /// 0 is no limit.
+    pub bad_joins_per_block_per_hour: u32,
+    /// The public addresses of this hub as a client types them: `host`, which stands for the
+    /// default ports 443 and 80, or `host:port`. A key signs the address it connected to, and the hub
+    /// takes the sign in only when that address is listed here or is a loopback address. Empty: only
+    /// loopback sign ins work.
+    pub public_addresses: Vec<String>,
+    /// A file that holds the secret of the address blocks (64 hex characters), made at the first
+    /// start when it is missing. `None` derives the secret from `challenge_secret` in the data folder.
+    pub secret_file: Option<std::path::PathBuf>,
 }
 
 impl Default for DoorConfig {
@@ -59,6 +80,13 @@ impl Default for DoorConfig {
             keep_days: 0,
             join_flood_refusals: 20,
             join_flood_window_secs: 600,
+            max_http_conns: 512,
+            http_conns_per_block: 32,
+            head_timeout_secs: 10,
+            max_upload_bytes_in_flight: 64 * 1024 * 1024,
+            bad_joins_per_block_per_hour: 30,
+            public_addresses: Vec::new(),
+            secret_file: None,
         }
     }
 }
@@ -153,6 +181,13 @@ struct DState {
     /// Open connections of tier 0 or anonymous.
     low: u32,
     next_purge: u64,
+    /// Plain HTTP connections in their head and answer phase, in total and per block.
+    http_total: u32,
+    http_blocks: HashMap<String, u32>,
+    /// Bytes of upload bodies reserved right now.
+    upload_bytes: u64,
+    /// Failed join tries per block, newest last (epoch ms).
+    bad_joins: HashMap<String, VecDeque<u64>>,
 }
 
 struct Inner {
@@ -196,6 +231,59 @@ impl Drop for Slot {
                 s.members.remove(&self.member);
             }
         }
+    }
+}
+
+/// One plain HTTP connection counted by the door. Dropping it gives the place back.
+pub struct HttpSlot {
+    door: Door,
+    block: Option<String>,
+}
+
+impl Drop for HttpSlot {
+    fn drop(&mut self) {
+        let mut s = lock(&self.door.inner.state);
+        s.http_total = s.http_total.saturating_sub(1);
+        if let Some(b) = self.block.take()
+            && let Some(n) = s.http_blocks.get_mut(&b)
+        {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                s.http_blocks.remove(&b);
+            }
+        }
+    }
+}
+
+impl HttpSlot {
+    /// Counts the connection against `block` too, once. Refuses when the block holds too many.
+    pub fn bind_block(&mut self, block: &str) -> Result<(), String> {
+        if self.block.is_some() {
+            return Ok(());
+        }
+        let limit = self.door.inner.cfg.http_conns_per_block;
+        let mut s = lock(&self.door.inner.state);
+        if limit > 0 && s.http_blocks.get(block).copied().unwrap_or(0) >= limit {
+            return Err(format!(
+                "connection limit: {limit} plain HTTP connections per address block"
+            ));
+        }
+        *s.http_blocks.entry(block.to_owned()).or_default() += 1;
+        self.block = Some(block.to_owned());
+        Ok(())
+    }
+}
+
+/// Bytes of an upload body reserved in memory. Dropping it gives them back.
+pub struct UploadGuard {
+    door: Door,
+    bytes: u64,
+}
+
+impl Drop for UploadGuard {
+    fn drop(&mut self) {
+        let mut s = lock(&self.door.inner.state);
+        s.upload_bytes = s.upload_bytes.saturating_sub(self.bytes);
     }
 }
 
@@ -280,6 +368,83 @@ impl Door {
         Ok(())
     }
 
+    /// Counts one plain HTTP connection. `block` is the block of the socket peer when it is known at
+    /// accept time. Refuses over the total or over the block, the caller closes the socket.
+    pub fn admit_http(&self, block: Option<&str>) -> Result<HttpSlot, String> {
+        let cfg = &self.inner.cfg;
+        {
+            let mut s = lock(&self.inner.state);
+            if cfg.max_http_conns > 0 && s.http_total >= cfg.max_http_conns {
+                return Err(format!(
+                    "connection limit: the hub holds {} plain HTTP connections",
+                    cfg.max_http_conns
+                ));
+            }
+            s.http_total += 1;
+        }
+        let mut slot = HttpSlot {
+            door: self.clone(),
+            block: None,
+        };
+        if let Some(b) = block {
+            slot.bind_block(b)?;
+        }
+        Ok(slot)
+    }
+
+    /// Reserves `bytes` of upload body memory. Refuses over `max_upload_bytes_in_flight`.
+    pub fn reserve_upload(&self, bytes: u64) -> Result<UploadGuard, String> {
+        let limit = self.inner.cfg.max_upload_bytes_in_flight;
+        let mut s = lock(&self.inner.state);
+        if limit > 0 && s.upload_bytes.saturating_add(bytes) > limit {
+            return Err(format!(
+                "the hub holds {limit} bytes of uploads in flight already, try again in {CONN_RETRY_SECS} s"
+            ));
+        }
+        s.upload_bytes += bytes;
+        Ok(UploadGuard {
+            door: self.clone(),
+            bytes,
+        })
+    }
+
+    /// Refuses a join try of `block` that has failed too often in the last hour. Nothing is counted.
+    pub fn check_bad_joins(&self, block: &str, now_ms: u64) -> Result<(), String> {
+        let limit = self.inner.cfg.bad_joins_per_block_per_hour as usize;
+        if limit == 0 {
+            return Ok(());
+        }
+        let mut s = lock(&self.inner.state);
+        self.purge(&mut s, now_ms);
+        let Some(q) = s.bad_joins.get_mut(block) else {
+            return Ok(());
+        };
+        while q.front().is_some_and(|t| *t + HOUR_MS <= now_ms) {
+            q.pop_front();
+        }
+        if q.len() >= limit {
+            let wait = retry_in(q[0], HOUR_MS, now_ms);
+            s.refusals.push_back(now_ms);
+            return Err(format!(
+                "join limit: {limit} failed join tries per hour from one address block, try again in {wait} s"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Counts one failed join try of `block`, apart from the joins that went through.
+    pub fn note_bad_join(&self, block: &str, now_ms: u64) {
+        if self.inner.cfg.bad_joins_per_block_per_hour == 0 {
+            return;
+        }
+        let mut s = lock(&self.inner.state);
+        self.purge(&mut s, now_ms);
+        s.bad_joins
+            .entry(block.to_owned())
+            .or_default()
+            .push_back(now_ms);
+    }
+
     /// Counts one connection or state read of the public reader.
     pub fn charge_read(&self, block: &str, now_ms: u64) -> Result<(), String> {
         let limit = self.inner.cfg.public_reads_per_block_per_min as usize;
@@ -346,7 +511,7 @@ impl Door {
     }
 
     fn purge(&self, s: &mut DState, now: u64) {
-        let over = s.joins.len() + s.reads.len() > WINDOW_MAP_SOFT_CAP;
+        let over = s.joins.len() + s.reads.len() + s.bad_joins.len() > WINDOW_MAP_SOFT_CAP;
         if now < s.next_purge && !over {
             return;
         }
