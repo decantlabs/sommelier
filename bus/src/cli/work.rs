@@ -87,7 +87,8 @@ fn client_opts(a: &ParsedArgs) -> Result<Opts, String> {
             let path = file
                 .map(str::to_owned)
                 .or_else(|| env("SOMMELIER_TOKEN_FILE"))
-                .ok_or("no token: pass --token, --token-file, or set SOMMELIER_TOKEN")?;
+                .or_else(crate::key::client::default_marker_file)
+                .ok_or("no token: pass --token, --token-file, set SOMMELIER_TOKEN, or run `sommelier join`")?;
             fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read token file {path}: {e}"))?
                 .trim()

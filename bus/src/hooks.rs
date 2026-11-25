@@ -18,6 +18,7 @@ use crate::tokens::Member;
 pub struct OpCaller {
     pub name: String,
     pub role: Role,
+    /// `"owner"`, `"guest"`, `"observer"`, or `"tier0"` for a member that signed in with a key.
     pub trust: &'static str,
 }
 
@@ -165,6 +166,7 @@ pub fn on_op(
             Ok(out)
         }
         "task.exit" | "agent.exit" => handle_task_exit_op(ctx, body),
+        op if op.starts_with("key.") => crate::key::on_op(ctx, op, body),
         op if op.starts_with("task.") => crate::task::on_op(ctx, op, body),
         op if op.starts_with("land.") || op.starts_with("run.") => {
             crate::land::on_op(ctx, op, body)
@@ -177,7 +179,7 @@ pub fn on_op(
             crate::cli::alerts::on_op(ctx, op, body)
         }
         other => Err(format!(
-            "unknown op `{other}` (send, heartbeat, whoami, claims, who, idle, roster, log, quota.report, task.*, land.*, run.*, plan.*, role.*, alert.*)"
+            "unknown op `{other}` (send, heartbeat, whoami, claims, who, idle, roster, log, quota.report, key.*, task.*, land.*, run.*, plan.*, role.*, alert.*)"
         )),
     }
 }

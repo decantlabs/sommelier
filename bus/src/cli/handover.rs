@@ -85,7 +85,8 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
             (None, file) => {
                 let path = file
                     .or_else(|| env_var("SOMMELIER_TOKEN_FILE"))
-                    .ok_or("no token: pass --token, --token-file, or set SOMMELIER_TOKEN")?;
+                    .or_else(crate::key::client::default_marker_file)
+                .ok_or("no token: pass --token, --token-file, set SOMMELIER_TOKEN, or run `sommelier join`")?;
                 std::fs::read_to_string(&path)
                     .map_err(|e| format!("cannot read token file {path}: {e}"))?
                     .trim()

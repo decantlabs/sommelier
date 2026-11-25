@@ -28,6 +28,8 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 
 use crate::claims::Claims;
+use crate::key::book::Lookup;
+use crate::key::{Challenges, JoinRules, KeyBook};
 use crate::lock;
 use crate::msg::{
     Filter, Kind, Limits, Message, Role, check_kind_limit, check_worker_name, split_addressee,
@@ -62,6 +64,10 @@ pub struct HubConfig {
     pub verbose: bool,
     /// Folder with the dashboard files served over plain HTTP, `None` serves none.
     pub ui_dir: Option<PathBuf>,
+    /// Whether new members may join with a key. Off by default.
+    pub join: JoinRules,
+    /// How long a challenge nonce lives.
+    pub nonce_ttl: Duration,
 }
 
 impl HubConfig {
@@ -79,6 +85,8 @@ impl HubConfig {
             ping_every: Duration::from_secs(30),
             verbose: true,
             ui_dir: None,
+            join: JoinRules::default(),
+            nonce_ttl: Duration::from_millis(crate::key::join::NONCE_TTL_MS),
         }
     }
 }
@@ -121,6 +129,8 @@ struct State {
     last_seen: HashMap<String, u64>,
     derive: crate::derive::DeriveStore,
     store: Option<crate::store::Store>,
+    /// The keys of key members, folded from the key facts of the log.
+    keys: KeyBook,
 }
 
 impl State {
@@ -169,6 +179,42 @@ pub struct Hub {
     conns: Mutex<HashMap<u64, ConnInfo>>,
     next_conn: AtomicU64,
     stop: tokio::sync::watch::Sender<bool>,
+    /// Random id of this hub, stored in the data folder at the first start.
+    hub_id: String,
+    challenges: Challenges,
+}
+
+/// How a connection proved who it is. Opaque outside the hub.
+pub(crate) struct Credential(Cred);
+
+/// What a connection used to prove who it is.
+enum Cred {
+    /// A bearer token, rechecked against the token file.
+    Token(String),
+    /// A key: the base64url public key it signed with. The member has tier 0.
+    Key(String),
+}
+
+/// The hub id of the data folder, made at the first start.
+fn load_hub_id(dir: &std::path::Path) -> io::Result<String> {
+    let path = dir.join("hub_id");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let id = text.trim().to_owned();
+        if id.len() == 32 && id.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(id);
+        }
+    }
+    let mut raw = [0u8; 16];
+    getrandom::fill(&mut raw).map_err(|e| io::Error::other(e.to_string()))?;
+    let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(
+        &path,
+        format!(
+            "{id}
+"
+        ),
+    )?;
+    Ok(id)
 }
 
 fn file_stamp(path: &std::path::Path) -> Option<(SystemTime, u64)> {
@@ -193,6 +239,7 @@ impl Hub {
         let tokens_path = cfg.data_dir.join("tokens.json");
         let tokens = TokenFile::load(&tokens_path)?;
         let tokens_stamp = file_stamp(&tokens_path);
+        let hub_id = load_hub_id(&cfg.data_dir)?;
 
         let store = PolicyStore::new(&cfg.data_dir);
         store.initialize(cfg.policy_path.as_deref())?;
@@ -204,6 +251,7 @@ impl Hub {
         let mut hello = HashMap::new();
         let mut last_seen = HashMap::new();
         let mut derive = crate::derive::DeriveStore::default();
+        let mut keys = KeyBook::default();
         derive.timers.idle_alert_sec = cfg.idle_alert_after.as_secs();
         let now = now_ms();
         if let Ok(f) = File::open(&log_path) {
@@ -222,6 +270,7 @@ impl Hub {
                         {
                             announced = announced.max(version);
                         }
+                        keys.apply(&m);
                         // Claims restored from the log get a fresh timeout from now.
                         State::derive(
                             &mut claims,
@@ -277,12 +326,15 @@ impl Hub {
                 last_seen,
                 derive,
                 store: sqlite_store,
+                keys,
             }),
             buckets: Mutex::new(HashMap::new()),
             tx,
             conns: Mutex::new(HashMap::new()),
             next_conn: AtomicU64::new(1),
             stop: tokio::sync::watch::channel(false).0,
+            hub_id,
+            challenges: Challenges::default(),
         });
         hub.reload_policy().map_err(io::Error::other)?;
         Ok(hub)
@@ -315,6 +367,7 @@ impl Hub {
             .write_all(&buf)
             .map_err(|e| format!("the hub could not store the message: {e}"))?;
         st.next_id += 1;
+        st.keys.apply(&msg);
         let State {
             claims,
             roster,
@@ -342,6 +395,9 @@ impl Hub {
                 "hook may only emit OFFER, TASK_UPDATE, ALERT, or FACT (got {})",
                 msg.kind.as_str()
             ));
+        }
+        if msg.kind == Kind::Fact && msg.topic.starts_with("key/") && msg.role != Role::Hub {
+            return Err("FACT topics under key/ are written by the hub only".into());
         }
         check_kind_limit(&self.cfg.limits, msg.kind, &msg.body)?;
         validate(&self.cfg.limits, &msg.topic, &msg.body, &msg.refs)?;
@@ -470,6 +526,9 @@ impl Hub {
                 return Err("only an orchestrator may send TASK".into());
             }
             _ => {}
+        }
+        if kind == Kind::Fact && msg.topic.starts_with("key/") {
+            return Err("FACT topics under key/ are written by the hub only".into());
         }
         check_kind_limit(&self.cfg.limits, kind, &msg.body)?;
         validate(&self.cfg.limits, &msg.topic, &msg.body, &msg.refs)?;
@@ -628,19 +687,154 @@ impl Hub {
         Ok((m, token))
     }
 
-    fn authorize(&self, req: &HsRequest) -> Result<(Member, ConnectParams), (StatusCode, String)> {
+    /// Authenticates with the `Authorization` header: `SommelierKey <member>.<nonce>.<sig>` for
+    /// a key member, else a bearer token (or an observer token in the URL query).
+    pub(crate) fn check_auth(
+        &self,
+        authorization: Option<&str>,
+        query: Option<String>,
+    ) -> Result<(Member, Credential), (StatusCode, String)> {
+        if let Some(rest) = authorization.and_then(|v| v.strip_prefix("SommelierKey ")) {
+            return self.check_key(rest.trim());
+        }
+        let bearer = authorization
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|v| v.trim().to_owned());
+        let (m, token) = self.check_token(bearer, query)?;
+        Ok((m, Credential(Cred::Token(token))))
+    }
+
+    /// Checks `<member>.<nonce>.<signature>`: the key is active, the signature covers the auth
+    /// text and the nonce was handed out by this hub and is still unused.
+    fn check_key(&self, header: &str) -> Result<(Member, Credential), (StatusCode, String)> {
+        let unauthorized = |m: &str| (StatusCode::UNAUTHORIZED, m.to_string());
+        let mut parts = header.split('.');
+        let (Some(member), Some(nonce), Some(sig), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(unauthorized(
+                "malformed key credentials: send `Authorization: SommelierKey <member>.<nonce>.<signature>`",
+            ));
+        };
+        let (public, joined_at) = {
+            let st = lock(&self.state);
+            match st.keys.lookup(member) {
+                Lookup::Active(p) => {
+                    let at = st.keys.get(member).map(|r| r.joined_at.clone());
+                    (p, at.unwrap_or_default())
+                }
+                Lookup::Revoked => return Err(unauthorized("this key was revoked")),
+                Lookup::Unknown => {
+                    return Err(unauthorized(
+                        "unknown key member, run `sommelier join` first",
+                    ));
+                }
+            }
+        };
+        let sig = crate::key::crypto::unb64(sig)
+            .map_err(|_| unauthorized("the signature is not valid base64url"))?;
+        let public_bytes = crate::key::crypto::unb64(&public)
+            .map_err(|_| unauthorized("the stored key is damaged"))?;
+        crate::key::crypto::verify_bytes(
+            &public_bytes,
+            crate::key::crypto::auth_text(&self.hub_id, nonce).as_bytes(),
+            &sig,
+        )
+        .map_err(|_| unauthorized("the key signature is wrong"))?;
+        self.challenges
+            .consume(nonce, now_ms())
+            .map_err(|e| unauthorized(&e))?;
+        let member = Member {
+            name: member.to_owned(),
+            role: Role::Member,
+            salt: String::new(),
+            hash: String::new(),
+            created: joined_at,
+            token: None,
+        };
+        Ok((member, Credential(Cred::Key(public))))
+    }
+
+    /// The key this connection signed in with is still the current key of an active member.
+    fn key_valid(&self, member: &str, public: &str) -> bool {
+        lock(&self.state).keys.is_current(member, public)
+    }
+
+    fn authorize(
+        &self,
+        req: &HsRequest,
+    ) -> Result<(Member, ConnectParams, Credential), (StatusCode, String)> {
         let mut params = ConnectParams::from_query(req.uri().query())
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         let header = req
             .headers()
             .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|v| v.trim().to_owned());
-        let (m, token) = self.check_token(header, params.token.clone())?;
+            .and_then(|v| v.to_str().ok());
+        let (m, cred) = self.check_auth(header, params.token.clone())?;
         // Kept for the periodic revocation check, the file only holds hashes.
-        params.token = Some(token);
-        Ok((m, params))
+        if let Cred::Token(t) = &cred.0 {
+            params.token = Some(t.clone());
+        }
+        Ok((m, params, cred))
+    }
+
+    /// `GET /api/challenge`: a nonce that lives a short time and is used once.
+    pub fn challenge(&self) -> Result<Value, (u16, String)> {
+        let now = now_ms();
+        let (nonce, expires) = self
+            .challenges
+            .issue(now, self.cfg.nonce_ttl.as_millis() as u64)
+            .map_err(|e| (429, e))?;
+        Ok(
+            json!({"hub_id": self.hub_id, "nonce": nonce, "expires": rfc3339(expires),
+                  "pow_bits": self.cfg.join.proof_of_work_bits}),
+        )
+    }
+
+    /// `POST /api/join`: registers a key. A known key gets its member id and nothing is written.
+    pub fn join(&self, raw: &[u8]) -> Result<Value, (u16, String)> {
+        let rules = self.cfg.join;
+        if !rules.enabled {
+            return Err((
+                403,
+                "joining is switched off on this hub, the owner turns it on with `sommelier serve --join on`".into(),
+            ));
+        }
+        let bad = |e: String| (400u16, e);
+        let body: Value = serde_json::from_slice(raw)
+            .map_err(|e| bad(format!("the join body is not valid JSON: {e}")))?;
+        let req = crate::key::join::parse_join(&body).map_err(bad)?;
+        self.challenges.consume(&req.nonce, now_ms()).map_err(bad)?;
+        crate::key::join::verify_join(&rules, &req, &body).map_err(bad)?;
+        let member = crate::key::crypto::member_id(&req.public);
+        if self
+            .tokens
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&member)
+            .is_some()
+        {
+            return Err(bad(format!("the member id `{member}` is taken by a token")));
+        }
+        let mut st = lock(&self.state);
+        if let Some(existing) = st.keys.member_of_pub(&req.public_b64) {
+            return Ok(json!({"member": existing, "joined": false}));
+        }
+        let joined_at = rfc3339(now_ms());
+        let msg = Message {
+            id: 0,
+            ts: String::new(),
+            from: "hub".into(),
+            role: Role::Hub,
+            kind: Kind::Fact,
+            topic: format!("key/{member}"),
+            body: crate::key::book::join_body(&member, &req.public_b64, &req.handle, &joined_at),
+            refs: vec![],
+            to: vec![],
+        };
+        validate(&self.cfg.limits, &msg.topic, &msg.body, &msg.refs).map_err(bad)?;
+        let id = self.append(&mut st, msg).map_err(|e| (500, e))?;
+        Ok(json!({"member": member, "joined": true, "id": id}))
     }
 
     /// Reads stored lines with `from <= id <= upto` that match, keeping the last `last`
@@ -768,7 +962,7 @@ impl Hub {
     }
 
     /// Answers one text frame from a client.
-    async fn handle_text(self: &Arc<Self>, member: &Member, text: &str) -> String {
+    async fn handle_text(self: &Arc<Self>, member: &Member, tier0: bool, text: &str) -> String {
         let max = self.cfg.limits.max_frame;
         if text.len() > max {
             return reply_err(
@@ -786,6 +980,9 @@ impl Hub {
             Ok(r) => r,
             Err(e) => return reply_err(op, rid, &e),
         };
+        if tier0 && let Some(what) = tier0_denied(&req) {
+            return reply_err(op, rid, &crate::key::tier0_refusal(&what));
+        }
         let mut out = Map::new();
         match req {
             Request::Send {
@@ -832,6 +1029,9 @@ impl Hub {
             Request::Whoami => {
                 out.insert("name".into(), member.name.clone().into());
                 out.insert("role".into(), member.role.as_str().into());
+                if tier0 {
+                    out.insert("tier".into(), 0.into());
+                }
                 out.insert("last_id".into(), self.last_id().into());
             }
             Request::Claims => {
@@ -931,7 +1131,10 @@ impl Hub {
             }
             Request::ModuleOp { op: mod_op, body } => {
                 let now = now_ms();
-                let caller = crate::hooks::OpCaller::from_member(member);
+                let mut caller = crate::hooks::OpCaller::from_member(member);
+                if tier0 {
+                    caller.trust = crate::key::ops::TRUST;
+                }
                 let mut store = match crate::store::Store::open(&self.cfg.data_dir) {
                     Ok(mut s) => {
                         let _ = s.catch_up_from_log(&self.log_path);
@@ -963,6 +1166,25 @@ impl Hub {
         }
         reply_ok(op, rid, out)
     }
+}
+
+/// What a tier 0 member asked for that it may not use, as the text for the refusal.
+fn tier0_denied(req: &Request) -> Option<String> {
+    let (name, shown) = match req {
+        Request::Send { kind, .. } => (
+            kind.as_str().to_owned(),
+            format!("the message kind {}", kind.as_str()),
+        ),
+        Request::Heartbeat => ("heartbeat".into(), "heartbeat".into()),
+        Request::Whoami => ("whoami".into(), "whoami".into()),
+        Request::Claims => ("claims".into(), "claims".into()),
+        Request::Who => ("who".into(), "who".into()),
+        Request::Idle => ("idle".into(), "idle".into()),
+        Request::Roster { .. } => ("roster".into(), "roster".into()),
+        Request::Log { .. } => ("log".into(), "log".into()),
+        Request::ModuleOp { op, .. } => (op.clone(), format!("the op `{op}`")),
+    };
+    (!crate::key::tier0_allows(&name)).then_some(shown)
 }
 
 /// Opens the hub in `cfg.data_dir` and serves on `listener` until the process ends.
@@ -1049,7 +1271,7 @@ async fn handle(hub: Arc<Hub>, stream: TcpStream) -> Result<(), String> {
     let ws = tokio_tungstenite::accept_hdr_async_with_config(stream, cb, Some(wscfg))
         .await
         .map_err(|e| format!("handshake refused: {e}"))?;
-    let Some((member, params)) = auth else {
+    let Some((member, params, cred)) = auth else {
         return Err("no credentials".into());
     };
     let id = hub.next_conn.fetch_add(1, Ordering::Relaxed);
@@ -1068,7 +1290,7 @@ async fn handle(hub: Arc<Hub>, stream: TcpStream) -> Result<(), String> {
     if announce {
         eprintln!("sommelier: + {} ({})", member.name, member.role.as_str());
     }
-    let r = connection(&hub, ws, &member, params).await;
+    let r = connection(&hub, ws, &member, params, &cred.0).await;
     lock(&hub.conns).remove(&id);
     if announce {
         eprintln!("sommelier: - {}", member.name);
@@ -1112,9 +1334,10 @@ async fn connection(
     ws: WebSocketStream<TcpStream>,
     member: &Member,
     params: ConnectParams,
+    cred: &Cred,
 ) -> Result<(), String> {
     let (mut sink, mut stream) = ws.split();
-    let token = params.token.clone().unwrap_or_default();
+    let tier0 = matches!(cred, Cred::Key(_));
     let filter = params.filter.to_filter(&member.name);
     // Subscribe and note the newest id under the state lock: older ids come from the
     // log, newer ones from the channel.
@@ -1149,7 +1372,7 @@ async fn connection(
             incoming = stream.next() => match incoming {
                 None | Some(Err(_)) | Some(Ok(WsMsg::Close(_))) => return Ok(()),
                 Some(Ok(WsMsg::Text(t))) => {
-                    let reply = hub.handle_text(member, t.as_str()).await;
+                    let reply = hub.handle_text(member, tier0, t.as_str()).await;
                     send(&mut sink, reply).await?;
                 }
                 Some(Ok(WsMsg::Binary(_))) => {
@@ -1176,9 +1399,16 @@ async fn connection(
                 sink.send(WsMsg::Ping(Default::default())).await.map_err(|e| format!("ping: {e}"))?;
             }
             _ = check.tick() => {
-                if !hub.token_valid(member, &token) {
-                    close(&mut sink, CloseCode::Policy, "token revoked".into()).await;
-                    return Err("token revoked".into());
+                match cred {
+                    Cred::Token(token) if !hub.token_valid(member, token) => {
+                        close(&mut sink, CloseCode::Policy, "token revoked".into()).await;
+                        return Err("token revoked".into());
+                    }
+                    Cred::Key(public) if !hub.key_valid(&member.name, public) => {
+                        close(&mut sink, CloseCode::Policy, "key revoked".into()).await;
+                        return Err("key revoked".into());
+                    }
+                    _ => {}
                 }
             }
         }

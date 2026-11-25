@@ -1,36 +1,77 @@
 //! Key identity of public members: key pairs, member ids, signed requests and the KEY table.
 //!
-//! Part of the public factory, see `docs/factory.md`. This file is the stub that the spine commit
-//! registered. The module owns its tables, its projection and its part of `/api/state`.
+//! Part of the public factory, see `docs/factory.md` sections 4 and 12. A person with no
+//! token runs `sommelier join`, gets a member id made from a key that never leaves the
+//! machine and connects as a tier 0 member that may do very little.
+//!
+//! * [`crypto`]: Ed25519 through `ring`, the member id, canonical signing, the proof of work.
+//! * [`book`]: the key facts of the log, the hub's in memory book and the KEY table.
+//! * [`join`]: the join rules, the nonces and the checks of a join request.
+//! * [`ops`]: the requests `key.rotate` and `key.revoke`.
+//! * [`client`]: the key file, joining and signing in from a client.
 
-use rusqlite::{Connection, Transaction};
-use serde_json::{Map, Value};
+pub mod book;
+pub mod client;
+pub mod crypto;
+pub mod join;
+pub mod ops;
 
-use crate::msg::Message;
-use crate::store::StoreModule;
+pub use book::{KeyBook, KeyModule, KeyState};
+pub use crypto::{MemberKey, member_id, sign_request, verify_request};
+pub use join::{Challenges, JoinRules};
+pub use ops::on_op;
 
-/// Store projection module of this folder.
-pub struct KeyModule;
+/// What a tier 0 member may use, in ONE place. Operations are lower case request names, message
+/// kinds are upper case. Later phases extend this list.
+pub const TIER0_ALLOWED: [&str; 9] = [
+    "whoami",
+    "heartbeat",
+    "log",
+    "roster",
+    "who",
+    "claims",
+    "HELLO",
+    "key.rotate",
+    "key.revoke",
+];
 
-impl StoreModule for KeyModule {
-    fn name(&self) -> &'static str {
-        "key"
-    }
+/// True when a tier 0 member may use the request `op` (such as `whoami` or `task.add`) or send
+/// the message kind (such as `HELLO` or `CHAT`).
+pub fn tier0_allows(op_or_kind: &str) -> bool {
+    TIER0_ALLOWED.contains(&op_or_kind)
+}
 
-    fn schema(&self) -> &'static str {
-        ""
-    }
+/// The refusal for a tier 0 member, one line with the tier in it.
+pub fn tier0_refusal(what: &str) -> String {
+    format!(
+        "tier 0 may not use {what}: a new key may only use {}",
+        TIER0_ALLOWED.join(", ")
+    )
+}
 
-    fn apply(&self, _tx: &Transaction<'_>, _msg: &Message) -> Result<(), String> {
-        Ok(())
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn api(
-        &self,
-        _conn: &Connection,
-        _now_sec: u64,
-        _state: &mut Map<String, Value>,
-    ) -> Result<(), String> {
-        Ok(())
+    #[test]
+    fn tier0_list_is_the_one_place() {
+        for ok in [
+            "whoami",
+            "heartbeat",
+            "log",
+            "roster",
+            "who",
+            "claims",
+            "HELLO",
+        ] {
+            assert!(tier0_allows(ok), "{ok}");
+        }
+        assert!(tier0_allows("key.rotate") && tier0_allows("key.revoke"));
+        for no in [
+            "CHAT", "READY", "CLAIM", "TASK", "task.add", "idle", "send", "hello",
+        ] {
+            assert!(!tier0_allows(no), "{no}");
+        }
+        assert!(tier0_refusal("CHAT").contains("tier 0"));
     }
 }

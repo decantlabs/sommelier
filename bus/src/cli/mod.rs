@@ -9,6 +9,7 @@ pub mod drill;
 pub mod guide;
 pub mod handover;
 pub mod hello;
+pub mod key;
 pub mod land;
 pub mod metric;
 pub mod plan;
@@ -47,6 +48,7 @@ pub async fn dispatch(cmd: &str, args: &[String]) -> Option<Result<ExitCode, Str
         "standby" => Some(standby::run(args).await),
         "promote" => Some(promote::run(args).await),
         "drill" => Some(drill::run(args).await),
+        "join" | "key" => Some(key::run(cmd, args).await),
         _ => None,
     }
 }

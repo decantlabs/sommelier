@@ -625,7 +625,9 @@ fn resolve_client_opts(
     let resolved_token = match (token.or_else(|| env("SOMMELIER_TOKEN")), token_file) {
         (Some(t), _) => Some(t),
         (None, file) => {
-            let path = file.or_else(|| env("SOMMELIER_TOKEN_FILE"))?;
+            let path = file
+                .or_else(|| env("SOMMELIER_TOKEN_FILE"))
+                .or_else(crate::key::client::default_marker_file)?;
             std::fs::read_to_string(path)
                 .ok()
                 .map(|s| s.trim().to_owned())
