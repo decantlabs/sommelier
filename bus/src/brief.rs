@@ -294,8 +294,22 @@ impl HttpOutcome {
     }
 }
 
+/// True for a member that signed in with a key: `check_key` gives it an empty hash and no plain token.
+fn is_key_member(m: &Member) -> bool {
+    m.hash.is_empty() && m.token.is_none()
+}
+
+/// True for 64 hex characters, a brief named by its hash.
+fn looks_like_hash(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Handles `PUT /api/brief/<id>` (orchestrator token auth, max 64 KiB)
 /// and `GET /api/brief/<id>` (member or orchestrator token auth).
+///
+/// A key member reads a brief only by the id of an order on which it holds the active lease, never by
+/// hash, and only while it has a tier. The tables come from the state database in `data_dir`, read
+/// after the log is caught up. Token members and orchestrators are unchanged.
 pub fn on_http(
     data_dir: &Path,
     method: &str,
@@ -303,6 +317,30 @@ pub fn on_http(
     query: Option<&str>,
     body: &[u8],
     caller: Option<&Member>,
+) -> Option<HttpOutcome> {
+    let holds = |member: &Member, id: &str| {
+        let Ok(mut store) = crate::store::Store::open(data_dir) else {
+            return false;
+        };
+        let _ = store.catch_up_from_log(&data_dir.join("bus.jsonl"));
+        let conn = store.connection();
+        let leased = crate::task::query_active_lease_for_task(conn, id)
+            .ok()
+            .flatten()
+            .is_some_and(|l| l.owner == member.name);
+        leased && crate::stamp::tier_table::tier_from_table(conn, &member.name, None) >= 0
+    };
+    route(data_dir, method, path, query, body, caller, &holds)
+}
+
+fn route(
+    data_dir: &Path,
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    body: &[u8],
+    caller: Option<&Member>,
+    key_holds: &dyn Fn(&Member, &str) -> bool,
 ) -> Option<HttpOutcome> {
     let rest = path.strip_prefix("/api/brief/")?;
     let id = match validate_brief_id(rest) {
@@ -359,6 +397,15 @@ pub fn on_http(
                     403,
                     &json!({ "ok": false, "error": "member or orchestrator token required for GET /api/brief/<id>" }),
                 ));
+            }
+            if is_key_member(member) {
+                // A key member reads the brief of the order it holds and nothing else.
+                if looks_like_hash(id) || !key_holds(member, id) {
+                    return Some(HttpOutcome::json(
+                        403,
+                        &json!({ "ok": false, "error": "a key member reads a brief only by the id of an order it holds the active lease of" }),
+                    ));
+                }
             }
             match get_brief(data_dir, id) {
                 Ok(Some((text, sha256))) => {

@@ -25,7 +25,7 @@ pub struct HttpRequestSpec {
     pub body: Option<Value>,
 }
 
-/// The four inputs of the workflow `factory-verify`.
+/// The inputs of the workflow `factory-verify`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchInputs {
     /// The SHA 256 of the bundle, 64 lower case hex characters.
@@ -36,6 +36,26 @@ pub struct DispatchInputs {
     pub base: String,
     /// The base URL of the hub that serves the bundle and the order.
     pub hub: String,
+    /// The attempt of the order that this submission belongs to.
+    pub attempt: u32,
+    /// Which dispatch of the current round this is: 1, or 2 for the one retry of a lost dispatch.
+    pub dispatch: u32,
+    /// The start of the round in milliseconds. A `verify.retry` begins a new round, so a run of an
+    /// earlier round never carries the name of the run that the hub waits for now.
+    pub round: u64,
+}
+
+impl DispatchInputs {
+    /// The run name the hub expects, which the template sets with
+    /// `run-name: verify <submission> a<attempt> d<dispatch> t<round>`.
+    pub fn run_name(&self) -> String {
+        run_name(&self.submission, self.attempt, self.dispatch, self.round)
+    }
+}
+
+/// The run name for one dispatch. See [`DispatchInputs::run_name`].
+pub fn run_name(submission: &str, attempt: u32, dispatch: u32, round: u64) -> String {
+    format!("verify {submission} a{attempt} d{dispatch} t{round}")
 }
 
 /// Percent encodes one URL path segment. Only unreserved characters pass.
@@ -105,6 +125,9 @@ pub fn dispatch_request(
                 "order": inputs.order,
                 "base": inputs.base,
                 "hub": inputs.hub,
+                "attempt": inputs.attempt.to_string(),
+                "dispatch": inputs.dispatch.to_string(),
+                "round": inputs.round.to_string(),
             },
         })),
     }

@@ -30,7 +30,9 @@ when you joined with a key, uploads it and prints the hash and the state of the 
   --url URL   hub address, default ws://127.0.0.1:7300 (env SOMMELIER_URL)
 A member that joined with a key may not read the order: pass --attempt and --base then.
 The bundle may hold no more than your tier allows. The hub runs the static gates next, and the
-request `submit.status` shows the state of each of your submissions.
+request `submit.status` shows the state of each of your submissions. Each order and attempt takes one
+live submission: send the next one only after the first failed and the order came back. A tier also
+caps the submissions of 24 hours.
 ";
 
 /// The help text of this command.

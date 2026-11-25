@@ -416,6 +416,9 @@ fn member_facts(cfg: &StampConfig, k: &KeyRow, stamps: &[Stamp]) -> MemberFacts 
 
 /// Called on every hub tick. Returns messages for the hub to append.
 pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
+    if crate::factory::vetoed(hub.config(), crate::factory::Part::Stamp) {
+        return Vec::new();
+    }
     let cfg = &hub.config().stamp;
     if !cfg.enabled {
         return Vec::new();
@@ -528,6 +531,7 @@ pub fn on_op(
     op: &str,
     body: &Value,
 ) -> Result<Map<String, Value>, String> {
+    crate::factory::guard_op(ctx.config(), crate::factory::Part::Stamp)?;
     if !matches!(
         op,
         "stamp.revert" | "stamp.grant" | "stamp.clear" | "stamp.intent"

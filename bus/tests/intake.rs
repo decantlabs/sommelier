@@ -1025,7 +1025,10 @@ async fn a_restart_picks_the_clean_build_up_where_it_was() {
     assert_eq!(before.dispatched().len(), 1);
 
     let after = Arc::new(FakeGitHub::new());
-    after.set_runs(vec![run(9, &sha, "success")]);
+    // The run carries the name that the first hub dispatched, so the new hub finds it by name.
+    let mut found = run(9, &sha, "success");
+    found.display_title = Some(before.dispatched()[0].run_name());
+    after.set_runs(vec![found]);
     after.set_jobs(9, vec![job("Run tests", "success")]);
     restart(&mut hub, &r, |c| with_verify(&after, c)).await;
     hub.wait_state(&sha, "verified").await;

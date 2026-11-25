@@ -118,6 +118,7 @@ pub fn on_op(
     op: &str,
     body: &Value,
 ) -> Result<Map<String, Value>, String> {
+    crate::factory::guard_op(ctx.config(), crate::factory::Part::Test)?;
     let cfg = ctx.config().test.clone();
     on_op_with(ctx, op, body, &cfg)
 }
@@ -447,6 +448,9 @@ fn plain_key(s: &str, max: usize) -> String {
 /// It reads the tables once, asks the front door for the blocks, and computes in memory. Nothing
 /// slow runs under the state lock.
 pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
+    if crate::factory::vetoed(hub.config(), crate::factory::Part::Test) {
+        return Vec::new();
+    }
     let cfg = &hub.config().test;
     if !cfg.enabled {
         return Vec::new();

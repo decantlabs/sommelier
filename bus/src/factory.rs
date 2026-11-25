@@ -44,6 +44,10 @@ pub struct IntakeFile {
     pub reference_repo: Option<PathBuf>,
     /// Where bundles and diffs are stored. Default `<data>/bundles`.
     pub bundle_store: Option<PathBuf>,
+    /// Days that the files of a landed, rejected or failed submission stay. Default 14, 0 keeps them.
+    pub keep_days: Option<u64>,
+    /// The most MiB the bundle store may hold before uploads are refused. Default 2048.
+    pub max_store_mib: Option<u64>,
 }
 
 /// `[verify]`: the clean build on GitHub.
@@ -254,6 +258,16 @@ pub fn apply(
         .iter()
         .map(|t| t.max_bundle_kib.saturating_mul(1024))
         .collect();
+    cfg.intake.tier_submissions_per_day = [&rules.tier0, &rules.tier1, &rules.tier2, &rules.tier2]
+        .iter()
+        .map(|t| t.submissions_per_day)
+        .collect();
+    if let Some(d) = file.intake.keep_days {
+        cfg.intake.keep_days = d;
+    }
+    if let Some(m) = file.intake.max_store_mib {
+        cfg.intake.max_store_bytes = m.saturating_mul(1024 * 1024);
+    }
     out.intake = intake_on;
 
     // verify
@@ -380,6 +394,86 @@ pub fn policy_rules(
     Ok((policy.factory(), policy.has_switch_table()))
 }
 
+/// A part of the factory that a published switch can turn off while the hub runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    /// Taking submissions, `PUT /api/submit/` and the static gates.
+    Intake,
+    /// The clean build on GitHub. It works on submissions that intake took in, so `switch.intake` stops it.
+    Verify,
+    /// Assigned review of submissions. Stopped by `switch.intake` for the same reason.
+    Review,
+    /// Standing, stamps and tiers. No policy switch reaches it.
+    Stamp,
+    /// The test network. No policy switch reaches it.
+    Test,
+}
+
+impl Part {
+    fn name(self) -> &'static str {
+        match self {
+            Part::Intake => "intake",
+            Part::Verify => "verify",
+            Part::Review => "review",
+            Part::Stamp => "stamp",
+            Part::Test => "test",
+        }
+    }
+}
+
+/// The switches of the live policy, read from the data folder on every call so that a published `off`
+/// acts at once. `None` when the policy has no `[switch]` table or cannot be read: nothing vetoes then,
+/// the same as at start.
+fn live_switches(cfg: &HubConfig) -> Option<crate::policy::Switches> {
+    let snap = crate::policy::Store::new(&cfg.data_dir).current().ok()?;
+    snap.policy
+        .has_switch_table()
+        .then(|| snap.policy.factory().switch)
+}
+
+/// True when the live policy switches `part` off. Settings of the hub are not looked at.
+pub fn vetoed(cfg: &HubConfig, part: Part) -> bool {
+    match part {
+        Part::Intake | Part::Verify | Part::Review => {
+            live_switches(cfg).is_some_and(|s| s.intake == Mode::Off)
+        }
+        Part::Stamp | Part::Test => false,
+    }
+}
+
+/// Whether `part` is on right now: the settings of the hub enable it AND the live policy does not switch
+/// it off. Read it again on every request and every tick.
+pub fn part_on(cfg: &HubConfig, part: Part) -> bool {
+    let enabled = match part {
+        Part::Intake => cfg.intake.enabled,
+        Part::Verify => cfg.verify.enabled,
+        Part::Review => cfg.review.enabled,
+        Part::Stamp => cfg.stamp.enabled,
+        Part::Test => cfg.test.enabled,
+    };
+    enabled && !vetoed(cfg, part)
+}
+
+/// The guard line at the top of the entry point of an op: an error while the live policy has the part off.
+/// It does not look at the settings of the hub, the part checks those itself.
+pub fn guard_op(cfg: &HubConfig, part: Part) -> Result<(), String> {
+    if vetoed(cfg, part) {
+        return Err(format!(
+            "{} is switched off by the policy (switch.intake = \"off\")",
+            part.name()
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a tier 0 member may take and deliver orders right now: standing is on, the settings allow it
+/// and the live policy does not switch `tier0_coding` off. Read it again on every request.
+pub fn tier0_coding_now(cfg: &HubConfig) -> bool {
+    cfg.stamp.enabled
+        && cfg.stamp.tier0_coding
+        && !live_switches(cfg).is_some_and(|s| s.tier0_coding == Mode::Off)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +541,7 @@ mod tests {
         assert_eq!(cfg.stamp.rules.tier1_landed, 5);
         assert_eq!(cfg.stamp.quorum, 3);
         assert_eq!(cfg.intake.tier_bundle_bytes[0], 256 * 1024);
+        assert_eq!(cfg.intake.tier_submissions_per_day, vec![4, 20, 50, 50]);
     }
 
     #[test]

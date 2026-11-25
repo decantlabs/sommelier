@@ -89,6 +89,7 @@ pub fn on_op(
     op: &str,
     body: &Value,
 ) -> Result<Map<String, Value>, String> {
+    crate::factory::guard_op(ctx.config(), crate::factory::Part::Review)?;
     match op {
         "review.next" => next(ctx, body),
         "review.verdict" => verdict(ctx, body),
@@ -556,6 +557,9 @@ fn retry_enqueues(hub: &Hub, now_ms: u64) -> Vec<Message> {
 
 /// Called on every hub tick. Returns messages for the hub to append.
 pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
+    if crate::factory::vetoed(hub.config(), crate::factory::Part::Review) {
+        return Vec::new();
+    }
     let cfg = &hub.config().review;
     if !cfg.enabled {
         return Vec::new();

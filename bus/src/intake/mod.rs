@@ -8,12 +8,14 @@
 //! * [`tables`]: the projections SUBMISSION, GATE and VERIFY.
 //! * [`http`]: `PUT /api/submit/`, `GET /api/bundle/` and `GET /api/order/`.
 //! * [`gate_run`]: the static gates on worker threads.
+//! * [`sweep`]: deletes the files of ended submissions after the keep days.
 
 pub mod config;
 pub mod facts;
 pub mod gate_run;
 pub mod http;
 pub mod schema;
+pub mod sweep;
 pub mod tables;
 
 use serde_json::{Map, Value, json};
@@ -26,6 +28,7 @@ use crate::tokens::Member;
 
 pub use config::{InspectFn, IntakeConfig};
 pub use facts::{SubRow, requeue_message};
+pub use http::{upload_allowance, upload_allowance_status};
 pub use tables::IntakeModule;
 
 /// Handles the requests `submit.*`.
@@ -62,8 +65,10 @@ pub fn on_http(
 
 /// Called on every hub tick. Returns messages for the hub to append.
 pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
-    if !hub.config().intake.enabled {
+    // The live policy is read on every tick: a published `off` stops the gates at the next one.
+    if !crate::factory::part_on(hub.config(), crate::factory::Part::Intake) {
         return Vec::new();
     }
+    sweep::on_tick(hub, now_ms);
     gate_run::on_tick(hub, now_ms)
 }
