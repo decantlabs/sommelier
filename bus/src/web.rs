@@ -228,6 +228,41 @@ async fn route(hub: &Arc<Hub>, head: &Head, body: &[u8]) -> Reply {
         }
         _ => {}
     }
+    // The intake: a submission is signed in with a token or a key, the runner reads the bundle and
+    // the order without credentials because the hash is the key (see PROTOCOL.md, Submissions).
+    if head.path.starts_with("/api/submit/")
+        || head.path.starts_with("/api/bundle/")
+        || head.path.starts_with("/api/order/")
+    {
+        let mut caller = None;
+        if head.path.starts_with("/api/submit/") {
+            let auth = head.headers.get("authorization").map(String::as_str);
+            match hub.check_auth(auth, None) {
+                Ok((m, _)) => caller = Some(m),
+                Err((code, msg)) => {
+                    return Reply::json(
+                        code.as_u16(),
+                        &serde_json::json!({ "ok": false, "error": msg }),
+                    );
+                }
+            }
+        }
+        if let Some(out) = crate::hooks::on_http(
+            hub,
+            &head.method,
+            &head.path,
+            head.query.as_deref(),
+            body,
+            caller.as_ref(),
+        ) {
+            return Reply {
+                status: out.status,
+                ctype: out.content_type,
+                body: out.body,
+                extra: out.headers,
+            };
+        }
+    }
     if head.path == "/api/brief"
         || head.path.starts_with("/api/brief/")
         || (head.path.starts_with("/api/")
@@ -309,12 +344,18 @@ pub async fn serve(hub: &Arc<Hub>, mut stream: TcpStream, head: Head) -> io::Res
         .get("content-length")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    let r = if content_len > MAX_BODY {
+    // A submission may be as large as the cap of the highest tier, the handler applies the own cap of the caller.
+    let max_body = if head.path.starts_with("/api/submit/") && hub.config().intake.enabled {
+        MAX_BODY.max(usize::try_from(hub.config().intake.max_body_bytes()).unwrap_or(MAX_BODY))
+    } else {
+        MAX_BODY
+    };
+    let r = if content_len > max_body {
         Reply::json(
             413,
             &serde_json::json!({
                 "ok": false,
-                "error": format!("payload is {content_len} bytes, maximum is {MAX_BODY} bytes (64 KiB)")
+                "error": format!("payload is {content_len} bytes, maximum is {max_body} bytes{}", if max_body == MAX_BODY { " (64 KiB)" } else { "" })
             }),
         )
     } else {
