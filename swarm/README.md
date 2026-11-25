@@ -103,10 +103,30 @@ behaves as above.
    (default `factory-batch`) on that exact commit and pushes main only when its conclusion is `success`.
    Another conclusion fails the batch and the split logic runs. No answer within
    `SOMMELIER_BATCH_CHECK_SECS` (default 1800) pushes nothing to main, logs one line `SECOND LOCK: no answer`
-   and queues the batch again. The `landing/` branch is deleted in every case. A ruleset on main that
-   requires the check makes this a lock that GitHub enforces, so a lander that skips it cannot push.
+   and queues the batch again. The `landing/` branch is deleted in every case.
 
-Variables: `SOMMELIER_SECOND_LOCK` (0 or 1), `SOMMELIER_BATCH_CHECK`, `SOMMELIER_BATCH_CHECK_SECS`,
+   **The check is no lock by itself.** A push to `landing/**` makes GitHub take the workflow file from the pushed
+   commit, so a patch that edits `factory-batch.yml`, or adds any job named `factory-batch`, can make the check
+   green. The lock is a ruleset on the default branch with a REQUIRED WORKFLOW that GitHub takes from the
+   protected default branch (`templates/workflows/README.md`, "Setting up the second lock"). The OWNER of the
+   repository must set that up BY HAND in the repository settings. The lander cannot and must not do it.
+   Until it is done, the second lock is not a lock. The lander adds two protections of its own: it counts a check
+   only when it has the right name, was made by the right app (`SOMMELIER_BATCH_APP`, default `github-actions`)
+   and belongs to a run of the right workflow file (`SOMMELIER_BATCH_WORKFLOW`, default
+   `.github/workflows/factory-batch.yml`), and it holds every entry whose diff touches `.github/` (and the other
+   paths of `GUARD`) until a maintainer approved that commit. `GUARD`, `GUARDED_PATHS` of the workflow and the
+   hold list of the hub (`bus/src/gate/rules.rs`) must stay equal.
+
+Guards and the wake file. Every place that lists changed paths for a guard uses `git diff -z --name-only
+--no-renames` with path quoting off and matches the NUL separated list, so a path with a character outside
+ASCII is matched by its real name (git prints it quoted with octal escapes otherwise, and the patterns miss
+it). A diff that cannot be read counts as risky. The wake file `watchdog.findings` wakes an agent that can
+append to `landing.approved`, so it never gets text that a patch or a compiler can shape: a held, conflicting
+or failed entry gets one fixed line with a pointer to `lander.log` or to the log of the batch, and the paths and
+the compiler output stay in those logs. Control characters are removed from every line.
+
+Variables: `SOMMELIER_SECOND_LOCK` (0 or 1), `SOMMELIER_BATCH_CHECK`, `SOMMELIER_BATCH_APP`,
+`SOMMELIER_BATCH_WORKFLOW`, `SOMMELIER_BATCH_CHECK_SECS`,
 `SOMMELIER_BATCH_CHECK_PAUSE` (seconds between asks, default 15), `SOMMELIER_GH_REPO` (`owner/name`, default the
 repository of the landing checkout), `SOMMELIER_HUB_HTTP` (default made from `SOMMELIER_URL`, else
 `SOMMELIER_LOCAL`) and `LANDER_MEMBER_DOMAIN` (the domain of the made up member address).

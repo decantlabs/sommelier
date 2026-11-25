@@ -6,7 +6,7 @@
 game_run_decision() {
   if [ "${LANDER_GAME_RUN:-1}" = 0 ]; then
     echo "skip (LANDER_GAME_RUN=0)"
-  elif ! printf '%s\n' "$1" | grep -qEv '^"?(docs/|\.github/)|\.md"?$|^$'; then
+  elif ! printf '%s\n' "$1" | grep -qEv '^(docs/|\.github/)|\.md$|^$'; then
     echo "skip (only docs, workflows or Markdown changed)"
   else
     case ${2:-pending} in
@@ -45,11 +45,51 @@ LANDER_INFRA_PATTERNS=${LANDER_INFRA_PATTERNS:-"timed out|No space left|could no
 
 # Paths that steer agents (instruction files, skills), run on every machine (scripts, build steps,
 # workflows), bring in outside code (the lock file) or are the checks themselves.
-GUARD='(^|/)(\.github|\.claude)/|(^|/)(CLAUDE|AGENTS)\.md$|^(swarm|sommelier|bus)/|(^|/)build\.rs$|\.(sh|ps1|cmd|bat)$|(^|/)Cargo\.lock$|(^|/)decant-repo-check/'
+# This list also holds the files that agents and tools read. It must stay equal to the hold list of the hub
+# (bus/src/gate/rules.rs) and to GUARDED_PATHS in templates/workflows/factory-batch.yml.
+GUARD='(^|/)(\.github|\.claude|\.cursor|\.devcontainer)/|(^|/)(CLAUDE|AGENTS)\.md$|(^|/)(AGENTS\.override\.md|CLAUDE\.local\.md|\.cursorrules|\.windsurfrules|\.clinerules|\.envrc)$|(^|/)\.?(rustfmt|clippy)\.toml$|(^|/)deny\.toml$|^(swarm|sommelier|bus)/|(^|/)build\.rs$|\.(sh|ps1|cmd|bat)$|(^|/)Cargo\.lock$|(^|/)decant-repo-check/'
+
+# Only the lander and a fixed vocabulary reach $FIND, because that file wakes an agent. Text that a
+# patch or a compiler can shape (paths, compiler output) goes to lander.log and the wake file gets a
+# pointer. Control characters are removed from everything that is written, so a line stays one line.
+lander_clean() {
+  printf '%s' "$*" | tr -d '\000-\037\177' | cut -c1-300
+}
+
+# A ref name from the queue, reduced to the characters a ref needs.
+lander_safe_ref() {
+  printf '%s' "$1" | tr -cd 'A-Za-z0-9._/:@+ -'
+}
 
 say() {
-  echo "LANDER $*" >> "$FIND"
-  echo "$(date '+%F %T') $*" >> "$RUNS/lander.log"
+  _say_t=$(lander_clean "$*")
+  echo "LANDER $_say_t" >> "$FIND"
+  echo "$(date '+%F %T') $_say_t" >> "$RUNS/lander.log"
+}
+
+# say_detail <fixed text> <detail>: the wake file gets the fixed text and a pointer to lander.log, the log gets both.
+say_detail() {
+  _sd_t=$(lander_clean "$1")
+  shift
+  echo "LANDER $_sd_t (details in $RUNS/lander.log)" >> "$FIND"
+  echo "$(date '+%F %T') $_sd_t: $(lander_clean "$*")" >> "$RUNS/lander.log"
+}
+
+# lander_changed <range>: the changed paths of a range, one per line. The list comes NUL separated with
+# path quoting off, so a path with a character outside ASCII is the real name and the guard patterns
+# match it. A path that holds a newline falls into pieces, and a piece can only add a match, never hide one.
+# Renames are listed as a delete and an add, so the old path of a moved guarded file shows too.
+# Returns 1 when git cannot give the list.
+lander_changed() {
+  _lc_t="${TMPDIR:-/tmp}/lander-changed.$$"
+  if git -c core.quotePath=false diff -z --name-only --no-renames "$1" > "$_lc_t" 2>/dev/null; then
+    tr '\0' '\n' < "$_lc_t"
+    _lc_r=0
+  else
+    _lc_r=1
+  fi
+  rm -f "$_lc_t"
+  return "$_lc_r"
 }
 
 BUS() {
@@ -130,7 +170,7 @@ gpu_crate_tests() {
 }
 
 game_run_check() (
-  changed=$(git diff --name-only --no-renames "$base...$tip") || return 1
+  changed=$(lander_changed "$base...$tip") || return 1
   decision=$(game_run_decision "$changed")
   if [ "$decision" != run ]; then
     echo "game-run: $decision"
@@ -302,7 +342,7 @@ lander_nohooks_dir() {
 
 lander_bundle_fail() {
   echo "$BF_REF" >> "$RUNS/landing.failed"
-  say "FAILED at bundle ($1) for: $BF_REF ($2) (log $LOG)"
+  say "FAILED at bundle ($1) for: $(lander_safe_ref "$BF_REF") ($2) (log $LOG)"
   rm -f "$BF_FILE"
   return 1
 }
@@ -358,7 +398,7 @@ lander_squash_entry() {
   SQUASH_FILES=""
   git checkout -q --detach "$2" || return 1
   if ! git -c core.hooksPath="$_sq_hp" merge --squash "$_sq_g" >>"$LOG" 2>&1; then
-    SQUASH_FILES=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+    SQUASH_FILES=$(git -c core.quotePath=false diff --name-only --diff-filter=U | tr '\n' ' ')
     git reset -q --hard "$2"
     return 1
   fi
@@ -376,11 +416,20 @@ lander_squash_entry() {
 }
 
 # The conclusion GitHub gives the batch check on a commit, or nothing while there is none.
+# A check counts only when it has the right name, was made by the right app (SOMMELIER_BATCH_APP, default
+# github-actions) and belongs to a workflow run of the right workflow file (SOMMELIER_BATCH_WORKFLOW).
+# The name alone proves nothing: a patch can add a job with the same name. The real protection is the
+# ruleset that requires the workflow from the default branch (swarm/README.md, second lock).
 lander_check_conclusion() {
   _cc_name=$(lander_safe_word "${SOMMELIER_BATCH_CHECK:-factory-batch}")
+  _cc_app=$(lander_safe_word "${SOMMELIER_BATCH_APP:-github-actions}")
+  _cc_wf=$(printf '%s' "${SOMMELIER_BATCH_WORKFLOW:-.github/workflows/factory-batch.yml}" | tr -cd 'A-Za-z0-9._/-')
   _cc_repo=${SOMMELIER_GH_REPO:-'{owner}/{repo}'}
+  _cc_suites=$(gh api "repos/$_cc_repo/actions/runs?head_sha=$1&per_page=100" \
+    --jq ".workflow_runs[] | select((.path // \"\") | contains(\"$_cc_wf\")) | .check_suite_id" 2>>"$LOG" | tr -cd '0-9\n' | grep -v '^$' | tr '\n' ',' || true)
+  [ -n "$_cc_suites" ] || return 0
   gh api "repos/$_cc_repo/commits/$1/check-runs?check_name=$_cc_name&per_page=100" \
-    --jq ".check_runs | map(select(.name == \"$_cc_name\")) | sort_by(.id) | last | .conclusion // empty" 2>>"$LOG" || true
+    --jq ".check_runs | map(select(.name == \"$_cc_name\" and .app.slug == \"$_cc_app\" and ([.check_suite.id] | inside([${_cc_suites%,}])))) | sort_by(.id) | last | .conclusion // empty" 2>>"$LOG" || true
 }
 
 # lander_second_lock <refs>: pushes HEAD as landing/<batch id> and waits for GitHub to pass it.
@@ -392,7 +441,7 @@ lander_second_lock() {
   _sl_name=${SOMMELIER_BATCH_CHECK:-factory-batch}
   SECOND_LOCK_CONCLUSION=""
   if ! git push -q -f "$SOMMELIER_UPSTREAM" "HEAD:refs/heads/$_sl_branch" >>"$LOG" 2>&1; then
-    say "SECOND LOCK: could not push $_sl_branch, nothing was pushed to main, queued again: $1"
+    say "SECOND LOCK: could not push $_sl_branch, nothing was pushed to main, queued again: $(lander_safe_ref "$1")"
     return 2
   fi
   _sl_deadline=$(( $(date +%s) + ${SOMMELIER_BATCH_CHECK_SECS:-1800} ))
@@ -407,7 +456,7 @@ lander_second_lock() {
   case $SECOND_LOCK_CONCLUSION in
     success) return 0 ;;
     "")
-      say "SECOND LOCK: no answer for the check $_sl_name on $(git rev-parse --short "$_sl_sha") within ${SOMMELIER_BATCH_CHECK_SECS:-1800} s, nothing was pushed to main, queued again: $1"
+      say "SECOND LOCK: no answer for the check $_sl_name on $(git rev-parse --short "$_sl_sha") within ${SOMMELIER_BATCH_CHECK_SECS:-1800} s, nothing was pushed to main, queued again: $(lander_safe_ref "$1")"
       return 2 ;;
     *) return 1 ;;
   esac
@@ -426,7 +475,7 @@ lander_rebase_list() {
           REBASED_TIP=$(git rev-parse HEAD)
           REBASED_REFS="$REBASED_REFS $_r"
         else
-          say "CONFLICT: $_r does not squash onto main plus the batch (files: $SQUASH_FILES), left out: its author must rebase it"
+          say_detail "CONFLICT: $(lander_safe_ref "$_r") does not squash onto main plus the batch, left out: its author must rebase it" "files: $SQUASH_FILES"
           echo "$_r" >> "$RUNS/landing.conflict"
         fi
         continue ;;
@@ -436,9 +485,9 @@ lander_rebase_list() {
       REBASED_TIP=$(git rev-parse HEAD)
       REBASED_REFS="$REBASED_REFS $_r"
     else
-      _files=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+      _files=$(git -c core.quotePath=false diff --name-only --diff-filter=U | tr '\n' ' ')
       git rebase --abort >/dev/null 2>&1
-      say "CONFLICT: $_r does not rebase onto main plus the batch (files: $_files), left out: its author must rebase it"
+      say_detail "CONFLICT: $(lander_safe_ref "$_r") does not rebase onto main plus the batch, left out: its author must rebase it" "files: $_files"
       echo "$_r" >> "$RUNS/landing.conflict"
     fi
   done
@@ -487,7 +536,7 @@ lander_find_crate_culprits() {
   CULPRIT_S=""
   CULPRIT_REST=""
   for _w in $_refs; do
-    if git diff --name-only "$base...$(lander_gitref "$_w")" 2>/dev/null | grep -qE "(^|/)$_crate(/|$)"; then
+    if lander_changed "$base...$(lander_gitref "$_w")" | grep -qE "(^|/)$_crate(/|$)"; then
       CULPRIT_S="$CULPRIT_S $_w"
     else
       CULPRIT_REST="$CULPRIT_REST $_w"
@@ -521,7 +570,7 @@ lander_land_or_split() {
       sha=$(git rev-parse --short HEAD)
       base=$(git rev-parse HEAD)
       git push -q --force "$SOMMELIER_UPSTREAM" HEAD:refs/heads/integration/next >>"$LOG" 2>&1 || true
-      say "LANDED as $sha on main: $_rebased"
+      say "LANDED as $sha on main: $(lander_safe_ref "$_rebased")"
       names=""
       for _r in $_rebased; do names="$names ${_r#*/}"; done
       BUS send LANDED "main is $sha:$names" --topic status --ref "$sha"
@@ -531,13 +580,13 @@ lander_land_or_split() {
       fi
     else
       for _r in $_rebased; do lander_requeue_unique "$_r"; done
-      say "PUSH FAILED for: $_rebased (main moved?), queued again"
+      say "PUSH FAILED for: $(lander_safe_ref "$_rebased") (main moved?), queued again"
     fi
     return 0
   fi
 
   if [ "${VERIFY_INFRA:-0}" = 1 ] && [ "$_tries" -lt "$LANDER_INFRA_RETRIES" ]; then
-    say "INFRA RETRY ($((_tries + 1))/$LANDER_INFRA_RETRIES) at $VERIFY_FAILED_AT for: $_rebased"
+    say "INFRA RETRY ($((_tries + 1))/$LANDER_INFRA_RETRIES) at $VERIFY_FAILED_AT for: $(lander_safe_ref "$_rebased")"
     [ "$LANDER_RETRY_WAIT_SEC" -gt 0 ] 2>/dev/null && sleep "$LANDER_RETRY_WAIT_SEC"
     lander_land_or_split "$_rebased" "$((_tries + 1))"
     return $?
@@ -546,7 +595,7 @@ lander_land_or_split() {
   _cnt=$(lander_count_words "$_rebased")
   if [ "$_cnt" -le 1 ]; then
     echo "$_rebased" >> "$RUNS/landing.failed"
-    say "FAILED at $VERIFY_FAILED_AT for: $_rebased (log $LOG): $(grep -a -E "^(error|test .* FAILED|---- .* stdout)|panicked at|error\[" "$LOG" | tail -6 | tr '\n' '|' | cut -c1-500)"
+    say "FAILED at $VERIFY_FAILED_AT for: $(lander_safe_ref "$_rebased") (read the compiler and test output in the log $LOG)"
     return 0
   fi
 
@@ -598,13 +647,13 @@ batch() {
         gref=$BUNDLE_GREF ;;
       *)
         if ! git rev-parse -q --verify "$ref" >/dev/null 2>&1; then
-          say "queue: $ref does not exist, dropped"
+          say "queue: $(lander_safe_ref "$ref") does not exist, dropped"
           continue
         fi ;;
     esac
     full_sha=$(git rev-parse "$gref")
     if [ "$(git rev-list --count "$base..$full_sha")" = 0 ]; then
-      say "queue: $ref is already on main, dropped"
+      say "queue: $(lander_safe_ref "$ref") is already on main, dropped"
       continue
     fi
     if grep -qxF "$ref $full_sha" "$Q.seen" 2>/dev/null; then
@@ -615,12 +664,17 @@ batch() {
     # Guard against instructions smuggled into the tree: a branch that changes what steers agents,
     # builds or this harness is held until the coordinator has read its diff and approved that commit.
     sha=$(git rev-parse --short "$gref")
-    risky=$(git diff --name-only "$base...$gref" | grep -E "$GUARD" | tr '\n' ' ')
+    # A diff that cannot be read counts as risky: the guard never fails open.
+    if _changed=$(lander_changed "$base...$gref"); then
+      risky=$(printf '%s\n' "$_changed" | grep -E "$GUARD" | tr '\n' ' ')
+    else
+      risky="the diff could not be read"
+    fi
     if [ -n "$risky" ] &&
        ! grep -qxF "$ref $sha" "$RUNS/landing.approved" 2>/dev/null &&
        ! grep -qxF "$ref $full_sha" "$RUNS/landing.approved" 2>/dev/null; then
       if ! grep -qxF "$ref $sha" "$RUNS/landing.held" 2>/dev/null; then
-        say "HELD: $ref at $sha changes files that steer agents, builds or the harness ($risky). Read the diff, then: echo '$ref $sha' >> $RUNS/landing.approved and queue it again"
+        say_detail "HELD: $(lander_safe_ref "$ref") at $sha changes files that steer agents, builds or the harness. Read the diff (git diff $base...$sha), then: echo '$(lander_safe_ref "$ref") $sha' >> $RUNS/landing.approved and queue it again" "paths: $risky"
         echo "$ref $sha" >> "$RUNS/landing.held"
       fi
       lander_requeue_unique "$ref"
@@ -629,7 +683,7 @@ batch() {
 
     if ! lander_licence_marker_scan "$base" "$gref"; then
       echo "$ref" >> "$RUNS/landing.failed"
-      say "FAILED at clean-room (licence marker) for: $ref (log $LOG)"
+      say "FAILED at clean-room (licence marker) for: $(lander_safe_ref "$ref") (log $LOG)"
       continue
     fi
 

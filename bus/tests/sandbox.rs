@@ -5,11 +5,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sommelier::agent::launch::{HookEnv, plain_hook_argv, plan_hook_command};
+use sommelier::agent::launch::{
+    HookEnv, container_clone_dir, fetch_container_result, plain_hook_argv, plan_hook_command,
+    plan_hook_command_with, prepare_container_clone,
+};
 use sommelier::agent::sandbox::{
     self, ContractEnv, Mount, SandboxLevel, SandboxProbe, SandboxSpec, detect, doctor_line,
-    parse_mounts, wrap,
+    mount_warnings, parse_mounts, runtime_warning, wrap,
 };
+use sommelier::cli::doctor::sandbox_warnings;
 
 fn spec() -> SandboxSpec {
     SandboxSpec {
@@ -19,16 +23,15 @@ fn spec() -> SandboxSpec {
         out_dir: PathBuf::from("/srv/out/task-1"),
         prompt_file: PathBuf::from("/srv/wt one/task-1/.sommelier/prompt.md"),
         hooks_dir: PathBuf::from("/srv/hooks"),
-        git_dir: Some(PathBuf::from("/srv/clone/.git")),
         cache_dirs: vec![Mount {
             host: PathBuf::from("/srv/cache/cargo"),
             container: "/home/worker/.cargo/registry".into(),
-            readonly: false,
+            readonly: true,
         }],
         vendor_dirs: vec![Mount {
             host: PathBuf::from("/srv/vendor/claude"),
             container: "/home/worker/.claude".into(),
-            readonly: false,
+            readonly: true,
         }],
         env: ContractEnv {
             task: "t-1".into(),
@@ -71,7 +74,6 @@ fn wrap_mounts_only_the_listed_folders() {
             "/out",
             "/prompt/prompt.md",
             "/hooks",
-            "/srv/clone/.git",
             "/home/worker/.cargo/registry",
             "/home/worker/.claude"
         ]
@@ -82,6 +84,22 @@ fn wrap_mounts_only_the_listed_folders() {
     let m = mounts_of(&argv);
     assert!(m[2].ends_with(",readonly") && m[3].ends_with(",readonly"));
     assert!(!m[0].ends_with(",readonly"));
+    // vendor and cache mounts are read only unless the member wrote :rw
+    assert!(m[4].ends_with(",readonly") && m[5].ends_with(",readonly"));
+}
+
+#[test]
+fn wrap_never_mounts_a_git_folder() {
+    // The container works in its own plain clone. Nothing named .git is mounted, whatever the paths are.
+    let argv = wrap(&hook(), &spec()).unwrap();
+    for m in mounts_of(&argv) {
+        assert!(!m.contains(".git"), "a git folder is mounted: {m}");
+    }
+    // The spec has no field for a git folder any more.
+    let text =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/agent/sandbox.rs"))
+            .unwrap();
+    assert!(!text.contains("git_dir"));
 }
 
 #[test]
@@ -182,13 +200,95 @@ fn wrap_refuses_what_the_mount_syntax_cannot_carry() {
 
 #[test]
 fn parse_mounts_reads_the_list() {
-    let m = parse_mounts("/a/b=/home/worker/.claude; /c=/cache:ro").unwrap();
-    assert_eq!(m.len(), 2);
-    assert!(!m[0].readonly && m[1].readonly);
+    let m = parse_mounts("/a/b=/home/worker/.claude; /c=/cache:ro; /d=/rw:rw").unwrap();
+    assert_eq!(m.len(), 3);
+    // read only is the default, `:rw` is the only way to a writable mount
+    assert!(m[0].readonly && m[1].readonly && !m[2].readonly);
     assert_eq!(m[1].container, "/cache");
+    assert_eq!(m[2].container, "/rw");
     assert!(parse_mounts("no-equals").is_err());
     assert!(parse_mounts("/a=relative").is_err());
     assert!(parse_mounts("").unwrap().is_empty());
+}
+
+#[test]
+fn a_vendor_mount_is_read_only_unless_rw_is_written() {
+    let mut s = spec();
+    s.vendor_dirs = parse_mounts("/srv/v=/home/worker/.claude").unwrap();
+    let argv = wrap(&hook(), &s).unwrap();
+    assert!(
+        argv.iter()
+            .any(|a| a == "type=bind,src=/srv/v,dst=/home/worker/.claude,readonly")
+    );
+    s.vendor_dirs = parse_mounts("/srv/v=/home/worker/.claude:rw").unwrap();
+    let argv = wrap(&hook(), &s).unwrap();
+    assert!(
+        argv.iter()
+            .any(|a| a == "type=bind,src=/srv/v,dst=/home/worker/.claude")
+    );
+}
+
+#[test]
+fn doctor_warns_when_a_mounted_vendor_folder_is_the_one_the_member_uses() {
+    let home = Path::new("/home/member");
+    let own = parse_mounts("/home/member/.claude=/home/worker/.claude").unwrap();
+    let w = mount_warnings(&own, &[], home);
+    assert_eq!(w.len(), 1);
+    assert!(w[0].contains("the one your own tools use") && w[0].contains("read only"));
+    let own_rw = parse_mounts("/home/member/.claude=/home/worker/.claude:rw").unwrap();
+    let w = mount_warnings(&own_rw, &[], home);
+    assert!(w[0].contains("plant a command"));
+    // a folder below it, and the home folder itself
+    let below = parse_mounts("/home/member/.codex/auth=/home/worker/.codex").unwrap();
+    assert_eq!(mount_warnings(&below, &[], home).len(), 1);
+    let whole = parse_mounts("/home/member=/home/worker/h").unwrap();
+    assert!(mount_warnings(&whole, &[], home)[0].contains("whole home folder"));
+    // a dedicated folder is quiet, and so is a trailing slash on a dedicated one
+    let own_dedicated = parse_mounts("/srv/worker-login/claude=/home/worker/.claude").unwrap();
+    assert!(mount_warnings(&own_dedicated, &[], home).is_empty());
+    // the sibling folder with the same prefix is not the same folder
+    let sibling = parse_mounts("/home/member/.claude-worker=/home/worker/.claude").unwrap();
+    assert!(mount_warnings(&sibling, &[], home).is_empty());
+    // the host registry, writable, is flagged. Read only is not.
+    let registry_rw =
+        parse_mounts("/home/member/.cargo/registry=/home/worker/.cargo/registry:rw").unwrap();
+    assert_eq!(mount_warnings(&[], &registry_rw, home).len(), 1);
+    let registry_ro =
+        parse_mounts("/home/member/.cargo/registry=/home/worker/.cargo/registry").unwrap();
+    assert!(mount_warnings(&[], &registry_ro, home).is_empty());
+    // doctor reads the lists from its settings
+    let get = |k: &str| match k {
+        "SOMMELIER_SANDBOX_VENDOR_DIRS" => {
+            Some("/home/member/.claude=/home/worker/.claude".to_owned())
+        }
+        _ => None,
+    };
+    let w = sandbox_warnings(&get, home, &Fake::default());
+    assert_eq!(w.len(), 1);
+}
+
+#[test]
+fn doctor_warns_about_a_named_runtime_that_is_not_rootless() {
+    let rootful = Fake {
+        commands: vec!["docker"],
+        ..Fake::default()
+    };
+    assert!(
+        runtime_warning(&rootful, "docker")
+            .unwrap()
+            .contains("rootless")
+    );
+    let ok = Fake {
+        commands: vec!["docker"],
+        rootless: vec!["docker"],
+        ..Fake::default()
+    };
+    assert!(runtime_warning(&ok, "docker").is_none());
+    let get = |k: &str| (k == "SOMMELIER_SANDBOX_RUNTIME").then(|| "docker".to_owned());
+    assert_eq!(
+        sandbox_warnings(&get, Path::new("/home/m"), &rootful).len(),
+        1
+    );
 }
 
 #[derive(Default)]
@@ -470,11 +570,43 @@ fn launch_container_gives_the_wrapped_command() {
     );
     assert!(
         argv.iter()
-            .any(|a| a == "type=bind,src=/srv/vendor/claude,dst=/home/worker/.claude")
+            .any(|a| a == "type=bind,src=/srv/vendor/claude,dst=/home/worker/.claude,readonly")
     );
     assert!(
         argv.iter()
             .any(|a| a == "type=bind,src=/srv/hooks,dst=/hooks,readonly")
+    );
+}
+
+#[test]
+fn launch_container_never_picks_a_runtime_that_is_not_rootless() {
+    let script = Path::new("/srv/hooks/hook-claude.sh");
+    let get = lookup(&[("SOMMELIER_SANDBOX", "container")]);
+    // docker is installed and answers, but does not report rootless mode
+    let rootful = Fake {
+        commands: vec!["docker"],
+        ..Fake::default()
+    };
+    let e = plan_hook_command_with(script, &hook_env(), &get, &rootful).unwrap_err();
+    assert!(e.contains("rootless") && !e.contains('\n'));
+    // rootless docker is taken, and podman wins when both are rootless
+    let docker = Fake {
+        commands: vec!["docker"],
+        rootless: vec!["docker"],
+        ..Fake::default()
+    };
+    assert_eq!(
+        plan_hook_command_with(script, &hook_env(), &get, &docker).unwrap()[0],
+        "docker"
+    );
+    let both = Fake {
+        commands: vec!["docker", "podman"],
+        rootless: vec!["docker", "podman"],
+        ..Fake::default()
+    };
+    assert_eq!(
+        plan_hook_command_with(script, &hook_env(), &get, &both).unwrap()[0],
+        "podman"
     );
 }
 
@@ -519,4 +651,214 @@ fn shell_scripts_pass_sh_n() {
         }
     }
     assert!(seen >= 1);
+}
+
+// ---- the container's own clone ----
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// A member's clone with a linked worktree on a task branch, and the hook env that points at it.
+fn member_repo(root: &Path) -> (PathBuf, HookEnv) {
+    let repo = root.join("member clone");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "-q", "-m", "first"]);
+    let wt = root.join("wt-t1");
+    git(
+        &repo,
+        &["worktree", "add", "-q", "-b", "fx/x", wt.to_str().unwrap()],
+    );
+    std::fs::create_dir_all(wt.join(".sommelier")).unwrap();
+    std::fs::write(wt.join(".sommelier/prompt.md"), "prompt").unwrap();
+    std::fs::write(wt.join(".sommelier/brief.md"), "brief").unwrap();
+    let env = HookEnv {
+        task_id: "t1".into(),
+        attempt: 1,
+        branch: "fx/x".into(),
+        worktree: wt.clone(),
+        prompt_file: wt.join(".sommelier/prompt.md"),
+        model: "claude".into(),
+        effort: "medium".into(),
+        out_dir: root.join("data/agent/workers/t1-1"),
+    };
+    (repo, env)
+}
+
+fn temp_root(name: &str) -> PathBuf {
+    let p = std::env::temp_dir().join(format!("sommelier-sandbox-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+#[test]
+fn the_container_works_in_its_own_plain_clone_and_never_sees_the_members_git_folder() {
+    let root = temp_root("clone");
+    let (repo, env) = member_repo(&root);
+    let clone = prepare_container_clone(&env).unwrap();
+    assert_eq!(clone, container_clone_dir(&env));
+    // a plain clone: a real .git folder, no pointer file, no link back to the member's clone
+    assert!(clone.join(".git").is_dir());
+    assert_eq!(git(&clone, &["remote"]), "");
+    assert!(clone.join("a.txt").is_file());
+    assert_eq!(git(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]), "fx/x");
+    assert!(clone.join(".sommelier/brief.md").is_file());
+    // the command of the container names the clone and no path of the member's repository
+    let launch = HookEnv {
+        worktree: clone.clone(),
+        ..env.clone()
+    };
+    let argv = plan_hook_command(
+        Path::new("/srv/hooks/hook-claude.sh"),
+        &launch,
+        &lookup(&[
+            ("SOMMELIER_SANDBOX", "container"),
+            ("SOMMELIER_SANDBOX_RUNTIME", "podman"),
+        ]),
+    )
+    .unwrap();
+    let all = argv.join("\n");
+    assert!(all.contains(&format!("src={},dst=/work", clone.display())));
+    assert!(!all.contains(&repo.display().to_string()));
+    for m in mounts_of(&argv) {
+        assert!(!m.contains(".git"), "{m}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_hostile_clone_changes_nothing_on_the_host_and_only_the_commit_comes_back() {
+    let root = temp_root("hostile");
+    let (repo, env) = member_repo(&root);
+    let clone = prepare_container_clone(&env).unwrap();
+    let marker = root.join("RAN");
+    // What a hostile worker can write in its own folder: a hook, a file system monitor, a moved main,
+    // a pointer in place of .git later, and one honest looking commit.
+    let hook = clone.join(".git/hooks/post-checkout");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    let monitor = clone.join("monitor.sh");
+    std::fs::write(
+        &monitor,
+        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    )
+    .unwrap();
+    git(
+        &clone,
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+    git(
+        &clone,
+        &[
+            "config",
+            "core.hooksPath",
+            &format!("{}/.git/hooks", clone.display()),
+        ],
+    );
+    std::fs::write(clone.join("a.txt"), "two\n").unwrap();
+    // `git add` here is the hostile clone's own git: ignore a failing monitor, never mind
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&clone)
+        .args(["-c", "core.fsmonitor=false", "add", "a.txt"])
+        .status();
+    git(
+        &clone,
+        &[
+            "-c",
+            "core.fsmonitor=false",
+            "commit",
+            "-q",
+            "--no-verify",
+            "-m",
+            "work",
+        ],
+    );
+    let result = git(&clone, &["-c", "core.fsmonitor=false", "rev-parse", "HEAD"]);
+    let main_before = git(&repo, &["rev-parse", "refs/heads/main"]);
+    let hooks_before: Vec<_> = std::fs::read_dir(repo.join(".git/hooks"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    let config_before = std::fs::read_to_string(repo.join(".git/config")).unwrap();
+
+    let got = fetch_container_result(&env).unwrap();
+    assert_eq!(got.as_deref(), Some(result.as_str()));
+    // the task branch of the worktree stands on the result, main did not move
+    assert_eq!(git(&env.worktree, &["rev-parse", "HEAD"]), result);
+    assert_eq!(git(&repo, &["rev-parse", "refs/heads/fx/x"]), result);
+    assert_eq!(git(&repo, &["rev-parse", "refs/heads/main"]), main_before);
+    assert_eq!(
+        git(&repo, &["rev-parse", "refs/sommelier/result/t1-1"]),
+        result
+    );
+    // nothing of the clone's hook or monitor ran, and the member's git folder is as it was
+    assert!(!marker.exists(), "code of the clone ran on the host");
+    let hooks_after: Vec<_> = std::fs::read_dir(repo.join(".git/hooks"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(hooks_before, hooks_after);
+    assert_eq!(
+        config_before,
+        std::fs::read_to_string(repo.join(".git/config")).unwrap()
+    );
+    assert!(
+        !std::fs::read_to_string(repo.join(".git/config"))
+            .unwrap()
+            .contains("fsmonitor")
+    );
+    // the next hook start builds a new clone from the worktree and ignores the old one
+    let again = prepare_container_clone(&env).unwrap();
+    assert_eq!(git(&again, &["rev-parse", "HEAD"]), result);
+    assert!(!again.join(".git/hooks/post-checkout").exists());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_clone_whose_git_entry_was_replaced_by_a_pointer_is_refused() {
+    let root = temp_root("pointer");
+    let (_repo, env) = member_repo(&root);
+    let clone = prepare_container_clone(&env).unwrap();
+    // the second way of the finding: /work/.git rewritten to point at a folder of the member
+    std::fs::remove_dir_all(clone.join(".git")).unwrap();
+    std::fs::write(clone.join(".git"), "gitdir: /home/member/a/b\n").unwrap();
+    let e = fetch_container_result(&env).unwrap_err();
+    assert!(e.contains("not a plain folder"), "{e}");
+    // and a pointer never reaches a mount: the path of the container clone comes from the task record
+    assert_eq!(
+        container_clone_dir(&env),
+        root.join("data/agent/workers/t1-1.clone")
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn no_commit_in_the_clone_gives_no_result() {
+    let root = temp_root("nocommit");
+    let (repo, env) = member_repo(&root);
+    prepare_container_clone(&env).unwrap();
+    let before = git(&repo, &["rev-parse", "refs/heads/fx/x"]);
+    assert_eq!(fetch_container_result(&env).unwrap(), None);
+    assert_eq!(git(&repo, &["rev-parse", "refs/heads/fx/x"]), before);
+    std::fs::remove_dir_all(&root).unwrap();
 }

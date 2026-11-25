@@ -5,7 +5,16 @@
 # Copy this file to .github/workflows/factory-batch.yml of the project. .github/** must be a hold path.
 # It holds no secret and asks for read access to the repository only.
 #
-# Never add to this file: a secret, the pull request target trigger, or a write permission.
+# THIS FILE ALONE IS NO LOCK. The trigger is a push to landing/**, so GitHub takes the workflow file from
+# the pushed commit itself. A batch that edits this file, or adds any job named factory-batch, would
+# remove the fail closed step below. The lock is a RULESET on the default branch with a REQUIRED WORKFLOW
+# that GitHub takes from the protected default branch, never from the batch (templates/workflows/README.md,
+# "Setting up the second lock"). The owner of the repository sets that up by hand. The lander also
+# matches the check by the app that made it and by the path of this workflow, and refuses a batch whose
+# diff touches .github/ unless a maintainer approved it.
+#
+# Never add to this file: a secret, the pull request target trigger, a write permission, or a cache action.
+# A cache is shared state: code of a patch could write an entry that the other workflows restore later.
 
 name: factory-batch
 run-name: batch ${{ github.ref_name }}
@@ -29,10 +38,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # PROJECT: a path pattern (extended regex) of paths that make a change guarded, as a second
-      # opinion that does not depend on the marker the lander writes. It must list at least
-      # .github/ and the manifests and lock files of the project.
-      GUARDED_PATHS: '^(\.github/|Cargo\.lock$|(.*/)?Cargo\.toml$)'
+      # The paths that make a change guarded, as a second opinion that does not depend on the marker the
+      # lander writes. THIS LIST MUST STAY EQUAL to the hold list of the hub (bus/src/gate/rules.rs, the
+      # field hold_paths, plus the manifests) and to GUARD in swarm/lander-lib.sh. Change all three together.
+      # PROJECT: add the paths of your project, never remove one.
+      GUARDED_PATHS: '(^|/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|/)(AGENTS\.override\.md|CLAUDE\.local\.md|\.cursorrules|\.windsurfrules|\.clinerules|\.envrc|\.mcp\.json|rust-toolchain|rust-toolchain\.toml|\.?rustfmt\.toml|\.?clippy\.toml|deny\.toml|build\.rs|Cargo\.lock|Cargo\.toml)$|(^|/)(\.claude|\.cursor|\.devcontainer|\.gemini|\.codex|\.vscode|\.cargo)/|^(swarm|bus|\.github)/|\.(sh|ps1|bat|cmd|py)$'
       CARGO_TERM_COLOR: never
     steps:
       - name: Check out the batch
@@ -58,7 +68,8 @@ jobs:
             echo "guarded marker found in a commit message"
             guarded=1
           fi
-          if git diff --name-only "$RANGE" | grep -Eq "$GUARDED_PATHS"; then
+          # NUL separated, quoting off: a path with a character outside ASCII is matched by its real name.
+          if git -c core.quotePath=false diff -z --name-only --no-renames "$RANGE" | grep -Ezq "$GUARDED_PATHS"; then
             echo "a changed path matches GUARDED_PATHS"
             guarded=1
           fi

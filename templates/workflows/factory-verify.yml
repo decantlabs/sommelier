@@ -6,13 +6,22 @@
 # The hub starts it with workflow_dispatch and later reads only the conclusion of the run through the
 # GitHub API with a read only token. The job reports nothing itself.
 #
+# What a green run proves: the patch builds and passes the tests and the done condition of the order, as an
+# honest patch would. It is NO proof against a hostile patch. Build code and test code of the patch run in
+# this job, so it can try to fool the run. The container below (no network, no sudo, a read only root,
+# a clean environment, one step that holds build, tests and done condition) makes that hard, not impossible.
+# The assigned review is the stage that stops a hostile patch.
+#
 # Never add to this file: a secret, the pull request target trigger, a step that takes its script from the patch,
-# or a write permission. Lines marked PROJECT are the only places a project edits.
+# a write permission, or a cache action. A cache is shared state: code of a patch could write an entry that
+# the batch or release workflow restores later, so no template in this folder uses one.
+# Lines marked PROJECT are the only places a project edits.
 
 name: factory-verify
 
-# The run name carries the submission hash. The hub finds its run by this name.
-run-name: verify ${{ inputs.submission }}
+# The run name carries the submission hash, the attempt and the dispatch count. The hub finds its run by
+# these three words, so a run of an earlier attempt or dispatch is never taken for this one.
+run-name: factory-verify ${{ inputs.submission }} a${{ inputs.attempt }} d${{ inputs.dispatch }}
 
 on:
   workflow_dispatch:
@@ -33,6 +42,14 @@ on:
         description: Base URL of the hub, https only
         required: true
         type: string
+      attempt:
+        description: Attempt number of the submission
+        required: true
+        type: string
+      dispatch:
+        description: Count of dispatches of this attempt
+        required: true
+        type: string
 
 # No permissions at all, for the workflow and for the job.
 permissions: {}
@@ -45,7 +62,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions: {}
     env:
       # Inputs travel through the environment, never through the text of a script.
@@ -53,7 +70,10 @@ jobs:
       ORDER: ${{ inputs.order }}
       BASE: ${{ inputs.base }}
       HUB: ${{ inputs.hub }}
-      CARGO_TERM_COLOR: never
+      ATTEMPT: ${{ inputs.attempt }}
+      DISPATCH: ${{ inputs.dispatch }}
+      # PROJECT: the build image, pinned with an @sha256 digest. It holds the Rust toolchain and git.
+      VERIFY_IMAGE: docker.io/library/rust:1.99.1-slim-bookworm
     steps:
       - name: Check inputs
         run: |
@@ -62,6 +82,8 @@ jobs:
           [[ "$BASE" =~ ^[0-9a-f]{40}$ ]] || { echo "base is not a commit id"; exit 1; }
           [[ "$ORDER" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "order is not an order id"; exit 1; }
           [[ "$HUB" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]] || { echo "hub is not an https origin"; exit 1; }
+          [[ "$ATTEMPT" =~ ^[0-9]{1,6}$ ]] || { echo "attempt is not a number"; exit 1; }
+          [[ "$DISPATCH" =~ ^[0-9]{1,6}$ ]] || { echo "dispatch is not a number"; exit 1; }
 
       # The base commit, from the repository. No token is kept in the checkout.
       - name: Check out base
@@ -84,64 +106,104 @@ jobs:
           echo "$SUBMISSION  $RUNNER_TEMP/bundle.bin" | sha256sum --check --strict -
 
       # Hooks are off. The bundle is only read as git objects. Nothing in it is run here.
+      # The ref is the one that bundle::pack writes: refs/sommelier/submit.
       - name: Import bundle ref
         run: |
           set -euo pipefail
           export GIT_CONFIG_NOSYSTEM=1
           git -c core.hooksPath=/dev/null -c protocol.version=2 \
             fetch --no-tags --no-recurse-submodules "$RUNNER_TEMP/bundle.bin" \
-            'refs/heads/*:refs/factory/incoming/*'
-          HEAD_REF="$(git for-each-ref --format='%(refname)' refs/factory/incoming | head -n 1)"
-          [ -n "$HEAD_REF" ] || { echo "the bundle holds no branch"; exit 1; }
-          git -c core.hooksPath=/dev/null -c submodule.recurse=false checkout --detach --quiet "$HEAD_REF"
+            'refs/sommelier/submit:refs/factory/incoming/submit'
+          git rev-parse --verify --quiet refs/factory/incoming/submit >/dev/null \
+            || { echo "the bundle holds no branch"; exit 1; }
+          git -c core.hooksPath=/dev/null -c submodule.recurse=false checkout --detach --quiet refs/factory/incoming/submit
           # The bundle must sit directly on the base.
           git merge-base --is-ancestor "$BASE" HEAD || { echo "the bundle does not sit on the base"; exit 1; }
 
-      # The only step with network that touches project code: dependencies from the lock file.
+      # The only step with network that touches project code. It runs inside the build image, only
+      # cargo fetch, with the checkout read only and a cargo home that lives outside the checkout.
+      # Cargo fetch runs no build script and no code of the patch.
       - name: Fetch dependencies
         run: |
           set -euo pipefail
-          cargo fetch --locked # PROJECT: your dependency fetch, lock file only
+          mkdir -p "$RUNNER_TEMP/cargo-home"
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e CARGO_HOME=/cargo-home \
+            -v "$GITHUB_WORKSPACE:/work:ro" -v "$RUNNER_TEMP/cargo-home:/cargo-home" \
+            -w /work "$VERIFY_IMAGE" \
+            cargo fetch --locked # PROJECT: your dependency fetch, lock file only
 
-      # The done condition comes from the hub by order id. It is never read from the patch.
+      # The done condition comes from the hub by order id, as JSON. It is never read from the patch.
+      # The first copy is what the container runs. A second copy is fetched after the build and must be equal.
       - name: Read done condition
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci"
           curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 60 \
-            --max-filesize 65536 --output "$RUNNER_TEMP/done_when.txt" \
+            --max-filesize 65536 --output "$RUNNER_TEMP/order.json" \
             "$HUB/api/order/$ORDER/done_when" # PROJECT: the path of the hub endpoint
-          test -s "$RUNNER_TEMP/done_when.txt" || { echo "the order has no done condition"; exit 1; }
+          jq -er '.done_when | select(type == "string" and length > 0)' "$RUNNER_TEMP/order.json" \
+            > "$RUNNER_TEMP/ci/done_when.txt" \
+            || { echo "the order has no done condition"; exit 1; }
+          sha256sum "$RUNNER_TEMP/ci/done_when.txt" | cut -d' ' -f1 > "$RUNNER_TEMP/done_when.sha"
 
-      # The network is cut for the build where the runner allows it (a new network namespace).
-      # Cargo is also told to stay offline, so a missing cut still blocks registry access.
-      - name: Build and test touched crates
+      # The script of the container is written here by the workflow, never taken from the checkout.
+      - name: Write the container script
         run: |
           set -euo pipefail
-          export CARGO_NET_OFFLINE=true
+          cat > "$RUNNER_TEMP/ci/run.sh" <<'SCRIPT'
+          set -eu
+          export HOME=/tmp/home CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/target
+          export CARGO_NET_OFFLINE=true CARGO_TERM_COLOR=never
+          mkdir -p "$HOME"
+          cp -R /cargo-seed "$CARGO_HOME"
+          cd /work
           # PROJECT: print the cargo arguments that select the touched crates, for example
           # "-p crate_a -p crate_b". The default tests the whole workspace.
           SELECT="--workspace"
-          if sudo -n unshare --net true 2>/dev/null; then
-            echo "network cut: yes"
-            sudo -n env PATH="$PATH" HOME="$HOME" unshare --net -- bash -c '
-              ip link set lo up
-              exec setpriv --reuid="$SUDO_UID" --regid="$SUDO_GID" --clear-groups \
-                env CARGO_NET_OFFLINE=true \
-                bash -c "cargo build --locked --offline $0 && cargo test --locked --offline $0"
-            ' "$SELECT"
-          else
-            echo "network cut: no, the runner does not allow it. Cargo stays offline."
-            cargo build --locked --offline $SELECT # PROJECT: your build command
-            cargo test --locked --offline $SELECT # PROJECT: your test command
-          fi
-
-      - name: Run done condition
-        run: |
-          set -euo pipefail
-          export CARGO_NET_OFFLINE=true
+          echo "== build"
+          cargo build --locked --offline $SELECT # PROJECT: your build command
+          echo "== test"
+          cargo test --locked --offline $SELECT # PROJECT: your test command
+          echo "== done condition"
           # One command per line, taken from the hub's order, run in the repository root.
           while IFS= read -r cmd || [ -n "$cmd" ]; do
             [ -n "$cmd" ] || continue
             echo "+ $cmd"
-            bash -c "$cmd"
-          done < "$RUNNER_TEMP/done_when.txt"
+            bash --noprofile --norc -c "$cmd"
+          done < /ci/done_when.txt
+          SCRIPT
+
+      # Build, tests and the done condition run in ONE step, in a fresh container: no network, no sudo, no
+      # capabilities, a read only root, a clean environment (env -i) and a fixed PATH. Nothing that the
+      # patch can write is read by a later step. Only the exit code of the container comes back.
+      # The runner file system, GITHUB_ENV and GITHUB_PATH are not mounted.
+      - name: Build, test and run done condition
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 4096 --memory 6g \
+            --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,exec,size=6g \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TEMP/ci:/ci:ro" \
+            -v "$RUNNER_TEMP/cargo-home:/cargo-seed:ro" \
+            "$VERIFY_IMAGE" \
+            env -i PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+              RUSTUP_HOME=/usr/local/rustup \
+            bash --noprofile --norc /ci/run.sh
+
+      # The hub must still give the same done condition. A hub that changed it during the run fails the run.
+      - name: Check the done condition again
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 60 \
+            --max-filesize 65536 --output "$RUNNER_TEMP/order2.json" \
+            "$HUB/api/order/$ORDER/done_when" # PROJECT: the path of the hub endpoint
+          jq -er '.done_when | select(type == "string" and length > 0)' "$RUNNER_TEMP/order2.json" \
+            > "$RUNNER_TEMP/done_when2.txt" \
+            || { echo "the order has no done condition now"; exit 1; }
+          [ "$(sha256sum "$RUNNER_TEMP/done_when2.txt" | cut -d' ' -f1)" = "$(cat "$RUNNER_TEMP/done_when.sha")" ] \
+            || { echo "the done condition changed during the run"; exit 1; }

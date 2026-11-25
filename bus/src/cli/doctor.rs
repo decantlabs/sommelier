@@ -124,9 +124,11 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
     let report = doctor::run_checks(&doctor_env);
     let sandbox_report = sandbox::detect(&sandbox::SystemProbe);
     let sandbox_ok = sandbox_report.as_ref().is_ok_and(|r| r.fix.is_none());
+    let warnings = sandbox_warnings(&env_var, &home, &sandbox::SystemProbe);
     if json_out {
         let mut value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
         value["sandbox"] = sandbox_json(&sandbox_report);
+        value["sandbox_warnings"] = serde_json::json!(warnings);
         println!(
             "{}",
             serde_json::to_string(&value).map_err(|e| e.to_string())?
@@ -134,6 +136,9 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
     } else {
         print!("{}", doctor::format_text(&report));
         println!("{}", sandbox_text(&sandbox_report));
+        for w in &warnings {
+            println!("{w}");
+        }
     }
 
     if report.ok && sandbox_ok {
@@ -141,6 +146,37 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
     } else {
         Ok(exit::code(exit::REFUSED))
     }
+}
+
+/// Warnings about the sandbox settings of the member. They never change the exit code. A vendor folder that is
+/// the one the member's own tools use, a writable cache that the host builds use, and a runtime that was named
+/// but does not report rootless mode.
+pub fn sandbox_warnings(
+    get: &dyn Fn(&str) -> Option<String>,
+    home: &std::path::Path,
+    probe: &dyn sandbox::SandboxProbe,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut lists = Vec::new();
+    for key in [
+        "SOMMELIER_SANDBOX_VENDOR_DIRS",
+        "SOMMELIER_SANDBOX_CACHE_DIRS",
+    ] {
+        match sandbox::parse_mounts(&get(key).unwrap_or_default()) {
+            Ok(m) => lists.push(m),
+            Err(e) => {
+                out.push(format!("sandbox: {key}: {e}"));
+                lists.push(Vec::new());
+            }
+        }
+    }
+    out.extend(sandbox::mount_warnings(&lists[0], &lists[1], home));
+    if let Some(rt) = get("SOMMELIER_SANDBOX_RUNTIME")
+        && let Some(w) = sandbox::runtime_warning(probe, rt.trim())
+    {
+        out.push(w);
+    }
+    out
 }
 
 /// The one more doctor line: `sandbox: <level in force> (<what it can offer>)`, with the fix when needed.

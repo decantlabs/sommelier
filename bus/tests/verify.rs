@@ -998,9 +998,18 @@ fn only_release_asks_for_write_permissions() {
 fn factory_verify_has_the_inputs_the_run_name_and_the_guards() {
     let t = template("factory-verify.yml");
     assert!(t.contains("permissions: {}"));
-    assert!(t.contains("run-name: verify ${{ inputs.submission }}"));
+    assert!(t.contains(
+        "run-name: factory-verify ${{ inputs.submission }} a${{ inputs.attempt }} d${{ inputs.dispatch }}"
+    ));
     assert!(t.contains("workflow_dispatch:"));
-    for input in ["submission:", "order:", "base:", "hub:"] {
+    for input in [
+        "submission:",
+        "order:",
+        "base:",
+        "hub:",
+        "attempt:",
+        "dispatch:",
+    ] {
         assert!(t.contains(&format!("      {input}\n")), "input {input}");
     }
     assert!(t.contains("group: factory-verify-${{ inputs.submission }}"));
@@ -1009,7 +1018,7 @@ fn factory_verify_has_the_inputs_the_run_name_and_the_guards() {
     assert!(t.contains("sha256sum --check"));
     assert!(t.contains("core.hooksPath=/dev/null"));
     assert!(t.contains("--locked"));
-    assert!(t.contains("unshare --net"));
+    assert!(t.contains("--network none"), "the build has no network");
     assert!(
         t.contains("/api/order/$ORDER/done_when"),
         "done_when comes from the hub"
@@ -1028,6 +1037,8 @@ fn factory_verify_has_the_inputs_the_run_name_and_the_guards() {
         "ORDER:",
         "BASE:",
         "HUB:",
+        "ATTEMPT:",
+        "DISPATCH:",
     ];
     for l in code.lines().filter(|l| l.contains("${{ inputs.")) {
         assert!(
@@ -1036,6 +1047,97 @@ fn factory_verify_has_the_inputs_the_run_name_and_the_guards() {
         );
     }
     assert!(!code.contains("run: ${{ inputs"), "an input in a run line");
+}
+
+#[test]
+fn factory_verify_runs_build_tests_and_done_condition_in_one_clean_container() {
+    let t = template("factory-verify.yml");
+    let code = code_lines(&t);
+    // The ref that bundle::pack writes.
+    assert!(code.contains("refs/sommelier/submit:"));
+    assert!(!code.contains("refs/heads/*"), "the old refspec");
+    // No sudo, no host network namespace trick, no shared environment file.
+    for bad in ["sudo", "setpriv", "unshare", "GITHUB_ENV", "GITHUB_PATH"] {
+        assert!(!code.contains(bad), "found {bad}");
+    }
+    // One docker run holds the build, the tests and the done condition.
+    assert_eq!(code.matches("--network none").count(), 1);
+    assert!(code.contains("env -i PATH="));
+    assert!(code.contains("bash --noprofile --norc"));
+    assert!(code.contains("--cap-drop ALL") && code.contains("--read-only"));
+    assert!(code.contains("no-new-privileges"));
+    assert!(!code.contains("--privileged") && !code.contains("docker.sock"));
+    let run = code
+        .find("cargo build --locked --offline")
+        .expect("build line");
+    assert!(code.find("cargo test --locked --offline").unwrap() > run);
+    assert!(code.find("while IFS= read -r cmd").unwrap() > run);
+    // The script of the container is written by the workflow, not taken from the checkout.
+    assert!(code.contains("cat > \"$RUNNER_TEMP/ci/run.sh\""));
+    // The done condition is JSON read with jq, fetched twice and compared.
+    assert_eq!(code.matches("jq -er '.done_when").count(), 2);
+    assert!(code.contains("the done condition changed during the run"));
+    assert!(
+        t.find("Read done condition").unwrap()
+            < t.find("name: Build, test and run done condition").unwrap()
+            && t.find("name: Build, test and run done condition").unwrap()
+                < t.find("name: Check the done condition again").unwrap()
+    );
+    // The page says what a green run proves and what it does not.
+    assert!(t.contains("NO proof against a hostile patch"));
+    let readme = template("README.md");
+    assert!(readme.contains("What a green run proves"));
+    assert!(readme.contains("does NOT prove"));
+}
+
+#[test]
+fn no_template_uses_a_cache_action_and_each_says_why() {
+    for f in WORKFLOWS {
+        let t = template(f);
+        let code = code_lines(&t);
+        assert!(!code.contains("actions/cache"), "{f}: a cache action");
+        assert!(!code.contains("cache:"), "{f}: a cache setting");
+        assert!(t.contains("cache action"), "{f}: no comment about caches");
+    }
+    assert!(template("README.md").contains("Never add a cache action"));
+}
+
+#[test]
+fn factory_batch_is_no_lock_by_itself_and_guards_the_hold_list() {
+    let t = template("factory-batch.yml");
+    assert!(t.contains("THIS FILE ALONE IS NO LOCK"));
+    assert!(t.contains("REQUIRED WORKFLOW"));
+    assert!(t.contains("MUST STAY EQUAL"));
+    // NUL separated paths with quoting off.
+    assert!(t.contains("core.quotePath=false diff -z --name-only"));
+    assert!(t.contains("grep -Ezq"));
+    // Every glob of the hold list of the hub shows in the guarded paths.
+    for needle in [
+        r"AGENTS\.override\.md",
+        r"CLAUDE\.local\.md",
+        r"\.cursor",
+        r"\.cursorrules",
+        r"\.windsurfrules",
+        r"\.clinerules",
+        r"\.devcontainer",
+        r"\.envrc",
+        r"rustfmt\.toml",
+        r"clippy\.toml",
+        r"deny\.toml",
+        r"\.claude",
+        r"build\.rs",
+        r"Cargo\.lock",
+        r"(swarm|bus|\.github)",
+    ] {
+        assert!(t.contains(needle), "GUARDED_PATHS lacks {needle}");
+    }
+    let readme = template("README.md");
+    assert!(readme.contains("Setting up the second lock"));
+    assert!(readme.contains("Require workflows to pass before merging"));
+    assert!(
+        readme.contains("the owner of the repository sets this up")
+            || readme.contains("The owner of the repository sets this up")
+    );
 }
 
 #[test]
