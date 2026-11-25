@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -211,11 +212,11 @@ fn key_reply(r: Result<serde_json::Value, (u16, String)>) -> Reply {
     }
 }
 
-async fn route(hub: &Arc<Hub>, head: &Head, body: &[u8]) -> Reply {
+async fn route(hub: &Arc<Hub>, head: &Head, body: &[u8], ip: IpAddr) -> Reply {
     // Two doors without a token: a nonce, and the join of a new key (see PROTOCOL.md, Key members).
     match (head.path.as_str(), head.method.as_str()) {
         ("/api/challenge", "GET" | "HEAD") => return key_reply(hub.challenge()),
-        ("/api/join", "POST") => return key_reply(hub.join(body)),
+        ("/api/join", "POST") => return key_reply(hub.join(body, Some(ip))),
         ("/api/challenge" | "/api/join", _) => {
             let allow = if head.path == "/api/join" {
                 "POST"
@@ -266,6 +267,14 @@ async fn route(hub: &Arc<Hub>, head: &Head, body: &[u8]) -> Reply {
     }
     if matches!(head.path.as_str(), "/api/state" | "/api/policy") {
         let (header, query_token) = extract_token(head);
+        if head.path == "/api/state"
+            && header.is_none()
+            && query_token.is_none()
+            && !head.headers.contains_key("authorization")
+            && hub.door().public_read()
+        {
+            return public_state(hub, ip).await;
+        }
         // Key members read the state too, the policy stays with tokens.
         let checked = match head.headers.get("authorization") {
             Some(raw) if head.path == "/api/state" && raw.starts_with("SommelierKey ") => {
@@ -299,8 +308,33 @@ async fn route(hub: &Arc<Hub>, head: &Head, body: &[u8]) -> Reply {
     }
 }
 
+/// `GET /api/state` for a reader without credentials, when the hub has public read: the state
+/// without meters, and counted against the rate per address block and the cap on connections.
+async fn public_state(hub: &Arc<Hub>, ip: IpAddr) -> Reply {
+    let door = hub.door();
+    let refuse = |msg: String| Reply::json(429, &serde_json::json!({ "error": msg }));
+    if let Err(e) = door.charge_read(&door.block(ip), crate::time::now_ms()) {
+        return refuse(e);
+    }
+    let _slot = match door.admit("", true) {
+        Ok(s) => s,
+        Err(e) => return refuse(e),
+    };
+    let mut state = hub.snapshot().await;
+    crate::door::redact_state(&mut state);
+    Reply::json(200, &state)
+}
+
 /// Answers one plain HTTP request and closes the connection.
 pub async fn serve(hub: &Arc<Hub>, mut stream: TcpStream, head: Head) -> io::Result<()> {
+    let peer = stream.peer_addr()?.ip();
+    let ip = hub.door().client_ip(
+        peer,
+        hub.door()
+            .trust_header()
+            .and_then(|h| head.headers.get(&h))
+            .map(String::as_str),
+    );
     let mut consumed = vec![0u8; head.len];
     stream.read_exact(&mut consumed).await?;
 
@@ -324,7 +358,7 @@ pub async fn serve(hub: &Arc<Hub>, mut stream: TcpStream, head: Head) -> io::Res
                 .await
                 .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
         }
-        route(hub, &head, &body).await
+        route(hub, &head, &body, ip).await
     };
     let mut out = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\

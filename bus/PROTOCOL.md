@@ -423,3 +423,43 @@ at connect and an open connection is closed with the reason `key revoked`, the w
 
 **Only the hub writes `key/` facts.** A `send` of a FACT with a topic under `key/` is refused, and the KEY table
 is projected only from FACT messages of the hub, so a replay of the log gives the same table.
+
+## 11. Front door
+
+The hub can be reached by anyone, so it limits what one source can take, and it can tell two keys of one owner
+apart from two owners. Every part is off until the owner turns it on in the `door` settings of the hub. A hub
+that upgrades behaves as before.
+
+**Address blocks.** The hub never stores a network address. It reduces the address of a client (the /24 of an
+IPv4 address, the /48 of an IPv6 address) to an opaque block: an HMAC under a key derived from the hub secret,
+cut to 16 hex characters. The raw address is used for that one computation in memory. It is not stored, logged
+or sent, also not in an error text. The side store `door.db` in the data folder (never part of `state.db`, never
+served) keeps `member`, `block`, `first_seen` and `last_seen` for the members that joined or connected. Rows
+older than `keep_days` are dropped on the tick. With `keep_days` at 0 nothing is kept. Two members with the same
+block count as one owner for reviews and for test reports.
+
+**Which address.** The socket peer. Behind a tunnel every peer is the loopback address, so `trust_header` names
+a header (for example `CF-Connecting-IP`) that carries the client address. It is honoured only when the socket
+peer is the loopback address, from any other peer it is ignored. With a list of addresses the last one counts.
+
+**Limits.** Every refusal names the limit and the time to retry. WebSocket upgrades and plain requests answer
+`429`, a join answers `429` with `{"ok": false, "error": ...}`. Leases that are held keep running.
+
+| Setting | Limit | Refusal starts with |
+|---------|-------|---------------------|
+| `joins_per_block_per_hour` | tries of `POST /api/join` per address block and hour | `join limit:` |
+| `conns_per_member` | open connections of one member | `connection limit:` ... per member |
+| `max_conns`, `reserved_share` | all open connections. The share `reserved_share` of them is never filled by tier 0 or anonymous readers | `connection limit:` |
+| `public_reads_per_block_per_min` | connections and state reads of the public reader per block and minute | `public read limit:` |
+
+A member above tier 0 is never refused because tier 0 or anonymous connections fill the hub. When more than
+`join_flood_refusals` joins were refused within `join_flood_window_secs`, the hub writes ONE alert
+`alert/JOIN_FLOOD/join` per window. Its body has the counts and no address.
+
+**Public read.** With `public_read` on, a WebSocket upgrade or `GET /api/state` with no `Authorization` header
+and no `token` query acts as an anonymous observer. A request with a wrong token is still refused with 401. The
+observer counts against the global cap as tier 0 and has its own rate per block. It can send nothing: every
+frame it sends is answered with an error. It is not listed in `who` or in the members of `/api/state`.
+What it gets is redacted: no FACT with a topic under `quota/` or `spend/`, on the socket and in `recent`, and in
+`/api/state` no `quota` object, and each entry of `pools` has only `pool`, `window`, `state` and `resets_at`
+(no percent values, no leases, no forecast). Members with a token or a key see what they saw before.
