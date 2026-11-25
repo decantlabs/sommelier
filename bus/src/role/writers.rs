@@ -148,6 +148,8 @@ pub enum OpWho {
     Holder,
     /// The orchestrator or the hub.
     Orchestrator,
+    /// A member for the rows it owns (its own runs). The orchestrator, the lander and the hub for every row.
+    Own,
     /// The holder of the role `lander`, the orchestrator or the hub.
     Lander,
     /// The hub only, no client op.
@@ -165,8 +167,9 @@ pub fn op_who(op: &str) -> Option<OpWho> {
         "task.list" | "task.show" | "task.next" | "task.work" | "task.offers" | "task.ask"
         | "task.heartbeat" => OpWho::Anyone,
         "land.result" | "land.next" => OpWho::Lander,
-        "land.approve" | "land.branch_upsert" | "land.sweep" | "run.sweep" | "run.request"
-        | "run.register" | "run.result" => OpWho::Orchestrator,
+        "land.approve" => OpWho::Orchestrator,
+        "land.branch_upsert" | "land.sweep" | "run.sweep" => OpWho::Lander,
+        "run.request" | "run.register" | "run.result" => OpWho::Own,
         "land.enqueue" | "land.list" | "run.list" => OpWho::Anyone,
         "plan.dry" | "plan.run" | "plan.explain" => OpWho::Anyone,
         "plan.pause" | "plan.resume" | "pause" | "resume" => OpWho::Orchestrator,
