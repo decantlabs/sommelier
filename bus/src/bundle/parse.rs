@@ -126,8 +126,18 @@ fn bad(what: &str) -> BundleError {
     }
 }
 
+/// A path as git prints it. Backslashes stay: a file named `src\evil.rs` is one file name on Linux and
+/// the path gate blocks it. Rewriting it to `src/evil.rs` would let it pass a scope of `src/**`.
 fn text(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).replace('\\', "/")
+    String::from_utf8_lossy(b).into_owned()
+}
+
+/// Parse `git diff-tree --name-only -z` output into the list of paths.
+pub fn parse_paths(out: &[u8]) -> Vec<String> {
+    out.split(|b| *b == 0)
+        .filter(|t| !t.is_empty())
+        .map(text)
+        .collect()
 }
 
 /// Parse `git diff --raw -z` output.
@@ -168,6 +178,11 @@ pub fn change_kind(status: char) -> ChangeKind {
         'R' | 'C' => ChangeKind::Renamed,
         _ => ChangeKind::Modified,
     }
+}
+
+/// The tree entry kind before a change, `None` for the all zero mode of a new path.
+pub fn old_file_mode(mode: &str) -> Option<FileMode> {
+    (u32::from_str_radix(mode, 8).unwrap_or(0) != 0).then(|| file_mode(mode))
 }
 
 /// The tree entry kind of an octal mode string.
@@ -248,7 +263,14 @@ pub fn parse_patch(out: &[u8]) -> Vec<Section> {
     secs
 }
 
-/// Parse the commit log written with fields separated by NUL, five fields per commit.
+/// Number of NUL separated fields per commit in the log format of the bundle module.
+pub const LOG_FIELDS: usize = 7;
+
+/// The `--format` of the commit log: id, parents, author name and email, committer name and email, message.
+pub const LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%ae%x00%cn%x00%ce%x00%B%x00";
+
+/// Parse the commit log written with fields separated by NUL, [`LOG_FIELDS`] fields per commit. The
+/// `paths` of each commit stay empty, the caller fills them.
 pub fn parse_log(out: &[u8]) -> Result<Vec<CommitInfo>, BundleError> {
     let mut toks: Vec<&[u8]> = out.split(|b| *b == 0).collect();
     if toks
@@ -257,11 +279,11 @@ pub fn parse_log(out: &[u8]) -> Result<Vec<CommitInfo>, BundleError> {
     {
         toks.pop();
     }
-    if !toks.len().is_multiple_of(5) {
+    if !toks.len().is_multiple_of(LOG_FIELDS) {
         return Err(bad("commit log"));
     }
     Ok(toks
-        .chunks(5)
+        .chunks(LOG_FIELDS)
         .map(|c| {
             let s = |b: &[u8]| {
                 String::from_utf8_lossy(b)
@@ -273,7 +295,10 @@ pub fn parse_log(out: &[u8]) -> Result<Vec<CommitInfo>, BundleError> {
                 parents: s(c[1]).split_whitespace().map(str::to_string).collect(),
                 author_name: s(c[2]),
                 author_email: s(c[3]),
-                message: s(c[4]).trim_end_matches('\n').to_string(),
+                committer_name: s(c[4]),
+                committer_email: s(c[5]),
+                message: s(c[6]).trim_end_matches('\n').to_string(),
+                paths: Vec::new(),
             }
         })
         .collect())

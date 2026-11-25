@@ -4,6 +4,22 @@
 //! [`crate::gate::diff::ParsedDiff`] and never checks out, never builds and never runs anything from the
 //! bundle. The bundle is hostile input: it is size checked before git sees it, its header is read by our
 //! own parser, and every git call runs with hooks, external diff, textconv and all config files off.
+//!
+//! What is diffed. The [`ParsedDiff`] holds the diff of the two END trees, base and head. The commits
+//! between them are not diffed one by one. Instead each commit carries the list of paths it changes, and
+//! the gates read those lists too. This is enough because of a decision of the project: a submission
+//! lands as ONE squashed commit made from the gated end tree, so a middle commit never reaches main.
+//! Commit messages, author and committer fields are read and gated like any other text.
+//!
+//! Limits and what they cover. Every limit is checked as early as a program without `unsafe` can check
+//! it. The object sizes of the bundle are listed and checked BEFORE any diff runs (one object over
+//! `max_blob_bytes`, too many objects or too many bytes in total refuse the submission). Rename
+//! detection is bounded and switched off for a large file count. Git runs with bounded caches and one
+//! thread, with a memory cap on Unix, with a time limit, an output cap and a disk cap for its folder.
+//! A limit that is hit ends the whole process tree, see [`runner`]. Not covered: the unpacking of a
+//! pack bomb itself runs before any size is known, so it is bounded by the disk cap, the memory cap and
+//! the time limit rather than refused up front. On Windows there is no memory cap and the tree kill
+//! follows parent links only. The hub server of the project is Linux.
 
 pub mod parse;
 pub mod runner;
@@ -15,9 +31,11 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::gate::diff::{FileChange, ParsedDiff};
+use crate::gate::diff::{FileChange, FileMode, Line, ParsedDiff};
 use parse::{Header, is_object_id};
-use runner::{Run, RunError, diff_flags, git_command, run_limited};
+use runner::{
+    Run, RunError, RunLimits, diff_flags, git_command, git_command_capped, run_guarded, run_limited,
+};
 
 /// Hard limits of one inspection.
 #[derive(Clone, Debug)]
@@ -31,6 +49,16 @@ pub struct Limits {
     pub max_diff_bytes: usize,
     /// Seconds per git call.
     pub git_seconds: u64,
+    /// Most objects (commits, trees, blobs) the submission may bring.
+    pub max_objects: usize,
+    /// Total size of all new objects in bytes, before compression.
+    pub max_total_object_bytes: u64,
+    /// Bytes the temporary folder of one inspection may hold while git works.
+    pub max_sandbox_bytes: u64,
+    /// Memory cap per git call in megabytes, Unix only, 0 for none.
+    pub max_memory_mb: u64,
+    /// Rename detection runs only up to this many changed files.
+    pub rename_max_files: usize,
 }
 
 impl Default for Limits {
@@ -42,6 +70,11 @@ impl Default for Limits {
             max_blob_bytes: 2 * 1024 * 1024,
             max_diff_bytes: 8 * 1024 * 1024,
             git_seconds: 60,
+            max_objects: 50_000,
+            max_total_object_bytes: 64 * 1024 * 1024,
+            max_sandbox_bytes: 256 * 1024 * 1024,
+            max_memory_mb: 3072,
+            rename_max_files: 200,
         }
     }
 }
@@ -126,30 +159,73 @@ impl fmt::Display for BundleError {
 
 impl std::error::Error for BundleError {}
 
-fn run_err(step: &str, secs: u64, e: RunError) -> BundleError {
+const MAX_ERROR_CHARS: usize = 200;
+
+/// A line of git's text that is safe to put in an error: the first line, short, without control or
+/// invisible characters. `scrub` pairs name folders that must not appear in it.
+pub fn clip_text(s: &str, scrub: &[(String, &'static str)]) -> String {
+    let mut t = s.to_string();
+    for (from, to) in scrub {
+        if !from.is_empty() {
+            t = t.replace(from.as_str(), to);
+        }
+    }
+    t.lines()
+        .next()
+        .unwrap_or("no message")
+        .chars()
+        .take(MAX_ERROR_CHARS)
+        .map(|c| {
+            if c.is_control() || crate::gate::gates::is_invisible(c) {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+fn run_err(step: &str, lim: &RunLimits, e: RunError) -> BundleError {
     match e {
         RunError::TimedOut => BundleError::TimedOut {
             step: step.into(),
-            secs,
+            secs: lim.secs,
         },
         RunError::OutputTooLarge => BundleError::LimitExceeded {
             what: format!("bytes of git output in step {step}"),
-            found: u64::MAX,
-            max: 0,
+            found: lim.max_out as u64 + 1,
+            max: lim.max_out as u64,
+        },
+        RunError::DiskTooLarge => BundleError::LimitExceeded {
+            what: format!("bytes of disk use in step {step}"),
+            found: lim.max_disk.saturating_add(1),
+            max: lim.max_disk,
         },
         RunError::Spawn(m) => BundleError::Git {
             step: step.into(),
-            message: format!("cannot start git: {m}"),
+            message: format!("cannot start git: {}", clip_text(&m, &[])),
         },
+    }
+}
+
+fn plain_limits(secs: u64, max_out: usize) -> RunLimits {
+    RunLimits {
+        secs,
+        max_out,
+        watch_dir: None,
+        max_disk: 0,
     }
 }
 
 /// The git sandbox of one inspection: a temporary bare repository that borrows objects.
 struct Sandbox {
+    root: PathBuf,
     git_dir: PathBuf,
     hooks: PathBuf,
     home: PathBuf,
-    secs: u64,
+    limits: Limits,
+    /// Folder names that git's messages may hold and that must not reach an error.
+    scrub: Vec<(String, &'static str)>,
 }
 
 impl Sandbox {
@@ -160,11 +236,31 @@ impl Sandbox {
         stdin: Option<Vec<u8>>,
         max_out: usize,
     ) -> Result<Run, BundleError> {
-        let mut cmd = git_command(Some(&self.git_dir), Some(&self.hooks), &self.home);
+        let mut cmd = git_command_capped(
+            Some(&self.git_dir),
+            Some(&self.hooks),
+            &self.home,
+            self.limits.max_memory_mb,
+        );
+        // Objects over the blob limit are refused before any diff. Raising nothing here keeps git's
+        // own threshold in step with that limit: bigger files would be streamed and shown as binary.
+        cmd.arg("-c").arg(format!(
+            "core.bigFileThreshold={}",
+            self.limits.max_blob_bytes.max(1)
+        ));
         cmd.args(args);
-        let out =
-            run_limited(cmd, stdin, self.secs, max_out).map_err(|e| run_err(step, self.secs, e))?;
-        Ok(out)
+        let lim = RunLimits {
+            secs: self.limits.git_seconds,
+            max_out,
+            watch_dir: Some(self.root.clone()),
+            max_disk: self.limits.max_sandbox_bytes,
+        };
+        run_guarded(cmd, stdin, &lim).map_err(|e| run_err(step, &lim, e))
+    }
+
+    /// The first line of git's text, cut, cleaned and without the folders of this inspection.
+    fn clip(&self, s: &str) -> String {
+        clip_text(s, &self.scrub)
     }
 
     /// Like `run` but a non zero exit is an error with the first line of stderr.
@@ -181,7 +277,7 @@ impl Sandbox {
         } else {
             Err(BundleError::Git {
                 step: step.into(),
-                message: r.stderr.lines().next().unwrap_or("no message").to_string(),
+                message: self.clip(&r.stderr),
             })
         }
     }
@@ -189,7 +285,7 @@ impl Sandbox {
 
 fn sha256_file(path: &Path) -> Result<(String, u64), BundleError> {
     let mut f = fs::File::open(path)
-        .map_err(|e| BundleError::Io(format!("cannot open {}: {e}", path.display())))?;
+        .map_err(|e| BundleError::Io(format!("cannot open the bundle file: {e}")))?;
     let mut h = Sha256::new();
     let mut buf = [0u8; 65536];
     let mut n = 0u64;
@@ -332,12 +428,14 @@ pub fn inspect_in(
         .prefix("sommelier-bundle-")
         .tempdir_in(temp_root)
         .map_err(|e| BundleError::Io(format!("cannot make a temporary folder: {e}")))?;
-    let sb = make_sandbox(tmp.path(), reference_repo, limits)?;
+    let mut sb = make_sandbox(tmp.path(), reference_repo, limits)?;
     let bundle_abs = fs::canonicalize(bundle).map_err(|e| BundleError::Io(e.to_string()))?;
     let bundle_arg = bundle_abs
         .to_string_lossy()
         .trim_start_matches(r"\\?\")
         .to_string();
+    sb.scrub.push((bundle_arg.replace('\\', "/"), "<bundle>"));
+    sb.scrub.push((bundle_arg.clone(), "<bundle>"));
 
     let base_ref = format!("{expected_base}^{{commit}}");
     if !sb
@@ -348,13 +446,7 @@ pub fn inspect_in(
     }
     let v = sb.run("verify", &["bundle", "verify", &bundle_arg], None, 1 << 16)?;
     if !v.ok {
-        return Err(BundleError::Corrupt(
-            v.stderr
-                .lines()
-                .next()
-                .unwrap_or("verify failed")
-                .to_string(),
-        ));
+        return Err(BundleError::Corrupt(sb.clip(&v.stderr)));
     }
     let spec = format!("+{ref_name}:refs/submission/head");
     let f = sb.run(
@@ -372,13 +464,7 @@ pub fn inspect_in(
         1 << 16,
     )?;
     if !f.ok {
-        return Err(BundleError::Corrupt(
-            f.stderr
-                .lines()
-                .next()
-                .unwrap_or("fetch failed")
-                .to_string(),
-        ));
+        return Err(BundleError::Corrupt(sb.clip(&f.stderr)));
     }
     let got = sb.ok(
         "rev-parse",
@@ -421,21 +507,36 @@ fn make_sandbox(root: &Path, reference: &Path, limits: &Limits) -> Result<Sandbo
     );
     fs::create_dir_all(&hooks).map_err(io)?;
     fs::create_dir_all(&home).map_err(io)?;
-    let sb = Sandbox {
+    let mut sb = Sandbox {
+        root: root.to_path_buf(),
         git_dir: git_dir.clone(),
         hooks,
         home,
-        secs: limits.git_seconds,
+        limits: limits.clone(),
+        scrub: Vec::new(),
     };
+    for dir in [root, reference] {
+        let name = if dir == root {
+            "<sandbox>"
+        } else {
+            "<reference>"
+        };
+        let plain = dir
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_string();
+        sb.scrub.push((plain.replace('\\', "/"), name));
+        sb.scrub.push((plain, name));
+    }
     let mut cmd = git_command(None, Some(&sb.hooks), &sb.home);
     cmd.args(["init", "--quiet", "--bare", "--template="])
         .arg(&git_dir);
-    let r = run_limited(cmd, None, limits.git_seconds, 1 << 16)
-        .map_err(|e| run_err("init", limits.git_seconds, e))?;
+    let lim = plain_limits(limits.git_seconds, 1 << 16);
+    let r = run_limited(cmd, None, lim.secs, lim.max_out).map_err(|e| run_err("init", &lim, e))?;
     if !r.ok {
         return Err(BundleError::Git {
             step: "init".into(),
-            message: r.stderr,
+            message: sb.clip(&r.stderr),
         });
     }
     let objects = {
@@ -447,10 +548,9 @@ fn make_sandbox(root: &Path, reference: &Path, limits: &Limits) -> Result<Sandbo
         }
     };
     if !objects.is_dir() {
-        return Err(BundleError::Io(format!(
-            "{} is not a git repository",
-            reference.display()
-        )));
+        return Err(BundleError::Io(
+            "the reference repository is not a git repository".into(),
+        ));
     }
     let objects = fs::canonicalize(&objects).map_err(io)?;
     let line = objects
@@ -485,34 +585,61 @@ fn build(
             max: limits.max_commits as u64,
         });
     }
+    // Object sizes first. Nothing below diffs or reads a blob before this passed.
+    check_objects(sb, &range, limits)?;
+
     let mut log_args = vec![
         "log",
         "--reverse",
         "--topo-order",
         "--no-color",
         "--encoding=UTF-8",
-        "--format=%H%x00%P%x00%an%x00%ae%x00%B%x00",
+        parse::LOG_FORMAT,
     ];
     log_args.push(&range);
     let log = sb.ok("log", &log_args, None, limits.max_diff_bytes)?;
-    let commits = parse::parse_log(&log)?;
+    let mut commits = parse::parse_log(&log)?;
+    for c in &mut commits {
+        c.paths = commit_paths(sb, &c.sha, limits)?;
+    }
+    let base_paths = base_paths(sb, base, limits)?;
 
     let head_ref = "refs/submission/head";
-    let mut raw_args = vec!["diff", "--raw", "-z", "-M", "--full-index"];
-    raw_args.extend(diff_flags());
-    raw_args.extend([base, head_ref]);
-    let raw = parse::parse_raw(&sb.ok("diff-raw", &raw_args, None, limits.max_diff_bytes)?)?;
-    if raw.len() > limits.max_files {
+    // The count comes from a diff without rename detection, which is cheap. Rename detection runs only
+    // for a small number of files, its cost grows with the square of that number.
+    let mut count_args = vec!["diff", "--raw", "-z", "--no-renames", "--full-index"];
+    count_args.extend(diff_flags());
+    count_args.extend([base, head_ref]);
+    let plain =
+        parse::parse_raw(&sb.ok("diff-count", &count_args, None, limits.max_diff_bytes)?)?;
+    if plain.len() > limits.max_files {
         return Err(BundleError::LimitExceeded {
             what: "changed files".into(),
-            found: raw.len() as u64,
+            found: plain.len() as u64,
             max: limits.max_files as u64,
         });
     }
+    let rename_flag = format!("-l{}", limits.rename_max_files);
+    let rename = plain.len() <= limits.rename_max_files;
+    let detect: Vec<&str> = if rename {
+        vec!["-M", &rename_flag]
+    } else {
+        vec!["--no-renames"]
+    };
+    let raw = if rename {
+        let mut raw_args = vec!["diff", "--raw", "-z", "--full-index"];
+        raw_args.extend(&detect);
+        raw_args.extend(diff_flags());
+        raw_args.extend([base, head_ref]);
+        parse::parse_raw(&sb.ok("diff-raw", &raw_args, None, limits.max_diff_bytes)?)?
+    } else {
+        plain
+    };
 
     let sizes = blob_sizes(sb, &raw, limits)?;
 
-    let mut patch_args = vec!["diff", "-U0", "-M", "--full-index"];
+    let mut patch_args = vec!["diff", "-U0", "--full-index"];
+    patch_args.extend(&detect);
     patch_args.extend(diff_flags());
     patch_args.extend([base, head_ref]);
     let patch = sb.run("diff-patch", &patch_args, None, limits.max_diff_bytes)?;
@@ -535,6 +662,12 @@ fn build(
         let deleted = e.status == 'D';
         let mode = parse::file_mode(if deleted { &e.old_mode } else { &e.new_mode });
         let binary = sec.binary;
+        // A pure rename has no added lines, so the capability gate reads the whole new content.
+        let content = if matches!(e.status, 'R' | 'C') && !binary && mode != FileMode::Submodule {
+            blob_lines(sb, &e.new_sha, limits)?
+        } else {
+            Vec::new()
+        };
         files.push(FileChange {
             path: e.path.clone(),
             old_path: e.old_path.clone(),
@@ -544,6 +677,8 @@ fn build(
             size_after: size,
             added: if binary { vec![] } else { sec.added },
             removed: if binary { vec![] } else { sec.removed },
+            old_mode: parse::old_file_mode(&e.old_mode),
+            content,
         });
     }
     if sections.next().is_some() {
@@ -559,7 +694,135 @@ fn build(
         files,
         bundle_sha256: sha,
         bundle_bytes: bytes,
+        base_paths,
     })
+}
+
+/// List the objects the submission brings and refuse on the first one over the blob cap, on too many
+/// objects and on too many bytes in total. Runs before any diff.
+fn check_objects(sb: &Sandbox, range: &str, limits: &Limits) -> Result<(), BundleError> {
+    let listing = sb.ok(
+        "objects",
+        &["rev-list", "--objects", range],
+        None,
+        limits.max_diff_bytes,
+    )?;
+    let mut ids = String::new();
+    let mut n = 0usize;
+    for line in String::from_utf8_lossy(&listing).lines() {
+        // A path with a line break in it makes extra lines. Only lines that start with an id count.
+        let id = line.split(' ').next().unwrap_or("");
+        if !is_object_id(id) {
+            continue;
+        }
+        n += 1;
+        if n > limits.max_objects {
+            return Err(BundleError::LimitExceeded {
+                what: "objects".into(),
+                found: n as u64,
+                max: limits.max_objects as u64,
+            });
+        }
+        ids.push_str(id);
+        ids.push('\n');
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let out = sb.ok(
+        "object-sizes",
+        &["cat-file", "--batch-check=%(objecttype) %(objectsize)"],
+        Some(ids.into_bytes()),
+        limits.max_diff_bytes,
+    )?;
+    let text = String::from_utf8_lossy(&out);
+    let mut total = 0u64;
+    let mut seen = 0usize;
+    for line in text.lines() {
+        seen += 1;
+        let size = line
+            .split_once(' ')
+            .and_then(|(_, s)| s.trim().parse::<u64>().ok())
+            .ok_or_else(|| BundleError::Corrupt("an object of the bundle is missing".into()))?;
+        let kind = line.split(' ').next().unwrap_or("object");
+        if size > limits.max_blob_bytes {
+            return Err(BundleError::LimitExceeded {
+                what: format!("bytes in one {} object", clip_text(kind, &[])),
+                found: size,
+                max: limits.max_blob_bytes,
+            });
+        }
+        total = total.saturating_add(size);
+        if total > limits.max_total_object_bytes {
+            return Err(BundleError::LimitExceeded {
+                what: "bytes in all objects".into(),
+                found: total,
+                max: limits.max_total_object_bytes,
+            });
+        }
+    }
+    if seen != n {
+        return Err(BundleError::Corrupt(
+            "unexpected answer for the object sizes".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The paths one commit changes against its parent, as git prints them.
+fn commit_paths(sb: &Sandbox, sha: &str, limits: &Limits) -> Result<Vec<String>, BundleError> {
+    if !is_object_id(sha) {
+        return Err(BundleError::Corrupt(
+            "a commit id is not an object id".into(),
+        ));
+    }
+    let mut args = vec![
+        "diff-tree",
+        "-r",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        "--no-commit-id",
+    ];
+    args.extend(diff_flags());
+    args.push(sha);
+    let paths = parse::parse_paths(&sb.ok("commit-paths", &args, None, limits.max_diff_bytes)?);
+    if paths.len() > limits.max_files {
+        return Err(BundleError::LimitExceeded {
+            what: "changed files in one commit".into(),
+            found: paths.len() as u64,
+            max: limits.max_files as u64,
+        });
+    }
+    Ok(paths)
+}
+
+/// Every file path of the base tree.
+fn base_paths(sb: &Sandbox, base: &str, limits: &Limits) -> Result<Vec<String>, BundleError> {
+    let out = sb.ok(
+        "base-paths",
+        &["ls-tree", "-r", "--name-only", "-z", "--full-tree", base],
+        None,
+        limits.max_diff_bytes,
+    )?;
+    Ok(parse::parse_paths(&out))
+}
+
+/// All lines of one text blob, for a renamed file.
+fn blob_lines(sb: &Sandbox, sha: &str, limits: &Limits) -> Result<Vec<Line>, BundleError> {
+    if !is_object_id(sha) {
+        return Err(BundleError::Corrupt("a blob id is not an object id".into()));
+    }
+    let max = usize::try_from(limits.max_blob_bytes).unwrap_or(usize::MAX);
+    let out = sb.ok("blob", &["cat-file", "blob", sha], None, max)?;
+    Ok(String::from_utf8_lossy(&out)
+        .lines()
+        .enumerate()
+        .map(|(i, t)| Line {
+            no: u32::try_from(i + 1).unwrap_or(u32::MAX),
+            text: t.to_string(),
+        })
+        .collect())
 }
 
 fn mismatch() -> BundleError {
@@ -611,7 +874,10 @@ fn blob_sizes(
         })?;
         if n > limits.max_blob_bytes {
             return Err(BundleError::LimitExceeded {
-                what: format!("bytes in the blob of {}", raw[*i].path),
+                what: format!(
+                    "bytes in the blob of {}",
+                    crate::gate::gates::clip(&raw[*i].path)
+                ),
                 found: n,
                 max: limits.max_blob_bytes,
             });

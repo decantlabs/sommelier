@@ -478,3 +478,377 @@ fn no_temp_folder_is_left_after_success_and_errors() {
     assert!(matches!(e, BundleError::UnknownBase(_)), "{e}");
     assert!(is_empty(root.path()));
 }
+
+// ---- findings of the security review ----
+
+#[cfg(unix)]
+use sommelier::bundle::runner::git_command_capped;
+use sommelier::bundle::runner::{RunLimits, run_guarded};
+use sommelier::gate::{GateRules, OrderView, Risk, Severity, check};
+
+fn git_env_vars(dir: &Path, args: &[&str], vars: &[(&str, &str)]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=t@example.org",
+        ])
+        .args(args)
+        .envs(vars.iter().copied())
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn bundle_of(p: &Path, base: &str) -> (PathBuf, tempfile::TempDir) {
+    let o = sandbox_root();
+    let out = o.path().join("r.bundle");
+    pack(p, base, "HEAD", &out).expect("pack");
+    (out, o)
+}
+
+fn order_for(scope: &[&str]) -> OrderView {
+    OrderView {
+        base: String::new(),
+        scope: scope.iter().map(|s| (*s).to_string()).collect(),
+        risk: Risk::Normal,
+        tier: 3,
+    }
+}
+
+#[test]
+fn f1_a_commit_that_adds_and_a_later_one_that_removes_is_still_gated() {
+    let r = repo();
+    let p = r.path();
+    let base = rev(p, "HEAD");
+    fs::create_dir_all(p.join("tools")).unwrap();
+    fs::write(p.join("tools/gen.rs"), "fn main() {}\n").unwrap();
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "add a tool"]);
+    fs::remove_file(p.join("tools/gen.rs")).unwrap();
+    fs::create_dir_all(p.join("src")).unwrap();
+    fs::write(p.join("src/ok.rs"), "pub fn ok() {}\n").unwrap();
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "remove it again"]);
+    let (out, _o) = bundle_of(p, &base);
+    let root = sandbox_root();
+    let d = inspect(&out, p, &base, root.path()).unwrap();
+    // The end diff shows only the clean file.
+    assert_eq!(d.files.len(), 1);
+    assert_eq!(d.files[0].path, "src/ok.rs");
+    // The commits list what they touched.
+    assert_eq!(d.commits.len(), 2);
+    assert_eq!(d.commits[0].paths, vec!["tools/gen.rs".to_string()]);
+    assert_eq!(
+        d.commits[1].paths,
+        vec!["src/ok.rs".to_string(), "tools/gen.rs".to_string()]
+    );
+    assert_eq!(d.commits[0].committer_name, "Test");
+    assert_eq!(d.commits[0].committer_email, "t@example.org");
+    let mut o = order_for(&["src/**"]);
+    o.base = base.clone();
+    let rep = check(&d, &o, &GateRules::default());
+    assert!(!rep.passed);
+    assert!(
+        rep.findings
+            .iter()
+            .any(|f| f.gate == "scope" && f.path.as_deref() == Some("tools/gen.rs")),
+        "{:?}",
+        rep.findings
+    );
+    // Without the middle commit's path the same end diff is clean.
+    let mut clean = d.clone();
+    for c in &mut clean.commits {
+        c.paths.retain(|p| p.starts_with("src/"));
+    }
+    assert!(check(&clean, &o, &GateRules::default()).passed);
+}
+
+#[test]
+fn f1_committer_and_message_of_a_real_bundle_are_read() {
+    let r = repo();
+    let p = r.path();
+    let base = rev(p, "HEAD");
+    fs::write(p.join("a.txt"), "a\n").unwrap();
+    git(p, &["add", "-A"]);
+    let token = format!("{}{}", "ghp_", "Zq9".repeat(12));
+    git_env_vars(
+        p,
+        &["commit", "-q", "-m", &format!("add a\n\nnote {token}")],
+        &[
+            ("GIT_COMMITTER_NAME", "Zo\u{200C}e"),
+            ("GIT_COMMITTER_EMAIL", "zoe@example.org"),
+        ],
+    );
+    let (out, _o) = bundle_of(p, &base);
+    let root = sandbox_root();
+    let d = inspect(&out, p, &base, root.path()).unwrap();
+    assert_eq!(d.commits[0].committer_name, "Zo\u{200C}e");
+    assert!(d.commits[0].message.contains(&token));
+    let mut o = order_for(&["**"]);
+    o.base = base;
+    let rep = check(&d, &o, &GateRules::default());
+    assert!(rep.findings.iter().any(|f| f.gate == "authors"));
+    assert!(rep.findings.iter().any(|f| f.gate == "secrets"));
+    assert!(!serde_json::to_string(&rep).unwrap().contains(&token));
+}
+
+#[test]
+fn f2_an_object_over_the_cap_is_refused_before_any_diff() {
+    let (r, base, _h, out, _o) = rich();
+    let root = sandbox_root();
+    // The diff steps would name the path of the blob. The object listing names the kind only.
+    let lim = Limits {
+        max_blob_bytes: 5,
+        ..Limits::default()
+    };
+    let e = inspect_in(&out, r.path(), &base, &lim, root.path()).unwrap_err();
+    match &e {
+        BundleError::LimitExceeded { what, found, max } => {
+            assert!(what.starts_with("bytes in one "), "{what}");
+            assert!(*found > 5 && *max == 5);
+        }
+        other => panic!("{other}"),
+    }
+    // Too many objects, too many bytes in total.
+    let lim = Limits {
+        max_objects: 2,
+        ..Limits::default()
+    };
+    let e = inspect_in(&out, r.path(), &base, &lim, root.path()).unwrap_err();
+    assert!(
+        matches!(&e, BundleError::LimitExceeded { what, .. } if what == "objects"),
+        "{e}"
+    );
+    let lim = Limits {
+        max_total_object_bytes: 40,
+        ..Limits::default()
+    };
+    let e = inspect_in(&out, r.path(), &base, &lim, root.path()).unwrap_err();
+    assert!(
+        matches!(&e, BundleError::LimitExceeded { what, .. } if what == "bytes in all objects"),
+        "{e}"
+    );
+    assert!(is_empty(root.path()));
+}
+
+#[test]
+fn f2_rename_detection_is_limited_by_the_file_count() {
+    let (r, base, _h, out, _o) = rich();
+    let root = sandbox_root();
+    let lim = Limits {
+        rename_max_files: 1,
+        ..Limits::default()
+    };
+    let d = inspect_in(&out, r.path(), &base, &lim, root.path()).unwrap();
+    assert!(d.files.iter().all(|f| f.change != ChangeKind::Renamed));
+    let added = d
+        .files
+        .iter()
+        .find(|f| f.path == "dir/ünï cöde.txt")
+        .unwrap();
+    assert_eq!(added.change, ChangeKind::Added);
+    assert_eq!(added.added.len(), 6);
+    assert!(
+        d.files
+            .iter()
+            .any(|f| f.path == "old name.txt" && f.change == ChangeKind::Deleted)
+    );
+}
+
+#[test]
+fn f2_git_runs_with_bounded_memory_settings() {
+    let args: Vec<String> = git_args(Some(Path::new("G")), Some(Path::new("H")))
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    for want in [
+        "pack.threads=1",
+        "core.bigFileThreshold=2m",
+        "pack.windowMemory=64m",
+        "core.packedGitLimit=128m",
+        "fetch.unpackLimit=1",
+    ] {
+        assert!(args.contains(&want.to_string()), "{want}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn f2_the_memory_cap_starts_git_through_a_fixed_shell_text() {
+    let cmd = git_command_capped(None, None, Path::new("/home-x"), 512);
+    assert_eq!(cmd.get_program(), "sh");
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args[0], "-c");
+    assert_eq!(args[1], "ulimit -v 524288 2>/dev/null; exec git \"$@\"");
+    assert_eq!(args[2], "git");
+    assert_eq!(
+        git_command_capped(None, None, Path::new("/h"), 0).get_program(),
+        "git"
+    );
+}
+
+/// Helper roles for the process tree tests. The test binary starts itself with a role in the
+/// environment. Run normally (no role) this test does nothing.
+#[test]
+fn process_tree_helper() {
+    let role = std::env::var("SOMMELIER_TEST_ROLE").unwrap_or_default();
+    let target = std::env::var("SOMMELIER_TEST_TARGET").unwrap_or_default();
+    match role.as_str() {
+        "parent" => {
+            let mut c = Command::new(std::env::current_exe().unwrap());
+            c.args(["--exact", "process_tree_helper", "--test-threads=1"])
+                .env("SOMMELIER_TEST_ROLE", "grandchild");
+            let _ = c.spawn();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+        "grandchild" => {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let _ = fs::write(&target, "alive");
+        }
+        "writer" => {
+            let _ = fs::write(&target, vec![7u8; 4 * 1024 * 1024]);
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+        _ => {}
+    }
+}
+
+fn helper_command(role: &str, target: &Path) -> Command {
+    let mut c = Command::new(std::env::current_exe().unwrap());
+    c.args(["--exact", "process_tree_helper", "--test-threads=1"])
+        .env("SOMMELIER_TEST_ROLE", role)
+        .env("SOMMELIER_TEST_TARGET", target);
+    c
+}
+
+#[test]
+fn f2_the_time_limit_ends_the_whole_process_tree() {
+    let d = tempfile::tempdir().unwrap();
+    let marker = d.path().join("grandchild-alive");
+    let t = std::time::Instant::now();
+    let r = run_limited(helper_command("parent", &marker), None, 2, 1024);
+    assert_eq!(r.unwrap_err(), RunError::TimedOut);
+    assert!(t.elapsed().as_secs() < 10);
+    // The grandchild would write its marker after 3 seconds.
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    assert!(!marker.exists(), "a child of the child outlived the limit");
+}
+
+#[test]
+fn f2_a_folder_that_grows_past_its_cap_ends_the_child() {
+    let d = tempfile::tempdir().unwrap();
+    let watch = d.path().join("watched");
+    fs::create_dir_all(&watch).unwrap();
+    let target = watch.join("big.dat");
+    let lim = RunLimits {
+        secs: 30,
+        max_out: 1024,
+        watch_dir: Some(watch.clone()),
+        max_disk: 1024 * 1024,
+    };
+    let t = std::time::Instant::now();
+    let r = run_guarded(helper_command("writer", &target), None, &lim);
+    assert_eq!(r.unwrap_err(), RunError::DiskTooLarge);
+    assert!(t.elapsed().as_secs() < 20);
+}
+
+#[test]
+fn f4_the_base_tree_paths_are_listed() {
+    let (r, base, _h, out, _o) = rich();
+    let root = sandbox_root();
+    let d = inspect(&out, r.path(), &base, root.path()).unwrap();
+    let mut want = vec!["gone.txt", "keep.txt", "old name.txt"];
+    let mut got: Vec<&str> = d.base_paths.iter().map(String::as_str).collect();
+    want.sort();
+    got.sort();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn f6_a_pure_rename_carries_the_whole_new_content() {
+    let r = repo();
+    let p = r.path();
+    let base = rev(p, "HEAD");
+    git(p, &["mv", "old name.txt", "moved.txt"]);
+    git(p, &["commit", "-q", "-m", "rename only"]);
+    let (out, _o) = bundle_of(p, &base);
+    let root = sandbox_root();
+    let d = inspect(&out, p, &base, root.path()).unwrap();
+    let f = d.files.iter().find(|f| f.path == "moved.txt").unwrap();
+    assert_eq!(f.change, ChangeKind::Renamed);
+    assert!(f.added.is_empty());
+    assert_eq!(f.content.len(), 6);
+    assert_eq!(f.content[0].text, "alpha");
+    assert_eq!(f.content[0].no, 1);
+    assert_eq!(f.old_mode, Some(FileMode::Regular));
+}
+
+#[test]
+fn f6_an_executable_bit_is_visible_in_the_old_and_new_mode() {
+    let r = repo();
+    let p = r.path();
+    let base = rev(p, "HEAD");
+    git(p, &["update-index", "--chmod=+x", "keep.txt"]);
+    git(p, &["commit", "-q", "-m", "mode"]);
+    let (out, _o) = bundle_of(p, &base);
+    let root = sandbox_root();
+    let d = inspect(&out, p, &base, root.path()).unwrap();
+    let f = d.files.iter().find(|f| f.path == "keep.txt").unwrap();
+    assert_eq!(f.mode, FileMode::Executable);
+    assert_eq!(f.old_mode, Some(FileMode::Regular));
+    let mut o = order_for(&["**"]);
+    o.base = base;
+    o.risk = Risk::Low;
+    let rep = check(&d, &o, &GateRules::default());
+    assert!(rep.passed, "{:?}", rep.findings);
+    assert_eq!(rep.risk_after, Risk::Normal);
+    assert!(rep.findings.iter().all(|f| f.severity != Severity::Block));
+}
+
+#[test]
+fn f8_an_error_from_git_does_not_name_our_folders() {
+    let r = repo();
+    let p = r.path();
+    let base = rev(p, "HEAD");
+    let reference = tempfile::tempdir().unwrap();
+    git(
+        reference.path(),
+        &["clone", "-q", "--bare", p.to_str().unwrap(), "ref.git"],
+    );
+    let noise: String = (0..4000)
+        .map(|i| format!("line {i} {}\n", i * 7919 % 1013))
+        .collect();
+    fs::write(p.join("big.txt"), noise).unwrap();
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "big"]);
+    let (out, o) = bundle_of(p, &base);
+    let bytes = fs::read(&out).unwrap();
+    fs::write(&out, &bytes[..bytes.len() - bytes.len() / 3]).unwrap();
+    let root = sandbox_root();
+    let e = inspect(&out, &reference.path().join("ref.git"), &base, root.path()).unwrap_err();
+    let text = e.to_string();
+    let fwd = |s: &Path| s.to_string_lossy().replace('\\', "/");
+    for folder in [root.path(), o.path(), reference.path()] {
+        assert!(!text.contains(&fwd(folder)), "{text}");
+        assert!(
+            !text.contains(&folder.to_string_lossy().to_string()),
+            "{text}"
+        );
+    }
+    assert!(text.chars().count() < 400, "{text}");
+}
