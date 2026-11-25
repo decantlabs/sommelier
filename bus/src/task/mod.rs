@@ -2,6 +2,7 @@
 
 pub mod board;
 pub mod reaper;
+pub mod risk;
 pub mod schema;
 pub mod state;
 
@@ -173,6 +174,26 @@ fn merge_task_fields(row: &mut TaskRow, src: &Value) {
     }
     if let Some(s) = str_field(src, "result_sha") {
         row.result_sha = s;
+    }
+    if let Some(s) = str_field(src, "risk")
+        && risk::is_risk(&s)
+    {
+        row.risk = s;
+    }
+    if let Some(n) = u64_field(src, "min_trust")
+        && n <= 3
+    {
+        row.min_trust = n as u8;
+    }
+    if let Some(s) = str_field(src, "review")
+        && !s.is_empty()
+    {
+        row.review = s;
+    }
+    if let Some(s) = str_field(src, "credit")
+        && matches!(s.as_str(), "handle" | "none")
+    {
+        row.credit = s;
     }
     if let Some(s) = str_field(src, "created_by") {
         row.created_by = s;
@@ -353,6 +374,64 @@ pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     .unwrap_or_default()
 }
 
+/// Decides the order fields of a new or replaced order after the body was merged. The risk is
+/// computed from the scope and never taken as declared: the caller may ask for `low` and gets it only
+/// when the scope can not meet a hold path. `guarded` raises `min_trust` to 2. A tier 0 order needs risk
+/// low and size small. Returns plain notes for what the hub changed on its own.
+pub fn settle_order_fields(
+    row: &mut TaskRow,
+    body: &Value,
+    hold_paths: &[String],
+) -> Result<Vec<String>, String> {
+    let mut notes = Vec::new();
+    let asked = str_field(body, "risk").filter(|s| !s.is_empty());
+    if let Some(a) = &asked
+        && !risk::is_risk(a)
+    {
+        return Err(format!("risk must be low, normal or guarded, not `{a}`"));
+    }
+    if let Some(n) = body.get("min_trust")
+        && !n.as_u64().is_some_and(|n| n <= 3)
+    {
+        return Err("min_trust must be a number from 0 to 3".into());
+    }
+    if let Some(c) = str_field(body, "credit")
+        && !matches!(c.as_str(), "handle" | "none")
+    {
+        return Err(format!("credit must be handle or none, not `{c}`"));
+    }
+    let met = risk::met_hold_paths(&row.scope, hold_paths);
+    let guarded = !met.is_empty() || asked.as_deref() == Some("guarded");
+    if asked.as_deref() == Some("low") && !met.is_empty() {
+        return Err(format!(
+            "risk low refused: the scope can meet the hold path `{}`, so the order is guarded",
+            met[0]
+        ));
+    }
+    row.risk = if guarded {
+        "guarded".into()
+    } else if asked.as_deref() == Some("low") {
+        "low".into()
+    } else {
+        "normal".into()
+    };
+    if row.min_trust == 0 && (row.risk != "low" || !risk::size_is_small(&row.size)) {
+        let why = if row.risk != "low" {
+            format!("its risk is {}", row.risk)
+        } else {
+            "its size is not small".into()
+        };
+        return Err(format!(
+            "min_trust 0 refused: a tier 0 order needs risk low and size small, and {why}"
+        ));
+    }
+    if row.risk == "guarded" && row.min_trust < 2 {
+        row.min_trust = 2;
+        notes.push("guarded order: min_trust raised to 2".into());
+    }
+    Ok(notes)
+}
+
 fn require_orchestrator(ctx: &OpContext<'_>, op: &str) -> Result<(), String> {
     if !matches!(ctx.caller.role, Role::Orchestrator | Role::Hub) {
         return Err(format!("only an orchestrator may run `{op}`"));
@@ -389,6 +468,7 @@ pub fn on_op(
                 ..TaskRow::default()
             });
             merge_task_fields(&mut row, body);
+            let notes = settle_order_fields(&mut row, body, &risk::default_hold_paths())?;
             if !row.brief_sha256.is_empty()
                 && (row.brief_sha256.len() != 64
                     || !row.brief_sha256.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -439,6 +519,9 @@ pub fn on_op(
             let msg_id = ctx.emit(msg)?;
             out.insert("task".into(), json!(row));
             out.insert("msg_id".into(), json!(msg_id));
+            if !notes.is_empty() {
+                out.insert("notes".into(), json!(notes));
+            }
             Ok(out)
         }
         "task.list" => {

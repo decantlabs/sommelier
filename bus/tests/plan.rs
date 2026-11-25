@@ -152,6 +152,7 @@ fn drain_under_five_minutes_admits_nothing() {
             name: "hub-owner".into(),
             trust: "owner".into(),
             online: true,
+            tier: None,
         }],
         capacities: vec![PlanCapacity {
             owner: "hub-owner".into(),
@@ -186,6 +187,8 @@ fn drain_under_five_minutes_admits_nothing() {
             created_at: now,
             ready_at: now,
             closed_at: 0,
+            risk: "normal".into(),
+            min_trust: 2,
         }],
         meters: vec![meter],
         ..PlanStateInput::default()
@@ -231,16 +234,19 @@ fn determinism_byte_equal_across_100_shuffled_input_orders() {
                 name: "alpha".into(),
                 trust: "owner".into(),
                 online: true,
+                tier: None,
             },
             PlanMember {
                 name: "beta".into(),
                 trust: "owner".into(),
                 online: true,
+                tier: None,
             },
             PlanMember {
                 name: "guest-c".into(),
                 trust: "guest".into(),
                 online: true,
+                tier: None,
             },
         ],
         capacities: vec![
@@ -311,6 +317,8 @@ fn determinism_byte_equal_across_100_shuffled_input_orders() {
                 created_at: now - (i * 600),
                 ready_at: now - (i * 600),
                 closed_at: 0,
+                risk: "normal".into(),
+                min_trust: 2,
             })
             .collect(),
         offers: vec![PlanOffer {
@@ -374,6 +382,7 @@ fn invariant_violation_discards_all_actions_and_returns_only_alert() {
             name: "hub-owner".into(),
             trust: "owner".into(),
             online: true,
+            tier: None,
         }],
         capacities: vec![PlanCapacity {
             owner: "hub-owner".into(),
@@ -409,6 +418,8 @@ fn invariant_violation_discards_all_actions_and_returns_only_alert() {
                 created_at: now,
                 ready_at: now,
                 closed_at: 0,
+                risk: "normal".into(),
+                min_trust: 2,
             },
             PlanTask {
                 id: "t2".into(),
@@ -432,6 +443,8 @@ fn invariant_violation_discards_all_actions_and_returns_only_alert() {
                 created_at: now,
                 ready_at: now,
                 closed_at: 0,
+                risk: "normal".into(),
+                min_trust: 2,
             },
         ],
         ..PlanStateInput::default()

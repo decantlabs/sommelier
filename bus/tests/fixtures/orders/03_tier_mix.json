@@ -1,0 +1,243 @@
+{
+  "description": "Four members of tier 0 to 3 and orders of rising min_trust: each order goes to a member of enough tier.",
+  "expected_actions": [
+    {
+      "action": "lease",
+      "attempt": 1,
+      "class": "codex",
+      "est_cost": 750000.0,
+      "est_end_at": 1795602250,
+      "est_minutes_p90": 37.5,
+      "expires_at": 1795602700,
+      "machine": "box1",
+      "owner": "c1",
+      "pools": [
+        "codex.5h"
+      ],
+      "slot_key": "c1/box1/codex/1",
+      "task_id": "a-low"
+    },
+    {
+      "action": "lease",
+      "attempt": 1,
+      "class": "codex",
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "est_minutes_p90": 75.0,
+      "expires_at": 1795602700,
+      "machine": "box1",
+      "owner": "m3",
+      "pools": [
+        "codex.5h"
+      ],
+      "slot_key": "m3/box1/codex/1",
+      "task_id": "b-normal"
+    },
+    {
+      "action": "lease",
+      "attempt": 1,
+      "class": "codex",
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "est_minutes_p90": 75.0,
+      "expires_at": 1795602700,
+      "machine": "box1",
+      "owner": "t2",
+      "pools": [
+        "codex.5h"
+      ],
+      "slot_key": "t2/box1/codex/1",
+      "task_id": "c-guarded"
+    },
+    {
+      "action": "alert",
+      "code": "BACKLOG_LOW",
+      "data": {
+        "class": "codex",
+        "min_ready": 3,
+        "ready_tasks": 1
+      },
+      "key": "codex",
+      "severity": "info",
+      "text": "class codex has free admissible slots with only 1 ready tasks (min_ready 3)",
+      "to": "brain"
+    }
+  ],
+  "expected_wait_reasons": {
+    "d-trust3": "needs tier 3, this member is tier 0"
+  },
+  "name": "03_tier_mix",
+  "now": 1795600000,
+  "policy": {
+    "backlog_min_ready": 3,
+    "mode": "enforce"
+  },
+  "state": {
+    "capacities": [
+      {
+        "accepts": [
+          "fix"
+        ],
+        "class": "codex",
+        "machine": "box1",
+        "mode": "auto",
+        "owner": "n0",
+        "pools": [
+          "codex.5h"
+        ],
+        "useful_parallel": 1
+      },
+      {
+        "accepts": [
+          "fix"
+        ],
+        "class": "codex",
+        "machine": "box1",
+        "mode": "auto",
+        "owner": "c1",
+        "pools": [
+          "codex.5h"
+        ],
+        "useful_parallel": 1
+      },
+      {
+        "accepts": [
+          "fix"
+        ],
+        "class": "codex",
+        "machine": "box1",
+        "mode": "auto",
+        "owner": "t2",
+        "pools": [
+          "codex.5h"
+        ],
+        "useful_parallel": 1
+      },
+      {
+        "accepts": [
+          "fix"
+        ],
+        "class": "codex",
+        "machine": "box1",
+        "mode": "auto",
+        "owner": "no-tier",
+        "pools": [
+          "codex.5h"
+        ],
+        "useful_parallel": 1
+      },
+      {
+        "accepts": [
+          "fix"
+        ],
+        "class": "codex",
+        "machine": "box1",
+        "mode": "auto",
+        "owner": "m3",
+        "pools": [
+          "codex.5h"
+        ],
+        "useful_parallel": 1
+      }
+    ],
+    "members": [
+      {
+        "name": "n0",
+        "online": true,
+        "tier": 0,
+        "trust": "guest"
+      },
+      {
+        "name": "c1",
+        "online": true,
+        "tier": 1,
+        "trust": "guest"
+      },
+      {
+        "name": "t2",
+        "online": true,
+        "tier": 2,
+        "trust": "guest"
+      },
+      {
+        "name": "no-tier",
+        "online": true,
+        "tier": -1,
+        "trust": "guest"
+      },
+      {
+        "name": "m3",
+        "online": true,
+        "tier": 3,
+        "trust": "owner"
+      }
+    ],
+    "tasks": [
+      {
+        "accepts": [
+          "codex"
+        ],
+        "done_when": "tests pass",
+        "id": "a-low",
+        "kind": "fix",
+        "min_trust": 0,
+        "priority": "normal",
+        "ready_at": 1795600000,
+        "risk": "low",
+        "scope": "src/a-low/*",
+        "size": 0.5,
+        "state": "ready",
+        "title": "a-low"
+      },
+      {
+        "accepts": [
+          "codex"
+        ],
+        "done_when": "tests pass",
+        "id": "b-normal",
+        "kind": "fix",
+        "min_trust": 1,
+        "priority": "normal",
+        "ready_at": 1795600000,
+        "risk": "normal",
+        "scope": "src/b-normal/*",
+        "size": 1.0,
+        "state": "ready",
+        "title": "b-normal"
+      },
+      {
+        "accepts": [
+          "codex"
+        ],
+        "done_when": "tests pass",
+        "id": "c-guarded",
+        "kind": "fix",
+        "min_trust": 2,
+        "priority": "normal",
+        "ready_at": 1795600000,
+        "risk": "guarded",
+        "scope": "src/c-guarded/*",
+        "size": 1.0,
+        "state": "ready",
+        "title": "c-guarded"
+      },
+      {
+        "accepts": [
+          "codex"
+        ],
+        "done_when": "tests pass",
+        "id": "d-trust3",
+        "kind": "fix",
+        "min_trust": 3,
+        "priority": "normal",
+        "ready_at": 1795600000,
+        "risk": "normal",
+        "scope": "src/d-trust3/*",
+        "size": 1.0,
+        "state": "ready",
+        "title": "d-trust3"
+      }
+    ],
+    "tier0_coding": true
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "description": "A token member whose tier is not given counts as tier 2 and is scheduled as before.",
+  "expected_actions": [
+    {
+      "action": "lease",
+      "attempt": 1,
+      "class": "codex",
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "est_minutes_p90": 75.0,
+      "expires_at": 1795602700,
+      "machine": "box1",
+      "owner": "tok",
+      "pools": [
+        "codex.5h"
+      ],
+      "slot_key": "tok/box1/codex/1",
+      "task_id": "a"
+    },
+    {
+      "action": "lease",
+      "attempt": 1,
+      "class": "codex",
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "est_minutes_p90": 75.0,
+      "expires_at": 1795602700,
+      "machine": "box1",
+      "owner": "tok",
+      "pools": [
+        "codex.5h"
+      ],
+      "slot_key": "tok/box1/codex/2",
+      "task_id": "b"
+    }
+  ],
+  "expected_wait_reasons": {},
+  "name": "04_old_member_without_tier",
+  "now": 1795600000,
+  "policy": {
+    "backlog_min_ready": 3,
+    "mode": "enforce"
+  },
+  "state": {
+    "capacities": [
+      {
+        "accepts": [
+          "fix"
+        ],
+        "class": "codex",
+        "machine": "box1",
+        "mode": "auto",
+        "owner": "tok",
+        "pools": [
+          "codex.5h"
+        ],
+        "useful_parallel": 2
+      }
+    ],
+    "members": [
+      {
+        "name": "tok",
+        "online": true,
+        "trust": "guest"
+      }
+    ],
+    "tasks": [
+      {
+        "accepts": [
+          "codex"
+        ],
+        "done_when": "tests pass",
+        "id": "a",
+        "kind": "fix",
+        "min_trust": 2,
+        "priority": "normal",
+        "ready_at": 1795600000,
+        "risk": "normal",
+        "scope": "src/a/*",
+        "size": 1.0,
+        "state": "ready",
+        "title": "a"
+      },
+      {
+        "accepts": [
+          "codex"
+        ],
+        "done_when": "tests pass",
+        "id": "b",
+        "kind": "fix",
+        "min_trust": 2,
+        "priority": "normal",
+        "ready_at": 1795600000,
+        "risk": "guarded",
+        "scope": "src/b/*",
+        "size": 1.0,
+        "state": "ready",
+        "title": "b"
+      }
+    ]
+  }
+}

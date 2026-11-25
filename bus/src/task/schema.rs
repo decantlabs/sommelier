@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Names of the four task-queue tables owned by `TaskModule` (section 3, 10.3).
-pub const TASK_TABLES: [&str; 4] = ["TASK", "LEASE", "OFFER", "CHECKPOINT"];
+pub const TASK_TABLES: [&str; 5] = ["TASK", "LEASE", "OFFER", "CHECKPOINT", "TASK_ORDER"];
 
 /// SQLite DDL for `TASK`, `LEASE`, `OFFER`, and `CHECKPOINT` in `state.db`.
 pub const TASK_SCHEMA_SQL: &str = "\
@@ -40,6 +40,16 @@ CREATE TABLE IF NOT EXISTS TASK (
     ready_at INTEGER NOT NULL DEFAULT 0,
     closed_at INTEGER NOT NULL DEFAULT 0,
     msg_id INTEGER NOT NULL DEFAULT 0
+);
+
+-- The order fields of the factory (docs/factory.md section 6). They sit in their own table so that
+-- a state.db made before them opens unchanged: a task without a row here is risk normal, min_trust 2.
+CREATE TABLE IF NOT EXISTS TASK_ORDER (
+    task_id TEXT PRIMARY KEY,
+    risk TEXT NOT NULL DEFAULT 'normal',
+    min_trust INTEGER NOT NULL DEFAULT 2,
+    review TEXT NOT NULL DEFAULT 'default',
+    credit TEXT NOT NULL DEFAULT 'handle'
 );
 
 CREATE TABLE IF NOT EXISTS LEASE (
@@ -122,6 +132,36 @@ pub struct TaskRow {
     pub ready_at: u64,
     pub closed_at: u64,
     pub msg_id: u64,
+    /// `low`, `normal` or `guarded`. Computed at `task add` from the scope.
+    #[serde(default = "default_risk")]
+    pub risk: String,
+    /// Lowest tier (0 to 3) that may lease the order.
+    #[serde(default = "default_min_trust")]
+    pub min_trust: u8,
+    /// Name of the review rule of the policy.
+    #[serde(default = "default_review")]
+    pub review: String,
+    /// How the commit names the member: `handle` or `none`.
+    #[serde(default = "default_credit")]
+    pub credit: String,
+}
+
+pub const DEFAULT_RISK: &str = "normal";
+pub const DEFAULT_MIN_TRUST: u8 = 2;
+pub const DEFAULT_REVIEW: &str = "default";
+pub const DEFAULT_CREDIT: &str = "handle";
+
+fn default_risk() -> String {
+    DEFAULT_RISK.into()
+}
+fn default_min_trust() -> u8 {
+    DEFAULT_MIN_TRUST
+}
+fn default_review() -> String {
+    DEFAULT_REVIEW.into()
+}
+fn default_credit() -> String {
+    DEFAULT_CREDIT.into()
 }
 
 impl Default for TaskRow {
@@ -157,6 +197,10 @@ impl Default for TaskRow {
             ready_at: 0,
             closed_at: 0,
             msg_id: 0,
+            risk: default_risk(),
+            min_trust: default_min_trust(),
+            review: default_review(),
+            credit: default_credit(),
         }
     }
 }
@@ -291,6 +335,72 @@ pub fn upsert_task_tx(tx: &Transaction<'_>, row: &TaskRow) -> Result<(), String>
         ],
     )
     .map_err(|e| format!("upsert TASK failed: {e}"))?;
+    tx.execute(
+        "INSERT INTO TASK_ORDER (task_id, risk, min_trust, review, credit)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(task_id) DO UPDATE SET
+            risk = excluded.risk,
+            min_trust = excluded.min_trust,
+            review = excluded.review,
+            credit = excluded.credit",
+        params![
+            row.id,
+            row.risk,
+            i64::from(row.min_trust),
+            row.review,
+            row.credit
+        ],
+    )
+    .map_err(|e| format!("upsert TASK_ORDER failed: {e}"))?;
+    Ok(())
+}
+
+/// `(risk, min_trust, review, credit)` of one task in `TASK_ORDER`.
+type OrderFields = (String, u8, String, String);
+
+/// Reads the order fields of every task that has a row, keyed by task id.
+fn order_fields(
+    conn: &Connection,
+    only: Option<&str>,
+) -> Result<std::collections::BTreeMap<String, OrderFields>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT task_id, risk, min_trust, review, credit FROM TASK_ORDER
+             WHERE ?1 IS NULL OR task_id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![only], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?.clamp(0, 3) as u8,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ),
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let (id, v) = row.map_err(|e| e.to_string())?;
+        out.insert(id, v);
+    }
+    Ok(out)
+}
+
+/// Puts the order fields of the side table into rows read from `TASK`.
+fn fill_orders(conn: &Connection, rows: &mut [TaskRow], only: Option<&str>) -> Result<(), String> {
+    let mut fields = order_fields(conn, only)?;
+    for row in rows {
+        if let Some((risk, min_trust, review, credit)) = fields.remove(&row.id) {
+            row.risk = risk;
+            row.min_trust = min_trust;
+            row.review = review;
+            row.credit = credit;
+        }
+    }
     Ok(())
 }
 
@@ -440,6 +550,10 @@ fn task_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         ready_at: r.get::<_, i64>(27)?.max(0) as u64,
         closed_at: r.get::<_, i64>(28)?.max(0) as u64,
         msg_id: r.get::<_, i64>(29)?.max(0) as u64,
+        risk: default_risk(),
+        min_trust: default_min_trust(),
+        review: default_review(),
+        credit: default_credit(),
     })
 }
 
@@ -459,22 +573,30 @@ pub fn query_tasks(conn: &Connection) -> Result<Vec<TaskRow>, String> {
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    let mut rows = rows;
+    fill_orders(conn, &mut rows, None)?;
     Ok(rows)
 }
 
 pub fn query_task(conn: &Connection, id: &str) -> Result<Option<TaskRow>, String> {
-    conn.query_row(
-        "SELECT id, title, kind, priority, state, track, scope, accepts, min_tier,
+    let row = conn
+        .query_row(
+            "SELECT id, title, kind, priority, state, track, scope, accepts, min_tier,
                 branch, base_sha, brief_sha256, deps, size, checkpointable,
                 attempt, max_attempts, resume_note, resume_sha, wip_ref,
                 exclude_pools_until, prior_art, done_when, result_ref, result_sha,
                 created_by, created_at, ready_at, closed_at, msg_id
          FROM TASK WHERE id = ?1",
-        params![id],
-        task_from_row,
-    )
-    .optional()
-    .map_err(|e| e.to_string())
+            params![id],
+            task_from_row,
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(mut row) = row else {
+        return Ok(None);
+    };
+    fill_orders(conn, std::slice::from_mut(&mut row), Some(id))?;
+    Ok(Some(row))
 }
 
 fn lease_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LeaseRow> {

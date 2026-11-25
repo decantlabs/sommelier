@@ -1,0 +1,120 @@
+{
+  "description": "With tier0_coding on, a tier 0 slot takes only low risk small orders.",
+  "expected_actions": [
+    {
+      "action": "lease",
+      "attempt": 1,
+      "class": "codex",
+      "est_cost": 750000.0,
+      "est_end_at": 1795602250,
+      "est_minutes_p90": 37.5,
+      "expires_at": 1795602700,
+      "machine": "box1",
+      "owner": "newbie",
+      "pools": [
+        "codex.5h"
+      ],
+      "slot_key": "newbie/box1/codex/1",
+      "task_id": "a-low-small"
+    },
+    {
+      "action": "alert",
+      "code": "BACKLOG_LOW",
+      "data": {
+        "class": "codex",
+        "min_ready": 3,
+        "ready_tasks": 2
+      },
+      "key": "codex",
+      "severity": "info",
+      "text": "class codex has free admissible slots with only 2 ready tasks (min_ready 3)",
+      "to": "brain"
+    }
+  ],
+  "expected_wait_reasons": {
+    "b-normal": "needs tier 1, this member is tier 0",
+    "c-big": "tier 0 members get only low risk orders of small size"
+  },
+  "name": "02_tier0_switch_on",
+  "now": 1795600000,
+  "policy": {
+    "backlog_min_ready": 3,
+    "mode": "enforce"
+  },
+  "state": {
+    "capacities": [
+      {
+        "accepts": [
+          "fix"
+        ],
+        "class": "codex",
+        "machine": "box1",
+        "mode": "auto",
+        "owner": "newbie",
+        "pools": [
+          "codex.5h"
+        ],
+        "useful_parallel": 3
+      }
+    ],
+    "members": [
+      {
+        "name": "newbie",
+        "online": true,
+        "tier": 0,
+        "trust": "guest"
+      }
+    ],
+    "tasks": [
+      {
+        "accepts": [
+          "codex"
+        ],
+        "done_when": "tests pass",
+        "id": "a-low-small",
+        "kind": "fix",
+        "min_trust": 0,
+        "priority": "normal",
+        "ready_at": 1795600000,
+        "risk": "low",
+        "scope": "src/a-low-small/*",
+        "size": 0.5,
+        "state": "ready",
+        "title": "a-low-small"
+      },
+      {
+        "accepts": [
+          "codex"
+        ],
+        "done_when": "tests pass",
+        "id": "b-normal",
+        "kind": "fix",
+        "min_trust": 1,
+        "priority": "normal",
+        "ready_at": 1795600000,
+        "risk": "normal",
+        "scope": "src/b-normal/*",
+        "size": 0.5,
+        "state": "ready",
+        "title": "b-normal"
+      },
+      {
+        "accepts": [
+          "codex"
+        ],
+        "done_when": "tests pass",
+        "id": "c-big",
+        "kind": "fix",
+        "min_trust": 0,
+        "priority": "normal",
+        "ready_at": 1795600000,
+        "risk": "low",
+        "scope": "src/c-big/*",
+        "size": 2.0,
+        "state": "ready",
+        "title": "c-big"
+      }
+    ],
+    "tier0_coding": true
+  }
+}

@@ -22,7 +22,7 @@ use crate::quota::forecast::{ActiveLease, forecast, pool_state};
 use crate::quota::meter::PoolState;
 use crate::task::scopes_overlap;
 
-use super::assign::{AssignContext, resolve_estimate};
+use super::assign::{AssignContext, resolve_estimate, tier_block};
 use super::{
     PauseScope, PlanAction, PlanMode, PlanPolicy, PlanState, deps_closed, has_required_fields,
 };
@@ -129,6 +129,14 @@ pub fn check_invariants(
                         message: format!("offer for {task_id} violates active pause"),
                     });
                 }
+                if let Some(task) = state.tasks.get(task_id)
+                    && let Some(why) = tier_block(state, task, to_owner)
+                {
+                    violations.push(InvariantViolation {
+                        code: "BELOW_MIN_TRUST".into(),
+                        message: format!("offer of {task_id} to {to_owner}: {why}"),
+                    });
+                }
             }
             PlanAction::Lease {
                 task_id,
@@ -194,6 +202,14 @@ pub fn check_invariants(
                     violations.push(InvariantViolation {
                         code: "UNCLOSED_DEPS".into(),
                         message: format!("task {task_id} has unclosed dependencies"),
+                    });
+                }
+
+                // 1b. No lease below the tier the order asks for.
+                if let Some(why) = tier_block(state, task, owner) {
+                    violations.push(InvariantViolation {
+                        code: "BELOW_MIN_TRUST".into(),
+                        message: format!("lease of {task_id} to {owner}: {why}"),
                     });
                 }
 
