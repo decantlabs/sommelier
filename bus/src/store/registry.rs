@@ -17,7 +17,7 @@ use super::replay::read_log_messages;
 
 /// Trait implemented by every projection module registered with the store.
 pub trait StoreModule: Send + Sync {
-    /// Short identifier of the module (`"core"`, `"task"`, `"quota"`, `"land"`, `"regress"`, `"role"`).
+    /// Short identifier of the module (`"core"`, `"task"`, `"quota"`, `"land"`, `"regress"`, `"role"`, `"key"`, `"stamp"`, `"review"`, `"report"`).
     fn name(&self) -> &'static str;
 
     /// SQL DDL statements (`CREATE TABLE IF NOT EXISTS ...`) owned by this module.
@@ -58,6 +58,10 @@ impl ModuleRegistry {
                 Box::new(crate::regress::RegressModule::new()),
                 Box::new(crate::plan::PlanModule),
                 Box::new(crate::role::eligible::RoleStoreModule),
+                Box::new(crate::key::KeyModule),
+                Box::new(crate::stamp::StampModule),
+                Box::new(crate::review::ReviewModule),
+                Box::new(crate::report::ReportModule),
             ],
         }
     }

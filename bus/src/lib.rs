@@ -16,15 +16,18 @@
 
 pub mod agent;
 pub mod brief;
+pub mod bundle;
 pub mod claims;
 pub mod cli;
 pub mod client;
 pub mod derive;
 pub mod exit;
+pub mod gate;
 pub mod guide;
 pub mod ha;
 pub mod hooks;
 pub mod hub;
+pub mod key;
 pub mod land;
 pub mod msg;
 pub mod plan;
@@ -32,12 +35,17 @@ pub mod policy;
 pub mod proto;
 pub mod quota;
 pub mod regress;
+pub mod report;
+pub mod review;
 pub mod role;
 pub mod roster;
+pub mod stamp;
 pub mod store;
 pub mod task;
+pub mod tester;
 pub mod time;
 pub mod tokens;
+pub mod verify;
 pub mod web;
 
 /// Default port of the hub.
