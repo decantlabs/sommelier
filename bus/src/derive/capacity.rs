@@ -30,6 +30,15 @@ impl CapacityMode {
     }
 }
 
+/// Most slots one class may declare, for every sender. Larger numbers are cut to this.
+pub const MAX_CLASS_SLOTS: u32 = 64;
+
+/// Most classes one declaration keeps.
+pub const MAX_CLASSES: usize = 16;
+
+/// Most slots all classes of one declaration may hold together.
+pub const MAX_TOTAL_SLOTS: u32 = 256;
+
 /// Capacity declared by a member in a HELLO body or refs.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloCapacity {
@@ -47,7 +56,23 @@ pub struct HelloCapacity {
 
 impl HelloCapacity {
     pub fn total_slots(&self) -> u32 {
-        self.classes.values().sum()
+        self.classes
+            .values()
+            .fold(0u32, |a, &n| a.saturating_add(n))
+    }
+
+    /// Cuts every count to [`MAX_CLASS_SLOTS`], the classes to [`MAX_CLASSES`] and the total to
+    /// [`MAX_TOTAL_SLOTS`], so no declaration can make the hub build a huge list of slots.
+    fn clamp(&mut self) {
+        self.gpu_slots = self.gpu_slots.min(MAX_CLASS_SLOTS);
+        while self.classes.len() > MAX_CLASSES {
+            self.classes.pop_last();
+        }
+        let mut left = MAX_TOTAL_SLOTS;
+        for n in self.classes.values_mut() {
+            *n = (*n).min(MAX_CLASS_SLOTS).min(left);
+            left -= *n;
+        }
     }
 }
 
@@ -72,6 +97,7 @@ pub fn parse_hello_capacity(body: &str, refs: &[String], ts_ms: u64) -> HelloCap
             apply_kv(&mut cap, &k.trim().to_ascii_lowercase(), v.trim());
         }
     }
+    cap.clamp();
     cap
 }
 

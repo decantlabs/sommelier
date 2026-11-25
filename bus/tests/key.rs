@@ -158,7 +158,8 @@ async fn joining_is_refused_while_it_is_disabled() {
     let hub = start(|c| c.join = JoinRules::default()).await;
     assert!(!JoinRules::default().enabled);
     let key = MemberKey::generate().unwrap();
-    let n = nonce(&hub.url).await;
+    // No challenge is served while joining is off, so a nonce of another hub stands in.
+    let n = "0".repeat(80);
     let (code, v) = post_join(&hub.url, &join_body(&key, &n, "bob", 20)).await;
     assert_eq!(code, 403, "{v}");
     assert!(v["error"].as_str().unwrap().contains("switched off"), "{v}");
@@ -320,19 +321,19 @@ async fn a_key_member_connects_as_tier_0() {
 }
 
 #[tokio::test]
-async fn tier_0_may_say_hello_and_nothing_more() {
+async fn tier_0_may_not_say_hello_and_nothing_more() {
     let hub = start(|_| {}).await;
     let dir = client_dir();
     kc::join(&hub.url, dir.path(), None).await.unwrap();
     let opts = opts_of(&hub, dir.path());
 
-    let ok = client::request_ok(
+    // HELLO is no longer a tier 0 kind (a key member sends typed requests only).
+    let e = refused(
         &opts,
         json!({"op": "send", "kind": "HELLO", "body": "machine=box os=linux"}),
     )
-    .await
-    .unwrap();
-    assert!(ok["id"].as_u64().is_some());
+    .await;
+    assert!(e.contains("tier 0") && e.contains("HELLO"), "{e}");
     for op in ["heartbeat", "claims", "who", "roster"] {
         client::request_ok(&opts, json!({"op": op})).await.unwrap();
     }
@@ -537,12 +538,9 @@ async fn no_network_address_reaches_the_log_or_the_state() {
     whoami(&opts_of(&hub, dir.path())).await.unwrap();
     kc::rotate(&hub.url, dir.path()).await.unwrap();
     let opts = opts_of(&hub, dir.path());
-    client::request_ok(
-        &opts,
-        json!({"op": "send", "kind": "HELLO", "body": "machine=box"}),
-    )
-    .await
-    .unwrap();
+    client::request_ok(&opts, json!({"op": "heartbeat"}))
+        .await
+        .unwrap();
 
     let (_, state) = get(
         &hub.url,

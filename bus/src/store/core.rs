@@ -6,6 +6,7 @@ use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::derive::capacity::{MAX_CLASS_SLOTS, MAX_CLASSES};
 use crate::derive::parse_hello_capacity;
 use crate::msg::{Kind, Message, Role};
 use crate::time::parse_ms;
@@ -125,6 +126,23 @@ pub struct MetaRow {
     pub msg_id: u64,
 }
 
+/// Trust of a key member: it is no token guest and never a candidate for work.
+pub const KEY_MEMBER_TRUST: &str = crate::key::ops::TRUST;
+
+/// True when `name` is a member id that the KEY table knows. A store without that table (a
+/// core only test database) knows no key member.
+fn is_key_member(tx: &Transaction<'_>, name: &str) -> bool {
+    crate::key::crypto::is_member_id(name)
+        && tx
+            .query_row(
+                r#"SELECT COUNT(*) FROM "KEY" WHERE member = ?1"#,
+                params![name],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0
+}
+
 fn role_trust(role: Role) -> &'static str {
     match role {
         Role::Orchestrator | Role::Hub => "owner",
@@ -141,7 +159,11 @@ pub fn apply_core_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
 
     if msg.role != Role::Hub && !msg.from.is_empty() {
         let role_s = msg.role.as_str();
-        let trust_s = role_trust(msg.role);
+        let trust_s = if is_key_member(tx, &msg.from) {
+            KEY_MEMBER_TRUST
+        } else {
+            role_trust(msg.role)
+        };
         if msg.kind == Kind::Status {
             tx.execute(
                 "INSERT INTO MEMBER (name, role, trust, online, last_seen_at, msg_id)
@@ -169,6 +191,13 @@ pub fn apply_core_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
         }
     }
 
+    // A key member declares no machine and no capacity: old lines in a log change nothing.
+    let capacity_line =
+        msg.kind == Kind::Hello || (msg.kind == Kind::Fact && msg.topic.starts_with("capacity/"));
+    if capacity_line && (is_key_member(tx, &msg.from) || topic_owner_is_key(tx, msg)) {
+        return Ok(());
+    }
+
     match msg.kind {
         Kind::Hello => {
             apply_hello_or_capacity(
@@ -194,6 +223,14 @@ pub fn apply_core_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
     }
 
     Ok(())
+}
+
+/// True for a `capacity/<owner>/...` FACT that names a key member as the owner.
+fn topic_owner_is_key(tx: &Transaction<'_>, msg: &Message) -> bool {
+    msg.topic
+        .strip_prefix("capacity/")
+        .and_then(|rest| rest.split('/').next())
+        .is_some_and(|owner| is_key_member(tx, owner))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -348,7 +385,10 @@ fn apply_capacity_fact(
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| infer_machine_class(os, gpu));
-        let gpu_slots = v["gpu_slots"].as_u64().unwrap_or(0) as i64;
+        let gpu_slots = v["gpu_slots"]
+            .as_u64()
+            .unwrap_or(0)
+            .min(u64::from(MAX_CLASS_SLOTS)) as i64;
         let disk_free_gb = v["disk_free_gb"].as_u64().unwrap_or(0) as i64;
         let agent_version = v["agent_version"].as_str().unwrap_or("");
         let policy_hash = v["policy_hash"].as_str().unwrap_or("");
@@ -399,7 +439,10 @@ fn apply_capacity_fact(
         };
 
         if let Some(cls) = v["class"].as_str() {
-            let useful_parallel = v["useful_parallel"].as_u64().unwrap_or(1) as i64;
+            let useful_parallel = v["useful_parallel"]
+                .as_u64()
+                .unwrap_or(1)
+                .min(u64::from(MAX_CLASS_SLOTS)) as i64;
             let pools_json = default_pools_json.unwrap_or_else(|| {
                 serde_json::to_string(&default_pools_for_class(cls)).unwrap_or_else(|_| "[]".into())
             });
@@ -433,8 +476,11 @@ fn apply_capacity_fact(
                 params![owner, machine],
             )
             .map_err(|e| e.to_string())?;
-            for (cls, count_v) in classes_obj {
-                let useful_parallel = count_v.as_u64().unwrap_or(0) as i64;
+            for (cls, count_v) in classes_obj.iter().take(MAX_CLASSES) {
+                let useful_parallel = count_v
+                    .as_u64()
+                    .unwrap_or(0)
+                    .min(u64::from(MAX_CLASS_SLOTS)) as i64;
                 let pools_json = default_pools_json.clone().unwrap_or_else(|| {
                     serde_json::to_string(&default_pools_for_class(cls))
                         .unwrap_or_else(|_| "[]".into())

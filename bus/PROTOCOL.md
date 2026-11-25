@@ -365,8 +365,16 @@ FIRST public key of the member. A rotation does not change it.
 in every object and without the field `sig`. Keys and signatures travel as base64url without padding.
 
 **`GET /api/challenge`** (no authentication) answers `{"hub_id", "nonce", "expires", "pow_bits"}`. A nonce is
-random, lives 60 seconds, is kept in memory and is used once. `hub_id` is a random id that the hub keeps in its
-data folder.
+80 hex characters: its expiry time, a random part and an HMAC of both under a secret of the hub (the file
+`challenge_secret` in the data folder, never logged or sent). It lives 60 seconds and is used once. The hub keeps
+nothing for a nonce it hands out, only the nonces that were USED until they expire, and only after a valid
+signature, so a flood of challenges fills nothing. `hub_id` is a random id that the hub keeps in its data folder.
+A client pins the `hub_id` per hub address in `member.hubs` beside its key file at the first join or sign in and
+refuses an answer with another id. To accept a moved hub on purpose, delete the line of that address in the file.
+
+**Joining off means off.** While joining is off (the default) the hub serves no challenge (`GET /api/challenge`
+answers 403), refuses `POST /api/join` with 403 and accepts no key sign in, also not for keys that joined earlier.
+A hub with joining off behaves as before the key feature. Bearer tokens are not affected.
 
 **`POST /api/join`** (no authentication) takes `{"pub", "handle", "nonce", "counter", "sig"}`:
 
@@ -374,6 +382,7 @@ data folder.
 * The proof of work: SHA 256 over the nonce text, the public key bytes and `counter` (8 bytes, big endian)
   must start with `pow_bits` zero bits.
 * `sig` signs the other four fields.
+* A client refuses a `pow_bits` above 40 and a member id in the answer that is not the one its key makes.
 
 The hub refuses with 403 while joining is off and with 400 for a bad handle, signature, proof of work or a
 nonce that is unknown, used or expired. A good join writes ONE message: a FACT from `hub` with topic
@@ -393,15 +402,18 @@ from `/api/challenge` and is used once, so a replayed header is refused with 401
 and the signature must match its current public key. Observer style tokens in the URL are not available for
 keys. `whoami` of a key member also answers `"tier": 0`.
 
-**Tier 0 may send only** `whoami`, `heartbeat`, `log`, `roster`, `who`, `claims`, the message kind `HELLO`
-and the two key requests below. Everything else (other kinds, `idle`, every module op such as `task.add`) is
+**Tier 0 may send only** `whoami`, `heartbeat`, `log`, `roster`, `who`, `claims` and the two key requests below
+(and the typed requests that later phases add to `key::TIER0_ALLOWED`). A key member sends no message kind, in
+particular no `HELLO`. It has the trust `tier0` in the MEMBER table, never a CAPACITY, MACHINE or ROLE_HELLO row,
+and no slot or lease. Slot counts of every HELLO are cut to 64 per class, 16 classes and 256 in all. Everything else (other kinds, `idle`, every module op such as `task.add`) is
 refused with one line that names the tier, for example `tier 0 may not use the message kind CHAT: a new key may
 only use ...`. The list is `key::TIER0_ALLOWED`, later phases extend it. Token members keep their rights.
 
 **`key.rotate`** (module op, key members only): `{"op":"key.rotate","new_pub","sig"}`. `sig` is the signature
 of the CURRENT key over `{"member","new_pub","old_pub","op":"key.rotate"}`. The hub writes a FACT `key/<member>`
 with the same fields as a join plus `"op":"rotate"`, `"prev"` (the old key) and `"sig"`. The old key is refused
-from then on and its open connections close.
+from then on and its open connections close. The client keeps the new key in `member.key.next` until the hub
+confirms it. When the answer is lost, the next sign in tries that key and replaces `member.key` when the hub takes it.
 
 **`key.revoke`** (module op): a key member sends `{"op":"key.revoke","reason","sig"}` where `sig` signs
 `{"member","op":"key.revoke","pub","reason"}` with its own key. An orchestrator token sends

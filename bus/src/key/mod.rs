@@ -16,21 +16,20 @@ pub mod crypto;
 pub mod join;
 pub mod ops;
 
-pub use book::{KeyBook, KeyModule, KeyState};
+pub use book::{KeyBook, KeyModule, KeyState, Standing};
 pub use crypto::{MemberKey, member_id, sign_request, verify_request};
 pub use join::{Challenges, JoinRules};
 pub use ops::on_op;
 
 /// What a tier 0 member may use, in ONE place. Operations are lower case request names, message
 /// kinds are upper case. Later phases extend this list.
-pub const TIER0_ALLOWED: [&str; 12] = [
+pub const TIER0_ALLOWED: [&str; 11] = [
     "whoami",
     "heartbeat",
     "log",
     "roster",
     "who",
     "claims",
-    "HELLO",
     "key.rotate",
     "key.revoke",
     "submit.status",
@@ -39,7 +38,7 @@ pub const TIER0_ALLOWED: [&str; 12] = [
 ];
 
 /// True when a tier 0 member may use the request `op` (such as `whoami` or `task.add`) or send
-/// the message kind (such as `HELLO` or `CHAT`).
+/// the message kind (such as `CHAT`).
 pub fn tier0_allows(op_or_kind: &str) -> bool {
     TIER0_ALLOWED.contains(&op_or_kind)
 }
@@ -58,20 +57,12 @@ mod tests {
 
     #[test]
     fn tier0_list_is_the_one_place() {
-        for ok in [
-            "whoami",
-            "heartbeat",
-            "log",
-            "roster",
-            "who",
-            "claims",
-            "HELLO",
-        ] {
+        for ok in ["whoami", "heartbeat", "log", "roster", "who", "claims"] {
             assert!(tier0_allows(ok), "{ok}");
         }
         assert!(tier0_allows("key.rotate") && tier0_allows("key.revoke"));
         for no in [
-            "CHAT", "READY", "CLAIM", "TASK", "task.add", "idle", "send", "hello",
+            "CHAT", "READY", "CLAIM", "TASK", "task.add", "idle", "send", "hello", "HELLO",
         ] {
             assert!(!tier0_allows(no), "{no}");
         }
