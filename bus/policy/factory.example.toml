@@ -1,0 +1,95 @@
+version = 1
+min_client = "0.1.0"
+grace_min = 15
+mode = "off"
+
+[timers]
+lease_min = 45
+poll_min = 15
+gone_min = 45
+offer_min = 5
+status_fresh_min = 20
+
+[class.claude_top]
+cap_per_owner = 1
+spawn = false
+
+[class.claude_strong]
+cap_per_owner = 2
+effort = "medium"
+budget = { meter = "claude_week", stop_at = 80 }
+
+[class.claude_cheap]
+
+[class.codex]
+cap_per_owner = 0
+
+[class.gemini]
+cap_per_owner = 4
+cap_per_family = 2
+quota_pause_min = 30
+
+[class.game_run]
+cap_per_machine = 1
+lock = "game"
+priority = "normal"
+
+[class.local_build]
+cap_per_machine = 3
+priority = "below_normal"
+
+[trust.guest]
+may_claim = ["fix", "review", "run", "scout"]
+hold_paths = ["**/CLAUDE.md", "**/AGENTS.md", ".claude/**", "swarm/**", "**/build.rs", "Cargo.lock"]
+
+[kind.fix]
+required = ["scope", "branch", "done_when"]
+branch = "{class}/{task}"
+min_tier = "middle"
+checks = ["scope_touched", "full_tests", "pii_scan"]
+
+[priority]
+levels = { blocker = 100, high = 60, normal = 30, filler = 5 }
+aging_per_10min = 2
+aging_cap = 40
+
+# Public factory sections (docs/factory.md section 12). All of them are optional.
+[trust.tier0]
+leases = 1
+submissions_per_day = 4
+max_bundle_kib = 256
+verify_share = 0.20
+review_share = 0.20
+kinds = ["run", "fix", "port"]
+free_text = false
+
+[trust.tier1]
+reach = { landed = 5, run_agreed = 20, key_age_days = 7, reverted_for_cause = 0 }
+leases = 3
+
+[trust.tier2]
+reach = { landed = 25, review_confirmed = 20 }
+
+[join]
+enabled = false
+proof_of_work_bits = 22
+per_block_per_hour = 5
+
+[review.default]
+tier0_author = { reviewers = 1, min_tier = 2 }
+tier1_author = { reviewers = 1, min_tier = 1 }
+audit_share = 0.10
+other_family = "prefer"
+
+[verify]
+workflow = "factory-verify.yml"
+max_parallel = 16
+
+[test]
+quorum = 3
+candidate_min_tier = 2
+
+[switch]
+intake = "off"
+tier0_coding = "off"
+candidate_builds = "off"

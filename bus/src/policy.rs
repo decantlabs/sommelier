@@ -32,9 +32,98 @@ pub struct Policy {
     pub mode: Mode,
     timers: Timers,
     class: BTreeMap<String, Class>,
-    trust: BTreeMap<String, Trust>,
+    trust: TrustTable,
     kind: BTreeMap<String, Kind>,
     priority: Priority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    join: Option<JoinRules>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    review: BTreeMap<String, ReviewRules>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verify: Option<VerifyRules>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    test: Option<TestRules>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    switch: Option<Switches>,
+}
+
+impl Policy {
+    /// The settings of the public factory as one typed, read only view.
+    /// Sections that the file does not carry give their defaults, which mean "off" or the outline numbers.
+    pub fn factory(&self) -> FactoryRules {
+        let tier = |n: usize| {
+            self.trust.tiers[n]
+                .clone()
+                .unwrap_or_else(|| TierRules::for_tier(n))
+        };
+        FactoryRules {
+            join: self.join.clone().unwrap_or_default(),
+            tier0: tier(0),
+            tier1: tier(1),
+            tier2: tier(2),
+            review: self.review.clone(),
+            verify: self.verify.clone().unwrap_or_default(),
+            test: self.test.clone().unwrap_or_default(),
+            switch: self.switch.clone().unwrap_or_default(),
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        let share = |field: &str, value: f64| {
+            if (0.0..=1.0).contains(&value) {
+                Ok(())
+            } else {
+                Err(invalid(format!("policy {field} must be between 0 and 1")))
+            }
+        };
+        for (n, tier) in self.trust.tiers.iter().enumerate() {
+            if let Some(tier) = tier {
+                share(&format!("trust.tier{n}.verify_share"), tier.verify_share)?;
+                share(&format!("trust.tier{n}.review_share"), tier.review_share)?;
+            }
+        }
+        if let Some(join) = &self.join
+            && join.proof_of_work_bits > 32
+        {
+            return Err(invalid(
+                "policy join.proof_of_work_bits must be between 0 and 32",
+            ));
+        }
+        for (name, rule) in &self.review {
+            share(&format!("review.{name}.audit_share"), rule.audit_share)?;
+            for (author, side) in [
+                ("tier0_author", &rule.tier0_author),
+                ("tier1_author", &rule.tier1_author),
+            ] {
+                if side.reviewers < 1 {
+                    return Err(invalid(format!(
+                        "policy review.{name}.{author}.reviewers must be at least 1"
+                    )));
+                }
+                if side.min_tier > 3 {
+                    return Err(invalid(format!(
+                        "policy review.{name}.{author}.min_tier must be between 0 and 3"
+                    )));
+                }
+            }
+        }
+        if !self.review.is_empty() && !self.review.contains_key("default") {
+            return Err(invalid(
+                "policy review needs a rule named default when any review rule is given",
+            ));
+        }
+        if let Some(test) = &self.test {
+            if test.quorum < 1 {
+                return Err(invalid("policy test.quorum must be at least 1"));
+            }
+            if test.candidate_min_tier > 3 {
+                return Err(invalid(
+                    "policy test.candidate_min_tier must be between 0 and 3",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -103,6 +192,350 @@ struct Priority {
     aging_cap: u64,
 }
 
+/// The tier numbers a trust table can name. Tier 3 is named in the policy by the owner and has no table.
+const TIER_NAMES: [&str; 3] = ["tier0", "tier1", "tier2"];
+
+/// The `trust` table. Role tables (`may_claim`, `hold_paths`) and tier tables live side by side.
+/// Tier tables are only written back when the file carried them, so old files keep their hash.
+#[derive(Debug, Default)]
+struct TrustTable {
+    guests: BTreeMap<String, Trust>,
+    tiers: [Option<TierRules>; 3],
+}
+
+impl<'de> Deserialize<'de> for TrustTable {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let raw = BTreeMap::<String, Value>::deserialize(deserializer)?;
+        let mut table = Self::default();
+        for (name, value) in raw {
+            if let Some(n) = TIER_NAMES.iter().position(|t| *t == name) {
+                let patch: TierPatch = serde_json::from_value(value)
+                    .map_err(|e| D::Error::custom(format!("trust.{name}: {e}")))?;
+                table.tiers[n] = Some(patch.apply(TierRules::for_tier(n)));
+            } else {
+                let trust: Trust = serde_json::from_value(value)
+                    .map_err(|e| D::Error::custom(format!("trust.{name}: {e}")))?;
+                table.guests.insert(name, trust);
+            }
+        }
+        Ok(table)
+    }
+}
+
+impl Serialize for TrustTable {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        for (name, trust) in &self.guests {
+            map.serialize_entry(name, trust)?;
+        }
+        for (name, tier) in TIER_NAMES.iter().zip(&self.tiers) {
+            if let Some(tier) = tier {
+                map.serialize_entry(name, tier)?;
+            }
+        }
+        map.end()
+    }
+}
+
+/// What a tier needs to have earned: counts of stamps, the age of the key, the most reverts allowed.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Reach {
+    pub landed: u64,
+    pub run_agreed: u64,
+    pub review_confirmed: u64,
+    pub key_age_days: u64,
+    pub reverted_for_cause: u64,
+}
+
+/// Limits and rights of one tier (factory.md 5.1).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TierRules {
+    pub leases: u64,
+    pub submissions_per_day: u64,
+    pub max_bundle_kib: u64,
+    /// Share of verifier capacity for all keys of this tier together.
+    pub verify_share: f64,
+    /// Share of trusted review capacity for all keys of this tier together.
+    pub review_share: f64,
+    pub kinds: Vec<String>,
+    pub free_text: bool,
+    pub reach: Reach,
+}
+
+impl TierRules {
+    /// The defaults of tier `n`. Tier 0 and the reach of tier 1 and 2 are the numbers of the outline.
+    pub fn for_tier(n: usize) -> Self {
+        let kinds = |k: &[&str]| k.iter().map(|s| (*s).to_owned()).collect();
+        match n {
+            0 => Self {
+                leases: 1,
+                submissions_per_day: 4,
+                max_bundle_kib: 256,
+                verify_share: 0.20,
+                review_share: 0.20,
+                kinds: kinds(&["run", "fix", "port"]),
+                free_text: false,
+                reach: Reach::default(),
+            },
+            1 => Self {
+                leases: 3,
+                submissions_per_day: 20,
+                max_bundle_kib: 1024,
+                verify_share: 1.0,
+                review_share: 1.0,
+                kinds: kinds(&["run", "fix", "port", "review", "scout"]),
+                free_text: true,
+                reach: Reach {
+                    landed: 5,
+                    run_agreed: 20,
+                    review_confirmed: 0,
+                    key_age_days: 7,
+                    reverted_for_cause: 0,
+                },
+            },
+            _ => Self {
+                leases: 5,
+                submissions_per_day: 50,
+                max_bundle_kib: 4096,
+                verify_share: 1.0,
+                review_share: 1.0,
+                kinds: kinds(&["run", "fix", "port", "review", "scout", "draft"]),
+                free_text: true,
+                reach: Reach {
+                    landed: 25,
+                    run_agreed: 0,
+                    review_confirmed: 20,
+                    key_age_days: 7,
+                    reverted_for_cause: 0,
+                },
+            },
+        }
+    }
+}
+
+impl Default for TierRules {
+    fn default() -> Self {
+        Self::for_tier(0)
+    }
+}
+
+/// A tier table as written in a file. Missing keys keep the default of the tier.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TierPatch {
+    leases: Option<u64>,
+    submissions_per_day: Option<u64>,
+    max_bundle_kib: Option<u64>,
+    verify_share: Option<f64>,
+    review_share: Option<f64>,
+    kinds: Option<Vec<String>>,
+    free_text: Option<bool>,
+    reach: Option<ReachPatch>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReachPatch {
+    landed: Option<u64>,
+    run_agreed: Option<u64>,
+    review_confirmed: Option<u64>,
+    key_age_days: Option<u64>,
+    reverted_for_cause: Option<u64>,
+}
+
+impl TierPatch {
+    fn apply(self, mut base: TierRules) -> TierRules {
+        base.leases = self.leases.unwrap_or(base.leases);
+        base.submissions_per_day = self.submissions_per_day.unwrap_or(base.submissions_per_day);
+        base.max_bundle_kib = self.max_bundle_kib.unwrap_or(base.max_bundle_kib);
+        base.verify_share = self.verify_share.unwrap_or(base.verify_share);
+        base.review_share = self.review_share.unwrap_or(base.review_share);
+        base.kinds = self.kinds.unwrap_or(base.kinds);
+        base.free_text = self.free_text.unwrap_or(base.free_text);
+        if let Some(r) = self.reach {
+            base.reach = Reach {
+                landed: r.landed.unwrap_or(base.reach.landed),
+                run_agreed: r.run_agreed.unwrap_or(base.reach.run_agreed),
+                review_confirmed: r.review_confirmed.unwrap_or(base.reach.review_confirmed),
+                key_age_days: r.key_age_days.unwrap_or(base.reach.key_age_days),
+                reverted_for_cause: r
+                    .reverted_for_cause
+                    .unwrap_or(base.reach.reverted_for_cause),
+            };
+        }
+        base
+    }
+}
+
+/// The front door for new keys (`[join]`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct JoinRules {
+    pub enabled: bool,
+    pub proof_of_work_bits: u64,
+    pub per_block_per_hour: u64,
+}
+
+impl Default for JoinRules {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            proof_of_work_bits: 22,
+            per_block_per_hour: 5,
+        }
+    }
+}
+
+/// Who reviews the work of an author of one tier.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorRule {
+    pub reviewers: u64,
+    pub min_tier: u64,
+}
+
+/// Whether a reviewer must come from another model family than the author.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OtherFamily {
+    Ignore,
+    Prefer,
+    Require,
+}
+
+/// One review rule (`[review.<name>]`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRules {
+    #[serde(default = "tier0_author")]
+    pub tier0_author: AuthorRule,
+    #[serde(default = "tier1_author")]
+    pub tier1_author: AuthorRule,
+    #[serde(default = "audit_share")]
+    pub audit_share: f64,
+    #[serde(default = "other_family")]
+    pub other_family: OtherFamily,
+}
+
+fn tier0_author() -> AuthorRule {
+    AuthorRule {
+        reviewers: 1,
+        min_tier: 2,
+    }
+}
+
+fn tier1_author() -> AuthorRule {
+    AuthorRule {
+        reviewers: 1,
+        min_tier: 1,
+    }
+}
+
+fn audit_share() -> f64 {
+    0.10
+}
+
+fn other_family() -> OtherFamily {
+    OtherFamily::Prefer
+}
+
+impl Default for ReviewRules {
+    fn default() -> Self {
+        Self {
+            tier0_author: tier0_author(),
+            tier1_author: tier1_author(),
+            audit_share: audit_share(),
+            other_family: other_family(),
+        }
+    }
+}
+
+/// The verifier workflow (`[verify]`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerifyRules {
+    pub workflow: String,
+    pub max_parallel: u64,
+}
+
+impl Default for VerifyRules {
+    fn default() -> Self {
+        Self {
+            workflow: "factory-verify.yml".to_owned(),
+            max_parallel: 16,
+        }
+    }
+}
+
+/// The test network (`[test]`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TestRules {
+    pub quorum: u64,
+    pub candidate_min_tier: u64,
+}
+
+impl Default for TestRules {
+    fn default() -> Self {
+        Self {
+            quorum: 3,
+            candidate_min_tier: 2,
+        }
+    }
+}
+
+/// The kill switches of the factory (`[switch]`), each off, shadow or enforce.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Switches {
+    pub intake: Mode,
+    pub tier0_coding: Mode,
+    pub candidate_builds: Mode,
+}
+
+impl Default for Switches {
+    fn default() -> Self {
+        Self {
+            intake: Mode::Off,
+            tier0_coding: Mode::Off,
+            candidate_builds: Mode::Off,
+        }
+    }
+}
+
+/// Every setting of the public factory, read only. `Default` is a file without factory sections.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FactoryRules {
+    pub join: JoinRules,
+    pub tier0: TierRules,
+    pub tier1: TierRules,
+    pub tier2: TierRules,
+    /// Review rules by name. Empty, or it holds `default`.
+    pub review: BTreeMap<String, ReviewRules>,
+    pub verify: VerifyRules,
+    pub test: TestRules,
+    pub switch: Switches,
+}
+
+impl Default for FactoryRules {
+    fn default() -> Self {
+        Self {
+            join: JoinRules::default(),
+            tier0: TierRules::for_tier(0),
+            tier1: TierRules::for_tier(1),
+            tier2: TierRules::for_tier(2),
+            review: BTreeMap::new(),
+            verify: VerifyRules::default(),
+            test: TestRules::default(),
+            switch: Switches::default(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Snapshot {
     pub policy: Policy,
@@ -121,6 +554,7 @@ impl Snapshot {
     }
 
     fn new(policy: Policy) -> io::Result<Self> {
+        policy.validate()?;
         let mut canonical = serde_json::to_value(&policy)?;
         canonical.sort_all_objects();
         let hash = format!("{:x}", Sha256::digest(canonical.to_string().as_bytes()));

@@ -31,6 +31,17 @@
     },
     "trust": {
       "type": "object",
+      "properties": {
+        "tier0": {
+          "$ref": "#/$defs/tier"
+        },
+        "tier1": {
+          "$ref": "#/$defs/tier"
+        },
+        "tier2": {
+          "$ref": "#/$defs/tier"
+        }
+      },
       "additionalProperties": {
         "$ref": "#/$defs/trust"
       }
@@ -43,6 +54,28 @@
     },
     "priority": {
       "$ref": "#/$defs/priority"
+    },
+    "join": {
+      "$ref": "#/$defs/join"
+    },
+    "review": {
+      "type": "object",
+      "minProperties": 1,
+      "required": [
+        "default"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/review"
+      }
+    },
+    "verify": {
+      "$ref": "#/$defs/verify"
+    },
+    "test": {
+      "$ref": "#/$defs/test"
+    },
+    "switch": {
+      "$ref": "#/$defs/switch"
     }
   },
   "required": [
@@ -62,6 +95,175 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 18446744073709551615
+    },
+    "share": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "tier_number": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "mode": {
+      "enum": [
+        "off",
+        "shadow",
+        "enforce"
+      ]
+    },
+    "reach": {
+      "type": "object",
+      "properties": {
+        "landed": {
+          "$ref": "#/$defs/uint"
+        },
+        "run_agreed": {
+          "$ref": "#/$defs/uint"
+        },
+        "review_confirmed": {
+          "$ref": "#/$defs/uint"
+        },
+        "key_age_days": {
+          "$ref": "#/$defs/uint"
+        },
+        "reverted_for_cause": {
+          "$ref": "#/$defs/uint"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tier": {
+      "type": "object",
+      "properties": {
+        "leases": {
+          "$ref": "#/$defs/uint"
+        },
+        "submissions_per_day": {
+          "$ref": "#/$defs/uint"
+        },
+        "max_bundle_kib": {
+          "$ref": "#/$defs/uint"
+        },
+        "verify_share": {
+          "$ref": "#/$defs/share"
+        },
+        "review_share": {
+          "$ref": "#/$defs/share"
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "free_text": {
+          "type": "boolean"
+        },
+        "reach": {
+          "$ref": "#/$defs/reach"
+        }
+      },
+      "additionalProperties": false
+    },
+    "join": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "proof_of_work_bits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "per_block_per_hour": {
+          "$ref": "#/$defs/uint"
+        }
+      },
+      "additionalProperties": false
+    },
+    "author_rule": {
+      "type": "object",
+      "properties": {
+        "reviewers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "min_tier": {
+          "$ref": "#/$defs/tier_number"
+        }
+      },
+      "required": [
+        "reviewers",
+        "min_tier"
+      ],
+      "additionalProperties": false
+    },
+    "review": {
+      "type": "object",
+      "properties": {
+        "tier0_author": {
+          "$ref": "#/$defs/author_rule"
+        },
+        "tier1_author": {
+          "$ref": "#/$defs/author_rule"
+        },
+        "audit_share": {
+          "$ref": "#/$defs/share"
+        },
+        "other_family": {
+          "enum": [
+            "ignore",
+            "prefer",
+            "require"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "verify": {
+      "type": "object",
+      "properties": {
+        "workflow": {
+          "type": "string"
+        },
+        "max_parallel": {
+          "$ref": "#/$defs/uint"
+        }
+      },
+      "additionalProperties": false
+    },
+    "test": {
+      "type": "object",
+      "properties": {
+        "quorum": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "candidate_min_tier": {
+          "$ref": "#/$defs/tier_number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "switch": {
+      "type": "object",
+      "properties": {
+        "intake": {
+          "$ref": "#/$defs/mode"
+        },
+        "tier0_coding": {
+          "$ref": "#/$defs/mode"
+        },
+        "candidate_builds": {
+          "$ref": "#/$defs/mode"
+        }
+      },
+      "additionalProperties": false
     },
     "timers": {
       "type": "object",
