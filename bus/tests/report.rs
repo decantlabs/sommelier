@@ -761,8 +761,8 @@ fn fact(id: u64, run: &str, body: &str) -> Message {
     Message {
         id,
         ts: format!("2026-11-25T10:{:02}:00.000Z", id % 60),
-        from: "member".into(),
-        role: Role::Member,
+        from: "hub".into(),
+        role: Role::Hub,
         kind: Kind::Fact,
         topic: format!("report/{run}"),
         body: body.into(),

@@ -5,6 +5,7 @@
 //! `/api/state`. The pure parts are in the submodules.
 
 pub mod ops;
+pub mod orders;
 pub mod privacy;
 pub mod quorum;
 pub mod types;
@@ -15,7 +16,7 @@ use std::collections::BTreeMap;
 use rusqlite::{Connection, Transaction, params};
 use serde_json::{Map, Value, json};
 
-use crate::msg::{Kind, Message};
+use crate::msg::{Kind, Message, Role};
 use crate::store::StoreModule;
 
 pub use privacy::{Hit, HitKind, find_private, scrub};
@@ -105,10 +106,17 @@ impl StoreModule for ReportModule {
     }
 
     fn schema(&self) -> &'static str {
-        REPORT_SCHEMA_SQL
+        // The REPORT table and the RUN_ORDER table of the test network share this module.
+        static ALL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        ALL.get_or_init(|| format!("{REPORT_SCHEMA_SQL}{}", orders::ORDER_SCHEMA_SQL))
     }
 
     fn apply(&self, tx: &Transaction<'_>, msg: &Message) -> Result<(), String> {
+        // Only a FACT written by the hub counts for `report/` and `runorder/`.
+        if msg.role != Role::Hub || msg.from != "hub" {
+            return Ok(());
+        }
+        orders::apply(tx, msg)?;
         let Some(r) = Self::parse_message(msg, &ReportLimits::default()) else {
             return Ok(());
         };
@@ -152,6 +160,31 @@ impl StoreModule for ReportModule {
             "matrix".into(),
             Value::Array(matrix(&rows, &QuorumRules::default())),
         );
+        // The open run orders. Only counts, never the members who reported.
+        let counts = orders::report_counts(conn)?;
+        let open: Vec<Value> = orders::query_orders(conn)?
+            .into_iter()
+            .filter(|o| o.state == "open")
+            .map(|o| {
+                let reports = counts
+                    .iter()
+                    .find(|(r, _)| r == &o.id)
+                    .map(|(_, n)| *n)
+                    .unwrap_or(0);
+                json!({
+                    "id": o.id,
+                    "build": o.build,
+                    "channel": o.channel,
+                    "profile": o.profile,
+                    "scenario": o.scenario,
+                    "needs": o.needs.to_json(),
+                    "wanted": o.wanted,
+                    "reports": reports,
+                    "created_at": o.created_at,
+                })
+            })
+            .collect();
+        state.insert("run_orders".into(), Value::Array(open));
         Ok(())
     }
 }
