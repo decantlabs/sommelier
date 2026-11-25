@@ -11,4 +11,5 @@ pub mod lease_loop;
 pub mod outbox;
 pub mod quota_poll;
 pub mod rescue;
+pub mod sandbox;
 pub mod sweep;

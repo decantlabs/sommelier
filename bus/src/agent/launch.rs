@@ -18,6 +18,7 @@ use std::process::{Child, Command, Stdio};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::agent::sandbox::{self, ContractEnv, SandboxLevel, SandboxSpec};
 use crate::guide::handover;
 use crate::guide::templates;
 use crate::guide::{GuideRole, PolicyInfo, Vendor};
@@ -319,6 +320,113 @@ pub struct HookEnv {
     pub out_dir: PathBuf,
 }
 
+/// The command line that runs a hook script directly on the host: today's behaviour, program first.
+pub fn plain_hook_argv(hook_script: &Path) -> Vec<String> {
+    let ext = hook_script
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let script = hook_script.to_string_lossy().into_owned();
+    if cfg!(windows) && (ext == "cmd" || ext == "bat") {
+        vec!["cmd".into(), "/C".into(), script]
+    } else if ext == "sh" {
+        vec!["sh".into(), script]
+    } else {
+        vec![script]
+    }
+}
+
+/// The full command line of one hook start. Level `none` (the default) is `plain_hook_argv`. Level `container`
+/// runs the hook through `sandbox::wrap`. An unknown level is refused with one clear line.
+///
+/// `get` reads settings: `SOMMELIER_SANDBOX` (container, user or none), `SOMMELIER_SANDBOX_IMAGE`,
+/// `SOMMELIER_SANDBOX_RUNTIME` (podman or docker, default the first one found), `SOMMELIER_SANDBOX_VENDOR_DIRS`
+/// and `SOMMELIER_SANDBOX_CACHE_DIRS` (lists of `HOST=/path/in/container`, separated by `;`).
+pub fn plan_hook_command(
+    hook_script: &Path,
+    env: &HookEnv,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, String> {
+    let level = sandbox::level_from_lookup(get)?;
+    if level != SandboxLevel::Container {
+        // Level `user` is a property of the account the supervisor runs as, the hook is not wrapped.
+        return Ok(plain_hook_argv(hook_script));
+    }
+    let ext = hook_script
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "sh" {
+        return Err(format!(
+            "sandbox level container runs shell hooks only, {} is not a .sh file",
+            hook_script.display()
+        ));
+    }
+    let name = hook_script
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "sandbox: the hook script has no file name".to_owned())?;
+    let hooks_dir = hook_script
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let runtime = match get("SOMMELIER_SANDBOX_RUNTIME")
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+    {
+        Some(r) => r,
+        None => ["podman", "docker"]
+            .into_iter()
+            .find(|r| sandbox::find_on_path(r).is_some())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                "sandbox level container needs rootless podman or docker on PATH: install one or set SOMMELIER_SANDBOX=none"
+                    .to_owned()
+            })?,
+    };
+    let mounts = |key: &str| -> Result<Vec<sandbox::Mount>, String> {
+        sandbox::parse_mounts(&get(key).unwrap_or_default())
+    };
+    let spec = SandboxSpec {
+        runtime,
+        image: get("SOMMELIER_SANDBOX_IMAGE")
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| sandbox::DEFAULT_IMAGE.to_owned()),
+        worktree: env.worktree.clone(),
+        out_dir: env.out_dir.clone(),
+        prompt_file: env.prompt_file.clone(),
+        hooks_dir,
+        git_dir: worktree_git_dir(&env.worktree),
+        cache_dirs: mounts("SOMMELIER_SANDBOX_CACHE_DIRS")?,
+        vendor_dirs: mounts("SOMMELIER_SANDBOX_VENDOR_DIRS")?,
+        env: ContractEnv {
+            task: env.task_id.clone(),
+            attempt: env.attempt,
+            branch: env.branch.clone(),
+            model: env.model.clone(),
+            effort: env.effort.clone(),
+            cargo_build_jobs: "4".into(),
+        },
+    };
+    sandbox::wrap(
+        &["sh".to_owned(), format!("{}/{name}", sandbox::HOOKS_DIR)],
+        &spec,
+    )
+}
+
+/// The common git folder a linked worktree points to, or `None` when `.git` is a folder or unreadable.
+fn worktree_git_dir(worktree: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(worktree.join(".git")).ok()?;
+    let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+    // `<clone>/.git/worktrees/<name>` -> `<clone>/.git`
+    let common = gitdir.parent()?.parent()?;
+    Some(common.to_path_buf())
+}
+
 /// Spawns the launcher hook script in the foreground with the exact environment variables
 /// of section 5.4 and with all bus token variables removed.
 pub fn spawn_hook(hook_script: &Path, env: &HookEnv) -> Result<Child, String> {
@@ -336,23 +444,9 @@ pub fn spawn_hook(hook_script: &Path, env: &HookEnv) -> Result<Child, String> {
         let _ = fs::remove_file(env.out_dir.join(name));
     }
 
-    let ext = hook_script
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    let mut cmd = if cfg!(windows) && (ext == "cmd" || ext == "bat") {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(hook_script);
-        c
-    } else if ext == "sh" {
-        let mut c = Command::new("sh");
-        c.arg(hook_script);
-        c
-    } else {
-        Command::new(hook_script)
-    };
+    let argv = plan_hook_command(hook_script, env, &|k| std::env::var(k).ok())?;
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
 
     if env.worktree.is_dir() {
         cmd.current_dir(&env.worktree);

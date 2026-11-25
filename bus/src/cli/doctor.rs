@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use crate::agent::sandbox;
 use crate::exit;
 use crate::guide::PolicyInfo;
 use crate::guide::doctor::{self, DoctorEnv};
@@ -121,19 +122,47 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
     };
 
     let report = doctor::run_checks(&doctor_env);
+    let sandbox_report = sandbox::detect(&sandbox::SystemProbe);
+    let sandbox_ok = sandbox_report.as_ref().is_ok_and(|r| r.fix.is_none());
     if json_out {
+        let mut value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+        value["sandbox"] = sandbox_json(&sandbox_report);
         println!(
             "{}",
-            serde_json::to_string(&report).map_err(|e| e.to_string())?
+            serde_json::to_string(&value).map_err(|e| e.to_string())?
         );
     } else {
         print!("{}", doctor::format_text(&report));
+        println!("{}", sandbox_text(&sandbox_report));
     }
 
-    if report.ok {
+    if report.ok && sandbox_ok {
         Ok(exit::code(exit::OK))
     } else {
         Ok(exit::code(exit::REFUSED))
+    }
+}
+
+/// The one more doctor line: `sandbox: <level in force> (<what it can offer>)`, with the fix when needed.
+pub fn sandbox_text(report: &Result<sandbox::SandboxReport, String>) -> String {
+    match report {
+        Ok(r) => sandbox::doctor_line(r),
+        Err(e) => format!("sandbox: unknown | fix: {e}"),
+    }
+}
+
+fn sandbox_json(report: &Result<sandbox::SandboxReport, String>) -> serde_json::Value {
+    match report {
+        Ok(r) => serde_json::json!({
+            "in_force": r.in_force.as_str(),
+            "requested": r.requested.map(|l| l.as_str()),
+            "offers": r.offers.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
+            "runtime": r.runtime,
+            "inside_container": r.inside_container,
+            "notes": r.notes,
+            "fix": r.fix,
+        }),
+        Err(e) => serde_json::json!({ "in_force": "unknown", "fix": e }),
     }
 }
 
@@ -141,4 +170,16 @@ fn next_val(it: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String,
     it.next()
         .cloned()
         .ok_or_else(|| format!("{flag} needs a value"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_level_gives_one_line_with_fix() {
+        let line = sandbox_text(&Err("unknown sandbox level `x`".to_owned()));
+        assert!(line.starts_with("sandbox: unknown | fix: "));
+        assert!(!line.contains('\n'));
+    }
 }
