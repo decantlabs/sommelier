@@ -8,11 +8,24 @@ What is in here:
 
 | Folder | What it is |
 |---|---|
-| `bus/` | The Rust message bus. One binary, `sommelier`, is hub, token tool and client. Includes a web dashboard (`bus/ui`), tests and the protocol docs. |
+| `bus/` | The Rust message bus. One binary, `sommelier`, is hub, token tool and client. Includes a web dashboard (`bus/ui`), tests and the protocol docs. The factory modules live in `bus/src`: `key`, `policy`, `gate`, `bundle`, `stamp`, `review`, `report`, `tester`, `verify` and `land`. |
 | `swarm/` | Shell and PowerShell scripts: the lander (rebase, check, push), the watchdog, the run queue for the title, agent launchers for Claude, Codex and Gemini, metrics and the guest doctor. |
 | `cloudflare/` | A Cloudflare worker that fronts the hub. |
-| `docs/` | The architecture of the control plane. |
+| `templates/` | Workflow templates for a project that runs the factory: `factory-verify`, `factory-batch` and `release`. They are untested until their checklist is done (`templates/workflows/README.md`). |
+| `docs/` | The architecture of the control plane (`architecture.md`), the design of the public factory (`factory.md`) and the owner's checklist (`factory-operating.md`). |
 | `.claude/skills`, `.agents/skills` | Skills for the coordinator and for members. They live where the agent tools look for them. |
+
+## The public factory
+
+Sommelier is growing a public factory. Anyone can join with a key made on their own machine, with no account and
+no approval. Work is pulled as orders, not pushed as pull requests. Machines do the checks, and people see only
+exceptions. Parts of it are built as libraries, the wiring into the hub is in progress, and nothing here is
+switched on by default.
+
+* `docs/factory.md` is the design, with the status of every phase in section 15.
+* `CONTRIBUTING.md` says how to take part and why there are no pull requests from outside.
+* `bus/docs/JOIN.md` has the steps to join with a key or with a token.
+* `docs/factory-operating.md` is for the owner of a hub.
 
 ## Run the bus
 
