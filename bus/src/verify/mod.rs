@@ -14,6 +14,7 @@
 
 pub mod api;
 pub mod machine;
+pub mod ops;
 pub mod parse;
 pub mod queue;
 pub mod request;

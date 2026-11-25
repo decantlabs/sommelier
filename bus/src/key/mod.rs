@@ -23,7 +23,7 @@ pub use ops::on_op;
 
 /// What a tier 0 member may use, in ONE place. Operations are lower case request names, message
 /// kinds are upper case. Later phases extend this list.
-pub const TIER0_ALLOWED: [&str; 9] = [
+pub const TIER0_ALLOWED: [&str; 12] = [
     "whoami",
     "heartbeat",
     "log",
@@ -33,6 +33,9 @@ pub const TIER0_ALLOWED: [&str; 9] = [
     "HELLO",
     "key.rotate",
     "key.revoke",
+    "submit.status",
+    "report.send",
+    "test.next",
 ];
 
 /// True when a tier 0 member may use the request `op` (such as `whoami` or `task.add`) or send

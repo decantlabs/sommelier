@@ -116,6 +116,11 @@ pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     }
     msgs.extend(crate::plan::on_tick(hub, now_ms));
     msgs.extend(crate::role::eligible::on_tick(hub, now_ms));
+    msgs.extend(crate::intake::on_tick(hub, now_ms));
+    msgs.extend(crate::verify::ops::on_tick(hub, now_ms));
+    msgs.extend(crate::review::ops::on_tick(hub, now_ms));
+    msgs.extend(crate::stamp::ops::on_tick(hub, now_ms));
+    msgs.extend(crate::report::ops::on_tick(hub, now_ms));
     msgs.retain(|m| is_hook_emittable_kind(m.kind));
     msgs
 }
@@ -167,6 +172,13 @@ pub fn on_op(
         }
         "task.exit" | "agent.exit" => handle_task_exit_op(ctx, body),
         op if op.starts_with("key.") => crate::key::on_op(ctx, op, body),
+        op if op.starts_with("submit.") => crate::intake::on_op(ctx, op, body),
+        op if op.starts_with("verify.") => crate::verify::ops::on_op(ctx, op, body),
+        op if op.starts_with("review.") => crate::review::ops::on_op(ctx, op, body),
+        op if op.starts_with("stamp.") => crate::stamp::ops::on_op(ctx, op, body),
+        op if op.starts_with("report.") || op.starts_with("test.") => {
+            crate::report::ops::on_op(ctx, op, body)
+        }
         op if op.starts_with("task.") => crate::task::on_op(ctx, op, body),
         op if op.starts_with("land.") || op.starts_with("run.") => {
             crate::land::on_op(ctx, op, body)
@@ -179,7 +191,7 @@ pub fn on_op(
             crate::cli::alerts::on_op(ctx, op, body)
         }
         other => Err(format!(
-            "unknown op `{other}` (send, heartbeat, whoami, claims, who, idle, roster, log, quota.report, key.*, task.*, land.*, run.*, plan.*, role.*, alert.*)"
+            "unknown op `{other}` (send, heartbeat, whoami, claims, who, idle, roster, log, quota.report, key.*, submit.*, verify.*, review.*, stamp.*, report.*, test.*, task.*, land.*, run.*, plan.*, role.*, alert.*)"
         )),
     }
 }
@@ -195,6 +207,12 @@ pub fn on_http(
 ) -> Option<HttpOutcome> {
     if path.starts_with("/api/brief/") || path == "/api/brief" {
         return crate::brief::on_http(&hub.config().data_dir, method, path, query, body, caller);
+    }
+    if path.starts_with("/api/submit/")
+        || path.starts_with("/api/bundle/")
+        || path.starts_with("/api/order/")
+    {
+        return crate::intake::on_http(hub, method, path, query, body, caller);
     }
     None
 }

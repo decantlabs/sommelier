@@ -4,6 +4,7 @@
 //! its projection from `FACT` messages with topic `report/<run>` and the `matrix` part of
 //! `/api/state`. The pure parts are in the submodules.
 
+pub mod ops;
 pub mod privacy;
 pub mod quorum;
 pub mod types;

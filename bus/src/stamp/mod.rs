@@ -4,6 +4,7 @@
 //! table, projected only from FACT messages with topic `stamp/<member>`. Reputation is the list of
 //! stamps and [`tier`] is a pure function of that list.
 
+pub mod ops;
 mod tier;
 
 use std::collections::BTreeMap;

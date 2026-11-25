@@ -1129,6 +1129,10 @@ unless --kind STATUS or --all is given.
             false,
         ),
         "join" | "key" => return Some(sommelier::cli::key::help(cmd).to_owned()),
+        "submit" => return Some(sommelier::cli::submit::help().to_owned()),
+        "review" => return Some(sommelier::cli::review::help().to_owned()),
+        "test" => return Some(sommelier::cli::test::help().to_owned()),
+        "standing" => return Some(sommelier::cli::standing::help().to_owned()),
         "who" => ("sommelier who [--json]", "Lists open connections: name, role, listening or request.\n", true),
         "whoami" => ("sommelier whoami [--json]", "Shows your name, role and the newest message id.\n", true),
         "heartbeat" => (

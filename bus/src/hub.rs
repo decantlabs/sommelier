@@ -68,6 +68,18 @@ pub struct HubConfig {
     pub join: JoinRules,
     /// How long a challenge nonce lives.
     pub nonce_ttl: Duration,
+    /// Intake of submissions, see `intake`.
+    pub intake: crate::intake::IntakeConfig,
+    /// The clean build, see `verify::ops`.
+    pub verify: crate::verify::ops::VerifyConfig,
+    /// Assigned review, see `review::ops`.
+    pub review: crate::review::ops::ReviewConfig,
+    /// Stamps and tiers, see `stamp::ops`.
+    pub stamp: crate::stamp::ops::StampConfig,
+    /// The test network, see `report::ops`.
+    pub test: crate::report::ops::TestConfig,
+    /// The front door, see `door`.
+    pub door: crate::door::DoorConfig,
 }
 
 impl HubConfig {
@@ -87,6 +99,12 @@ impl HubConfig {
             ui_dir: None,
             join: JoinRules::default(),
             nonce_ttl: Duration::from_millis(crate::key::join::NONCE_TTL_MS),
+            intake: Default::default(),
+            verify: Default::default(),
+            review: Default::default(),
+            stamp: Default::default(),
+            test: Default::default(),
+            door: Default::default(),
         }
     }
 }

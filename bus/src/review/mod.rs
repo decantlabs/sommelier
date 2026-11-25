@@ -5,6 +5,7 @@
 //! table, its projection and its part of `/api/state`. Nothing here reads a clock or a file.
 
 pub mod hmac;
+pub mod ops;
 pub mod pick;
 pub mod prompt;
 pub mod verdict;
