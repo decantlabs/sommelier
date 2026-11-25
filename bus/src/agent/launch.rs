@@ -625,6 +625,15 @@ pub fn spawn_hook(hook_script: &Path, env: &HookEnv) -> Result<Child, String> {
     spawn_hook_with(hook_script, env, None)
 }
 
+/// The sandbox level a hook start uses: the supervisor config when it names one, else `SOMMELIER_SANDBOX`.
+pub fn level_in_force(sandbox_level: Option<&str>) -> Result<SandboxLevel, String> {
+    let get = |k: &str| match (k, sandbox_level) {
+        ("SOMMELIER_SANDBOX", Some(level)) => Some(level.to_owned()),
+        _ => std::env::var(k).ok(),
+    };
+    sandbox::level_from_lookup(&get)
+}
+
 /// [`spawn_hook`] with a sandbox level from the supervisor config. `Some` wins over `SOMMELIER_SANDBOX`.
 pub fn spawn_hook_with(
     hook_script: &Path,

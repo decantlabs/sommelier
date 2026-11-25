@@ -402,9 +402,13 @@ pub async fn start_role_seat(
             effort: "medium".into(),
             out_dir: seat_dir.clone(),
         };
+        let level = crate::agent::launch::level_in_force(cfg.sandbox_level()?)?;
         let mut child = spawn_hook_with(&hook_script, &env, cfg.sandbox_level()?)?;
         let status = child.wait().map_err(|e| format!("wait role seat: {e}"))?;
         exit_code = status.code();
+        if level == crate::agent::sandbox::SandboxLevel::Container {
+            crate::agent::launch::fetch_container_result(&env)?;
+        }
     }
 
     Ok(RoleSeatRecord {
@@ -741,6 +745,8 @@ async fn execute_leased_task(
 
     // 5. Spawn child process via launcher hook
     let _ = children_store.remove(&worker_name);
+    let level = crate::agent::launch::level_in_force(cfg.sandbox_level()?)?;
+    let in_container = level == crate::agent::sandbox::SandboxLevel::Container;
     let mut child = spawn_hook_with(&hook_script, &hook_env, cfg.sandbox_level()?)?;
     let pid = child.id();
     let start_sec = now_ms() / 1000;
@@ -766,7 +772,13 @@ async fn execute_leased_task(
     let _ = outbox.send_or_spool(opts, running_status).await;
 
     // 6. Monitor loop: heartbeat, checkpoint forward, stop marker, timeout
-    let mut cp_watcher = CheckpointWatcher::new(&task_id, &branch, &worktree_path);
+    // In a container the worker writes its checkpoint into its own clone, not into the worktree.
+    let watched = if in_container {
+        crate::agent::launch::container_clone_dir(&hook_env)
+    } else {
+        worktree_path.clone()
+    };
+    let mut cp_watcher = CheckpointWatcher::new(&task_id, &branch, &watched);
     let mut checkpoints_forwarded = 0usize;
     let hb_every = Duration::from_millis(cfg.heartbeat_ms.max(25));
     let timeout = cfg.child_timeout_ms.map(Duration::from_millis);
@@ -824,6 +836,11 @@ async fn execute_leased_task(
 
     if children_store.is_marked_stopped(&worker_name) {
         killed_by_supervisor = true;
+    }
+
+    // A container run works in its own clone: take its commit back into the worktree of the task.
+    if in_container && let Err(e) = crate::agent::launch::fetch_container_result(&hook_env) {
+        eprintln!("sommelier agent: {task_id}: the result of the container run was not taken: {e}");
     }
 
     // 7. Capture output and classify exit
