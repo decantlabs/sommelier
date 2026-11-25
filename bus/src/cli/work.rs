@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use crate::brief;
 use crate::client::{self, Opts};
 use crate::exit;
+use crate::{errln, outln};
 
 struct ParsedArgs {
     pos: Vec<String>,
@@ -130,7 +131,7 @@ async fn cmd_next(raw: &[String]) -> Result<ExitCode, String> {
     ) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return Ok(exit::code(exit::WRONG_USAGE));
         }
     };
@@ -152,7 +153,7 @@ async fn cmd_next(raw: &[String]) -> Result<ExitCode, String> {
             let task = &reply["task"];
             let ready_count = reply["ready_count"].as_u64().unwrap_or(1);
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({
                         "ok": true,
@@ -163,7 +164,7 @@ async fn cmd_next(raw: &[String]) -> Result<ExitCode, String> {
                     })
                 );
             } else {
-                println!(
+                outln!(
                     "{} ready for you, top: {} {} ({})",
                     ready_count,
                     task["id"].as_str().unwrap_or("?"),
@@ -175,12 +176,12 @@ async fn cmd_next(raw: &[String]) -> Result<ExitCode, String> {
         }
         if Instant::now() >= deadline {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({ "ok": false, "code": exit::NO_WORK, "reason": "no ready task" })
                 );
             } else {
-                println!("no work now");
+                outln!("no work now");
             }
             return Ok(exit::code(exit::NO_WORK));
         }
@@ -205,12 +206,12 @@ async fn cmd_work(raw: &[String]) -> Result<ExitCode, String> {
     ) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return Ok(exit::code(exit::WRONG_USAGE));
         }
     };
     let Some(task_id) = a.pos.first() else {
-        eprintln!("sommelier: usage: sommelier work ID [--brief-out PATH] [--json]");
+        errln!("sommelier: usage: sommelier work ID [--brief-out PATH] [--json]");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let json_out = a.flag("json");
@@ -232,12 +233,12 @@ async fn cmd_work(raw: &[String]) -> Result<ExitCode, String> {
         Ok(r) => r,
         Err(e) => {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({ "ok": false, "code": exit::REFUSED, "reason": e })
                 );
             } else {
-                eprintln!("refused: {e}");
+                errln!("refused: {e}");
             }
             return Ok(exit::code(exit::REFUSED));
         }
@@ -260,12 +261,12 @@ async fn cmd_work(raw: &[String]) -> Result<ExitCode, String> {
             Ok(b) => b,
             Err(e) => {
                 if json_out {
-                    println!(
+                    outln!(
                         "{}",
                         json!({ "ok": false, "code": exit::REFUSED, "reason": e })
                     );
                 } else {
-                    eprintln!("refused: {e}");
+                    errln!("refused: {e}");
                 }
                 return Ok(exit::code(exit::REFUSED));
             }
@@ -280,7 +281,7 @@ async fn cmd_work(raw: &[String]) -> Result<ExitCode, String> {
     }
 
     if json_out {
-        println!(
+        outln!(
             "{}",
             json!({
                 "ok": true,
@@ -291,7 +292,7 @@ async fn cmd_work(raw: &[String]) -> Result<ExitCode, String> {
             })
         );
     } else {
-        println!(
+        outln!(
             "ok task {} branch {} lease until {} brief {}",
             task_id,
             task["branch"].as_str().unwrap_or("-"),
@@ -318,16 +319,16 @@ async fn cmd_checkpoint(raw: &[String]) -> Result<ExitCode, String> {
     ) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return Ok(exit::code(exit::WRONG_USAGE));
         }
     };
     let Some(task_id) = a.pos.first() else {
-        eprintln!("sommelier: usage: sommelier checkpoint ID --file FILE [--json]");
+        errln!("sommelier: usage: sommelier checkpoint ID --file FILE [--json]");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let Some(file) = a.get("file") else {
-        eprintln!("sommelier: --file is required");
+        errln!("sommelier: --file is required");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let note = fs::read_to_string(file).map_err(|e| format!("cannot read {file}: {e}"))?;
@@ -349,7 +350,7 @@ async fn cmd_checkpoint(raw: &[String]) -> Result<ExitCode, String> {
     {
         Ok(reply) => {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({
                         "ok": true,
@@ -360,7 +361,7 @@ async fn cmd_checkpoint(raw: &[String]) -> Result<ExitCode, String> {
                     })
                 );
             } else {
-                println!(
+                outln!(
                     "ok checkpoint {} stored, lease until {}",
                     reply["seq"].as_u64().unwrap_or(1),
                     reply["expires_at"].as_u64().unwrap_or(0),
@@ -370,12 +371,12 @@ async fn cmd_checkpoint(raw: &[String]) -> Result<ExitCode, String> {
         }
         Err(e) => {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({ "ok": false, "code": exit::REFUSED, "reason": e })
                 );
             } else {
-                eprintln!("refused: {e}");
+                errln!("refused: {e}");
             }
             Ok(exit::code(exit::REFUSED))
         }
@@ -399,22 +400,22 @@ async fn cmd_done(raw: &[String]) -> Result<ExitCode, String> {
     ) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return Ok(exit::code(exit::WRONG_USAGE));
         }
     };
     let Some(task_id) = a.pos.first() else {
-        eprintln!(
+        errln!(
             "sommelier: usage: sommelier done ID --ref BRANCH --sha SHA --result-file FILE [--json]"
         );
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let Some(result_file) = a.get("result-file") else {
-        eprintln!("sommelier: --result-file is required");
+        errln!("sommelier: --result-file is required");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let Some(sha) = a.get("sha") else {
-        eprintln!("sommelier: --sha is required");
+        errln!("sommelier: --sha is required");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let result_text =
@@ -436,7 +437,7 @@ async fn cmd_done(raw: &[String]) -> Result<ExitCode, String> {
     {
         Ok(reply) => {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({
                         "ok": true,
@@ -446,18 +447,18 @@ async fn cmd_done(raw: &[String]) -> Result<ExitCode, String> {
                     })
                 );
             } else {
-                println!("ok delivered");
+                outln!("ok delivered");
             }
             Ok(exit::code(exit::OK))
         }
         Err(e) => {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({ "ok": false, "code": exit::REFUSED, "reason": e })
                 );
             } else {
-                eprintln!("refused: {e}");
+                errln!("refused: {e}");
             }
             Ok(exit::code(exit::REFUSED))
         }
@@ -468,16 +469,16 @@ async fn cmd_stuck(raw: &[String]) -> Result<ExitCode, String> {
     let a = match ParsedArgs::parse(raw, &["why", "url", "token", "token-file"], &["json"]) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return Ok(exit::code(exit::WRONG_USAGE));
         }
     };
     let Some(task_id) = a.pos.first() else {
-        eprintln!("sommelier: usage: sommelier stuck ID --why TEXT [--json]");
+        errln!("sommelier: usage: sommelier stuck ID --why TEXT [--json]");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let Some(why) = a.get("why") else {
-        eprintln!("sommelier: --why is required");
+        errln!("sommelier: --why is required");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let json_out = a.flag("json");
@@ -485,23 +486,23 @@ async fn cmd_stuck(raw: &[String]) -> Result<ExitCode, String> {
     match call_op(&opts, "task.stuck", json!({ "task": task_id, "why": why })).await {
         Ok(reply) => {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({ "ok": true, "code": exit::OK, "state": "stuck", "msg_ids": reply["msg_ids"] })
                 );
             } else {
-                println!("ok stuck recorded for {task_id}");
+                outln!("ok stuck recorded for {task_id}");
             }
             Ok(exit::code(exit::OK))
         }
         Err(e) => {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({ "ok": false, "code": exit::REFUSED, "reason": e })
                 );
             } else {
-                eprintln!("refused: {e}");
+                errln!("refused: {e}");
             }
             Ok(exit::code(exit::REFUSED))
         }
@@ -512,12 +513,12 @@ async fn cmd_decline(raw: &[String]) -> Result<ExitCode, String> {
     let a = match ParsedArgs::parse(raw, &["why", "url", "token", "token-file"], &["json"]) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return Ok(exit::code(exit::WRONG_USAGE));
         }
     };
     let Some(task_id) = a.pos.first() else {
-        eprintln!("sommelier: usage: sommelier decline ID --why TEXT [--json]");
+        errln!("sommelier: usage: sommelier decline ID --why TEXT [--json]");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let json_out = a.flag("json");
@@ -531,23 +532,23 @@ async fn cmd_decline(raw: &[String]) -> Result<ExitCode, String> {
     {
         Ok(reply) => {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({ "ok": true, "code": exit::OK, "msg_ids": reply["msg_ids"] })
                 );
             } else {
-                println!("ok declined offer for {task_id}");
+                outln!("ok declined offer for {task_id}");
             }
             Ok(exit::code(exit::OK))
         }
         Err(e) => {
             if json_out {
-                println!(
+                outln!(
                     "{}",
                     json!({ "ok": false, "code": exit::REFUSED, "reason": e })
                 );
             } else {
-                eprintln!("refused: {e}");
+                errln!("refused: {e}");
             }
             Ok(exit::code(exit::REFUSED))
         }
@@ -558,7 +559,7 @@ async fn cmd_ask(raw: &[String]) -> Result<ExitCode, String> {
     let a = match ParsedArgs::parse(raw, &["task", "url", "token", "token-file"], &["json"]) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return Ok(exit::code(exit::WRONG_USAGE));
         }
     };
@@ -567,24 +568,24 @@ async fn cmd_ask(raw: &[String]) -> Result<ExitCode, String> {
     } else if let Some((first, rest)) = a.pos.split_first() {
         (first.as_str(), rest)
     } else {
-        eprintln!("sommelier: usage: sommelier ask --task ID TEXT [--json]");
+        errln!("sommelier: usage: sommelier ask --task ID TEXT [--json]");
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     let text = text_parts.join(" ");
     if text.trim().is_empty() {
-        eprintln!("sommelier: ask requires question text");
+        errln!("sommelier: ask requires question text");
         return Ok(exit::code(exit::WRONG_USAGE));
     }
     let json_out = a.flag("json");
     let opts = client_opts(&a)?;
     let reply = call_op(&opts, "task.ask", json!({ "task": task_id, "text": text })).await?;
     if json_out {
-        println!(
+        outln!(
             "{}",
             json!({ "ok": true, "code": exit::OK, "msg_id": reply["msg_id"] })
         );
     } else {
-        println!("ok consult sent to the brain");
+        outln!("ok consult sent to the brain");
     }
     Ok(exit::code(exit::OK))
 }
@@ -597,7 +598,7 @@ async fn cmd_offers(raw: &[String]) -> Result<ExitCode, String> {
     ) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sommelier: {e}");
+            errln!("sommelier: {e}");
             return Ok(exit::code(exit::WRONG_USAGE));
         }
     };
@@ -616,16 +617,16 @@ async fn cmd_offers(raw: &[String]) -> Result<ExitCode, String> {
     )
     .await?;
     if json_out {
-        println!(
+        outln!(
             "{}",
             json!({ "ok": true, "code": exit::OK, "offers": reply["offers"] })
         );
     } else if let Some(offers) = reply["offers"].as_array() {
         if offers.is_empty() {
-            println!("no open offers");
+            outln!("no open offers");
         } else {
             for o in offers {
-                println!(
+                outln!(
                     "{} task {} to {} class {} expires {}",
                     o["id"].as_str().unwrap_or("?"),
                     o["task_id"].as_str().unwrap_or("?"),

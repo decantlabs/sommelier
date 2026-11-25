@@ -852,3 +852,74 @@ fn f8_an_error_from_git_does_not_name_our_folders() {
     }
     assert!(text.chars().count() < 400, "{text}");
 }
+
+// Second review, finding 3: a pack with an object that no ref reaches is refused.
+
+/// Rewrites the pack of a bundle so that it also holds the object `extra`, which no ref reaches.
+fn bundle_with_extra_object(p: &Path, base: &str, bundle: &Path, extra: &str) {
+    let bytes = fs::read(bundle).unwrap();
+    let at = bytes.windows(2).position(|w| w == b"\n\n").unwrap() + 2;
+    let header = bytes[..at].to_vec();
+    let head = rev(p, "HEAD");
+    let input = format!("{head}\n^{base}\n{extra}\n");
+    let mut child = Command::new("git")
+        .current_dir(p)
+        .args(["pack-objects", "--stdout", "--revs", "--thin", "-q"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let mut all = header;
+    all.extend(out.stdout);
+    fs::write(bundle, all).unwrap();
+}
+
+#[test]
+fn r2_3_a_pack_with_an_unreachable_object_is_refused() {
+    let r = repo();
+    let p = r.path();
+    let base = rev(p, "HEAD");
+    fs::write(p.join("keep.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "work"]);
+    fs::write(p.join("hidden.tmp"), "hidden payload that no tree names\n").unwrap();
+    let hidden = git(p, &["hash-object", "-w", "hidden.tmp"]);
+    fs::remove_file(p.join("hidden.tmp")).unwrap();
+    // The honest bundle passes.
+    let (out, _o) = bundle_of(p, &base);
+    let root = sandbox_root();
+    inspect(&out, r.path(), &base, root.path()).expect("honest bundle");
+    // The same bundle with a hidden blob in its pack is refused. The reference repository is a
+    // clone of the base only, so it does not hold the blob.
+    let reference = tempfile::tempdir().unwrap();
+    git(
+        reference.path(),
+        &["clone", "-q", "--bare", p.to_str().unwrap(), "ref.git"],
+    );
+    git(
+        &reference.path().join("ref.git"),
+        &["update-ref", "refs/heads/main", &base],
+    );
+    git(
+        &reference.path().join("ref.git"),
+        &["gc", "-q", "--prune=now"],
+    );
+    bundle_with_extra_object(p, &base, &out, &hidden);
+    let e = inspect(&out, &reference.path().join("ref.git"), &base, root.path()).unwrap_err();
+    assert!(e.to_string().contains("no ref reaches"), "{e}");
+    assert!(is_empty(root.path()));
+}
+
+#[test]
+fn r2_3_the_default_memory_cap_is_768_mb() {
+    assert_eq!(Limits::default().max_memory_mb, 768);
+}

@@ -7,6 +7,7 @@ use serde_json::json;
 
 use crate::exit;
 use crate::key::client;
+use crate::{out, outln};
 
 const JOIN_HELP: &str = "\
 usage: sommelier join [--handle H] [--url URL] [--data DIR] [--json]
@@ -89,7 +90,7 @@ pub fn help(cmd: &str) -> &'static str {
 /// Entry point of `join` and `key`.
 pub async fn run(cmd: &str, args: &[String]) -> Result<ExitCode, String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{}", help(cmd));
+        out!("{}", help(cmd));
         return Ok(exit::code(exit::OK));
     }
     let f = parse(args)?;
@@ -109,15 +110,15 @@ pub async fn run(cmd: &str, args: &[String]) -> Result<ExitCode, String> {
 async fn join(f: &Flags) -> Result<ExitCode, String> {
     let out = client::join(&f.url, &f.data, f.handle.as_deref()).await?;
     if f.json {
-        println!(
+        outln!(
             "{}",
             json!({"member": out.member, "key_file": out.key_path.display().to_string(),
                    "new_key": out.new_key, "registered": out.registered})
         );
         return Ok(exit::code(exit::OK));
     }
-    println!("member {}", out.member);
-    println!(
+    outln!("member {}", out.member);
+    outln!(
         "key file {} ({})",
         out.key_path.display(),
         if out.new_key {
@@ -127,10 +128,10 @@ async fn join(f: &Flags) -> Result<ExitCode, String> {
         }
     );
     if !out.registered {
-        println!("the hub knew this key already, nothing was written");
+        outln!("the hub knew this key already, nothing was written");
     }
-    println!("keep the key file private and back it up: a lost key is a lost identity");
-    println!(
+    outln!("keep the key file private and back it up: a lost key is a lost identity");
+    outln!(
         "you can connect as tier 0 now: with no token set, every command signs in with this key"
     );
     Ok(exit::code(exit::OK))
@@ -140,23 +141,23 @@ fn show(f: &Flags) -> Result<ExitCode, String> {
     let path = client::key_path(&f.data);
     let file = client::load(&path)?;
     if f.json {
-        println!(
+        outln!(
             "{}",
             json!({"member": file.member, "pub": file.key.public_b64(),
                    "key_file": path.display().to_string()})
         );
     } else {
-        println!("member {}", file.member);
-        println!("public key {}", file.key.public_b64());
-        println!("key file {}", path.display());
+        outln!("member {}", file.member);
+        outln!("public key {}", file.key.public_b64());
+        outln!("key file {}", path.display());
     }
     Ok(exit::code(exit::OK))
 }
 
 async fn rotate(f: &Flags) -> Result<ExitCode, String> {
     let public = client::rotate(&f.url, &f.data).await?;
-    println!("rotated: the new public key is {public}, the member id is the same");
-    println!("the old key is refused from now on, keep a backup of the new key file");
+    outln!("rotated: the new public key is {public}, the member id is the same");
+    outln!("the old key is refused from now on, keep a backup of the new key file");
     Ok(exit::code(exit::OK))
 }
 
@@ -172,6 +173,6 @@ async fn revoke(f: &Flags) -> Result<ExitCode, String> {
         .clone()
         .unwrap_or_else(|| "revoked by the member".into());
     client::revoke(&f.url, &f.data, reason.trim()).await?;
-    println!("revoked: the hub refuses this key from now on");
+    outln!("revoked: the hub refuses this key from now on");
     Ok(exit::code(exit::OK))
 }

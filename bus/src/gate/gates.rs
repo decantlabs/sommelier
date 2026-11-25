@@ -274,8 +274,44 @@ const RESERVED: [&str; 22] = [
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
+/// Longest path in bytes that any gate looks at.
+pub const MAX_PATH_BYTES: usize = 1024;
+/// Most folders and the file name together in one path.
+pub const MAX_PATH_DEPTH: usize = 32;
+
+/// The path is too long or too deep. Linear in the length, so it is safe to run on any input.
+fn shape_problem(p: &str) -> Option<&'static str> {
+    if p.len() > MAX_PATH_BYTES {
+        return Some("is longer than 1024 bytes");
+    }
+    if p.bytes().filter(|b| *b == b'/').count() >= MAX_PATH_DEPTH {
+        return Some("is deeper than 32 levels");
+    }
+    None
+}
+
+/// Gate 4, first part: findings for every path of the diff that is too long or too deep. The caller
+/// runs no other gate when this list is not empty, so no later gate does quadratic work on a deep path.
+pub fn path_limits(diff: &ParsedDiff) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let all = diff.files.iter().flat_map(paths_of).chain(
+        diff.commits
+            .iter()
+            .flat_map(|c| c.paths.iter().map(String::as_str)),
+    );
+    for p in all {
+        if let Some(why) = shape_problem(p) {
+            out.push(block("paths", Some(&clip(p)), format!("the path {why}")));
+        }
+    }
+    out
+}
+
 /// The first reason a path is not acceptable, or `None`.
 pub fn path_problem(p: &str) -> Option<&'static str> {
+    if let Some(why) = shape_problem(p) {
+        return Some(why);
+    }
     if p.is_empty() {
         return Some("is empty");
     }
@@ -358,6 +394,10 @@ pub fn paths(diff: &ParsedDiff) -> Vec<Finding> {
 /// the safe character set only, and it must not differ only in case from another changed path or from
 /// a path of the base tree.
 pub fn paths_with(diff: &ParsedDiff, rules: &GateRules) -> Vec<Finding> {
+    let limits = path_limits(diff);
+    if !limits.is_empty() {
+        return limits;
+    }
     let mut out = Vec::new();
     let base: BTreeSet<&str> = diff.base_paths.iter().map(String::as_str).collect();
     for f in &diff.files {
@@ -417,8 +457,11 @@ fn case_collisions(diff: &ParsedDiff) -> Vec<Finding> {
         .iter()
         .filter(|b| !gone.contains(b.as_str()))
     {
-        for prefix in prefixes(b) {
-            base.entry(fold_path(prefix)).or_insert(prefix);
+        if shape_problem(b).is_some() {
+            continue;
+        }
+        for (folded, prefix) in folded_prefixes(b) {
+            base.entry(folded).or_insert(prefix);
         }
     }
     let mut folded: BTreeMap<String, &str> = BTreeMap::new();
@@ -427,6 +470,11 @@ fn case_collisions(diff: &ParsedDiff) -> Vec<Finding> {
             continue;
         }
         let key = fold_path(&f.path);
+        let new_here = matches!(f.change, ChangeKind::Added | ChangeKind::Renamed);
+        let clash = new_here
+            && folded_prefixes(&f.path)
+                .iter()
+                .any(|(fp, p)| base.get(fp).is_some_and(|b| b != p));
         match folded.get(&key) {
             Some(first) if *first != f.path => out.push(block(
                 "paths",
@@ -438,10 +486,7 @@ fn case_collisions(diff: &ParsedDiff) -> Vec<Finding> {
                 folded.insert(key, f.path.as_str());
             }
         }
-        if !matches!(f.change, ChangeKind::Added | ChangeKind::Renamed) {
-            continue;
-        }
-        if prefixes(&f.path).any(|p| base.get(&fold_path(p)).is_some_and(|b| *b != p)) {
+        if clash {
             out.push(block(
                 "paths",
                 Some(&f.path),
@@ -452,11 +497,22 @@ fn case_collisions(diff: &ParsedDiff) -> Vec<Finding> {
     out
 }
 
-/// The path and each of its folders: `a/b/c` gives `a`, `a/b` and `a/b/c`.
-fn prefixes(path: &str) -> impl Iterator<Item = &str> {
-    path.match_indices('/')
-        .map(|(i, _)| &path[..i])
-        .chain(std::iter::once(path))
+/// The path and each of its folders, each with its folded form: `a/b/c` gives `a`, `a/b` and `a/b/c`.
+/// The path is folded once. A folded prefix is cut from the folded path at the same `/`, because no
+/// character folds into or out of a `/`. If the number of parts differs after folding, only the whole
+/// path is listed.
+fn folded_prefixes(path: &str) -> Vec<(String, &str)> {
+    let folded = fold_path(path);
+    let cuts: Vec<usize> = path.match_indices('/').map(|(i, _)| i).collect();
+    let fcuts: Vec<usize> = folded.match_indices('/').map(|(i, _)| i).collect();
+    let mut out = Vec::with_capacity(cuts.len() + 1);
+    if cuts.len() == fcuts.len() {
+        for (c, fc) in cuts.iter().zip(&fcuts) {
+            out.push((folded[..*fc].to_string(), &path[..*c]));
+        }
+    }
+    out.push((folded, path));
+    out
 }
 
 /// Gate 5: every changed path, old and new, matches a scope glob.

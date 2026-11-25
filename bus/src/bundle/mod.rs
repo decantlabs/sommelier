@@ -20,10 +20,19 @@
 //! pack bomb itself runs before any size is known, so it is bounded by the disk cap, the memory cap and
 //! the time limit rather than refused up front. On Windows there is no memory cap and the tree kill
 //! follows parent links only. The hub server of the project is Linux.
+//!
+//! The memory cap is per process. `fetch` and the `index-pack` it starts each get the cap, and two gate
+//! runs may go at once, so the sum can reach several times the cap. The real bound for the whole
+//! process group of the hub is a service limit of the operating system (a cgroup limit such as
+//! `MemoryMax` in the unit of the hub). Run the hub under one. Objects that no ref reaches are not
+//! listed by `rev-list`, so after the fetch every object of the sandbox is compared with the ones the
+//! range reaches, and a pack that holds any other object is refused (an object the reference
+//! repository holds already is fine, a thin pack brings those as delta bases).
 
 pub mod parse;
 pub mod runner;
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io::Read;
@@ -55,7 +64,8 @@ pub struct Limits {
     pub max_total_object_bytes: u64,
     /// Bytes the temporary folder of one inspection may hold while git works.
     pub max_sandbox_bytes: u64,
-    /// Memory cap per git call in megabytes, Unix only, 0 for none.
+    /// Memory cap per git call in megabytes, Unix only, 0 for none. No object is over `max_blob_bytes`
+    /// (2 MiB), so 768 is ample. The cap is per process (`ulimit -v`), see the module docs.
     pub max_memory_mb: u64,
     /// Rename detection runs only up to this many changed files.
     pub rename_max_files: usize,
@@ -73,7 +83,7 @@ impl Default for Limits {
             max_objects: 50_000,
             max_total_object_bytes: 64 * 1024 * 1024,
             max_sandbox_bytes: 256 * 1024 * 1024,
-            max_memory_mb: 3072,
+            max_memory_mb: 768,
             rename_max_files: 200,
         }
     }
@@ -223,6 +233,8 @@ struct Sandbox {
     git_dir: PathBuf,
     hooks: PathBuf,
     home: PathBuf,
+    /// The git folder of the reference repository, for questions about objects it holds.
+    reference_git: PathBuf,
     limits: Limits,
     /// Folder names that git's messages may hold and that must not reach an error.
     scrub: Vec<(String, &'static str)>,
@@ -236,8 +248,19 @@ impl Sandbox {
         stdin: Option<Vec<u8>>,
         max_out: usize,
     ) -> Result<Run, BundleError> {
+        self.run_at(&self.git_dir, step, args, stdin, max_out)
+    }
+
+    fn run_at(
+        &self,
+        git_dir: &Path,
+        step: &str,
+        args: &[&str],
+        stdin: Option<Vec<u8>>,
+        max_out: usize,
+    ) -> Result<Run, BundleError> {
         let mut cmd = git_command_capped(
-            Some(&self.git_dir),
+            Some(git_dir),
             Some(&self.hooks),
             &self.home,
             self.limits.max_memory_mb,
@@ -512,6 +535,7 @@ fn make_sandbox(root: &Path, reference: &Path, limits: &Limits) -> Result<Sandbo
         git_dir: git_dir.clone(),
         hooks,
         home,
+        reference_git: reference.to_path_buf(),
         limits: limits.clone(),
         scrub: Vec::new(),
     };
@@ -553,6 +577,10 @@ fn make_sandbox(root: &Path, reference: &Path, limits: &Limits) -> Result<Sandbo
         ));
     }
     let objects = fs::canonicalize(&objects).map_err(io)?;
+    sb.reference_git = objects
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| objects.clone());
     let line = objects
         .to_string_lossy()
         .trim_start_matches(r"\\?\")
@@ -646,7 +674,7 @@ fn build(
     if !patch.ok {
         return Err(BundleError::Git {
             step: "diff-patch".into(),
-            message: patch.stderr,
+            message: sb.clip(&patch.stderr),
         });
     }
     let mut sections = parse::parse_patch(&patch.stdout).into_iter();
@@ -708,6 +736,7 @@ fn check_objects(sb: &Sandbox, range: &str, limits: &Limits) -> Result<(), Bundl
         limits.max_diff_bytes,
     )?;
     let mut ids = String::new();
+    let mut reachable: BTreeSet<String> = BTreeSet::new();
     let mut n = 0usize;
     for line in String::from_utf8_lossy(&listing).lines() {
         // A path with a line break in it makes extra lines. Only lines that start with an id count.
@@ -725,7 +754,9 @@ fn check_objects(sb: &Sandbox, range: &str, limits: &Limits) -> Result<(), Bundl
         }
         ids.push_str(id);
         ids.push('\n');
+        reachable.insert(id.to_string());
     }
+    check_unreachable(sb, &reachable, limits)?;
     if n == 0 {
         return Ok(());
     }
@@ -765,6 +796,81 @@ fn check_objects(sb: &Sandbox, range: &str, limits: &Limits) -> Result<(), Bundl
         return Err(BundleError::Corrupt(
             "unexpected answer for the object sizes".into(),
         ));
+    }
+    Ok(())
+}
+
+/// Refuse a pack that holds an object the range does not reach. The objects of the sandbox itself
+/// (not the borrowed ones) are listed from the index of each pack and from the loose folders. An object
+/// that is not reachable and that the reference repository does not hold is a hidden object, and
+/// nothing counted it before.
+fn check_unreachable(
+    sb: &Sandbox,
+    reachable: &BTreeSet<String>,
+    limits: &Limits,
+) -> Result<(), BundleError> {
+    let io = |e: std::io::Error| BundleError::Io(e.to_string());
+    let objects = sb.git_dir.join("objects");
+    let mut own: BTreeSet<String> = BTreeSet::new();
+    let packs = objects.join("pack");
+    if packs.is_dir() {
+        for e in fs::read_dir(&packs).map_err(io)? {
+            let path = e.map_err(io)?.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("idx") {
+                continue;
+            }
+            let idx = fs::read(&path).map_err(io)?;
+            let out = sb.ok(
+                "show-index",
+                &["show-index"],
+                Some(idx),
+                limits.max_diff_bytes,
+            )?;
+            for line in String::from_utf8_lossy(&out).lines() {
+                let id = line.split(' ').nth(1).unwrap_or("");
+                if !is_object_id(id) {
+                    return Err(BundleError::Corrupt("unexpected pack index".into()));
+                }
+                own.insert(id.to_string());
+            }
+        }
+    }
+    for e in fs::read_dir(&objects).map_err(io)? {
+        let dir = e.map_err(io)?;
+        let name = dir.file_name().to_string_lossy().to_string();
+        if name.len() != 2 || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        for f in fs::read_dir(dir.path()).map_err(io)? {
+            let rest = f.map_err(io)?.file_name().to_string_lossy().to_string();
+            own.insert(format!("{name}{rest}"));
+        }
+    }
+    let extra: Vec<&String> = own.iter().filter(|id| !reachable.contains(*id)).collect();
+    if extra.is_empty() {
+        return Ok(());
+    }
+    // A thin pack is completed with the bases it needs, and the reference repository holds those.
+    let mut ids = String::new();
+    for id in &extra {
+        ids.push_str(id);
+        ids.push('\n');
+    }
+    let reference = sb.reference_git.clone();
+    let r = sb.run_at(
+        &reference,
+        "reference-objects",
+        &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        Some(ids.into_bytes()),
+        limits.max_diff_bytes,
+    )?;
+    let text = String::from_utf8_lossy(&r.stdout);
+    let known = text.lines().filter(|l| !l.ends_with(" missing")).count();
+    if !r.ok || known != extra.len() {
+        return Err(BundleError::Corrupt(format!(
+            "the bundle holds {} objects that no ref reaches",
+            extra.len() - known.min(extra.len())
+        )));
     }
     Ok(())
 }

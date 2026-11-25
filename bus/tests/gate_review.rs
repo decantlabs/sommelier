@@ -500,3 +500,86 @@ fn f8_git_text_in_an_error_is_short_clean_and_without_folders() {
             .all(|c| !c.is_control() && !gates::is_invisible(c))
     );
 }
+
+// Second review, finding 2: more files that tools read are on the hold list.
+
+#[test]
+fn r2_2_more_instruction_and_tool_settings_files_are_held() {
+    for path in [
+        "AGENTS.override.md",
+        "CLAUDE.local.md",
+        ".cursor/rules/a.mdc",
+        ".cursorrules",
+        ".windsurfrules",
+        ".clinerules",
+        ".devcontainer/devcontainer.json",
+        ".envrc",
+        "rustfmt.toml",
+        ".rustfmt.toml",
+        "clippy.toml",
+        ".clippy.toml",
+        "deny.toml",
+        "src/deny.toml",
+    ] {
+        let mut d = clean();
+        d.files = vec![file(path, ChangeKind::Added, &["x"])];
+        d.commits[0].paths = vec![path.into()];
+        let mut o = order();
+        o.scope = vec!["**".into()];
+        let r = run(&d, &o);
+        assert!(blocks(&r, "hold_paths"), "{path} should be held");
+    }
+}
+
+// Second review, finding 4: deep and long paths are refused before any other gate runs.
+
+#[test]
+fn r2_4_a_deep_or_long_path_stops_the_run_early() {
+    let deep = format!("src/{}f.rs", "d/".repeat(40));
+    let long = format!("src/{}.rs", "a".repeat(1100));
+    for path in [deep, long] {
+        let mut d = clean();
+        d.files = vec![file(&path, ChangeKind::Added, &["x"])];
+        let r = run(&d, &order());
+        assert!(!r.passed);
+        assert!(blocks(&r, "paths"));
+        assert!(
+            r.findings.iter().all(|f| f.gate == "paths"),
+            "{:?}",
+            r.findings
+        );
+        assert!(
+            r.findings
+                .iter()
+                .all(|f| f.path.as_ref().is_none_or(|p| p.len() < 400))
+        );
+    }
+    // A middle commit with a deep path is refused too.
+    let mut d = clean();
+    d.commits[0]
+        .paths
+        .push(format!("src/{}f.rs", "d/".repeat(40)));
+    assert!(blocks(&run(&d, &order()), "paths"));
+}
+
+#[test]
+fn r2_4_many_files_under_a_deep_folder_cost_little() {
+    let mut d = clean();
+    let folder = "d/".repeat(2000);
+    d.files = (0..500)
+        .map(|i| file(&format!("src/{folder}f{i}.rs"), ChangeKind::Added, &["x"]))
+        .collect();
+    let t = std::time::Instant::now();
+    let r = run(&d, &order());
+    assert!(!r.passed);
+    assert!(t.elapsed().as_secs() < 2, "took {:?}", t.elapsed());
+}
+
+#[test]
+fn r2_4_a_path_at_the_limit_is_fine() {
+    let ok = format!("src/{}f.rs", "d/".repeat(30));
+    let mut d = clean();
+    d.files = vec![file(&ok, ChangeKind::Added, &["x"])];
+    let r = run(&d, &order());
+    assert!(!blocks(&r, "paths"), "{:?}", r.findings);
+}
