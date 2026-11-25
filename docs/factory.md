@@ -1,6 +1,8 @@
 # sommelier public software factory: architecture
 
-Written 25 Nov 2026. Status: design for review. Nothing in this file is built yet.
+Written 25 Nov 2026. Status: design for review, now partly built. Section 15 says per phase what is built as a
+library, what is wired into the hub and what is only designed. Section 17 lists the decisions taken while building.
+Where a section and section 17 disagree, section 17 holds.
 Scope: how the swarm opens to anyone who wants to contribute or test, with their own subscription, their own
 models and their own hardware. It builds on `docs/architecture.md`, called **CP** below (CP 4.4 means section 4.4
 of that file). Where this file is silent, CP holds.
@@ -11,7 +13,7 @@ is never an order.
 Section map: 0 what changes, 1 problem and principles, 2 threat model, 3 components, 4 identity, 5 tiers and
 reputation, 6 the work order, 7 capacity (bring your own), 8 from result to main, 9 the test network, 10 the part
 of GitHub, 11 hosting and cost, 12 data model and protocol, 13 failure and abuse, 14 left out, 15 build plan,
-16 open decisions.
+16 open decisions, 17 decisions taken while building.
 
 ---
 
@@ -121,11 +123,12 @@ revert. A compromise of GitHub or of a vendor is outside this design.
 ### 4.1 Joining
 
 `sommelier join` makes an Ed25519 key pair in the client data folder and registers the public key at the hub. The
-member id is `m` plus the first 16 characters of the base32 SHA 256 of the public key. A handle is free text for
+member id is `m` plus the first 16 characters of the lower case base32 SHA 256 of the first public key of the
+member. A rotation does not change it. A handle is free text for
 display and is never an identity. No email, no password, no approval by a person.
 
-The hub asks for a small proof of work at join (seconds of CPU, set in the policy) and the front door limits joins
-per address. Neither stops a determined attacker. They only make a casual flood cost something. The real limit is
+The hub asks for a small proof of work at join (seconds of CPU). Joining is off until the owner starts the hub with
+`sommelier serve --join on --join-pow-bits N`. The front door limits joins per address. Neither stops a determined attacker. They only make a casual flood cost something. The real limit is
 that a fresh key can do very little (section 5).
 
 ### 4.2 Speaking
@@ -158,7 +161,7 @@ landed then gets a triage order for audit. Revocation is a row in the log like e
 
 | Tier | Reached by | May | Limits |
 |------|-----------|-----|--------|
-| 0 newcomer | joining | run tests. Take coding orders of risk `low` and size `small`. Send typed requests only, no free text on the bus | one lease at a time, a few submissions a day, always reviewed by a trusted seat |
+| 0 newcomer | joining | run tests. Take coding orders of risk `low` and size `small`. Send typed requests only, no free text on the bus and no HELLO | one lease at a time, a few submissions a day, always reviewed by a trusted seat |
 | 1 contributor | a rule: landed orders and agreed test reports above the policy numbers, key older than a week, no revert for cause | orders of risk `normal`, several leases, second reviewer for tier 0 and 1 work, free text on the bus | may not be the only reviewer |
 | 2 trusted | the facts of the rule and a grant signed by a maintainer | sole reviewer for `low` and `normal`, draft orders, the limited coordinator role of CP 13.3, candidate builds | needs a linked account that a maintainer knows |
 | 3 maintainer | named in the policy by the owner | approve hold paths, write orders, grant tier 2, revoke keys | the policy and the tokens stay with the owner |
@@ -181,7 +184,9 @@ subject, the kind, the evidence and the issuer.
 
 Rules: no stamp without an evidence id. Nobody issues a stamp about their own work. Stamps come from a rule in the
 hub, or from a maintainer's signed statement. Replay rebuilds them. `tier(member, stamps, policy, now)` is a pure
-function, so a promotion or a demotion can be explained and tested like a scheduler decision.
+function, so a promotion or a demotion can be explained and tested like a scheduler decision. Every change of a
+tier is written by the hub as a FACT `tier/<member>` and kept in the TIER table. A member without a row is tier 0
+with a key and tier 2 with a token.
 
 A `reverted` or `review_missed` stamp for cause drops the member one tier until a maintainer has looked. A
 finding of intent revokes the key.
@@ -318,8 +323,8 @@ Building someone else's unreviewed patch (kind `reproduce`) is offered only to l
 
 ### 8.1 S0 intake
 
-`sommelier done` packs the commits from the lease's base to the head into a git bundle, signs its SHA 256 with the
-member key and sends it to the hub. The hub stores it under its hash and writes a SUBMISSION row. The member needs
+`sommelier submit` packs the commits from the lease's base to the head into a git bundle, signs its SHA 256 with the
+member key and sends it to the hub. A bundle has exactly one ref and its prerequisite is the base of the lease. The hub stores it under its hash and writes a SUBMISSION row. The member needs
 no write access to any repository and no GitHub account. A member who has a public fork may send its address and
 commit instead. Size caps come from the tier.
 
@@ -376,7 +381,8 @@ An `escalate` goes to a maintainer. Reviews are signed and feed the stamps of 5.
 
 ### 8.5 S4 landing and the two locks
 
-Landing is CP 4.4 without change: batches, the full workspace checks, GPU tests under the game lock, the game run
+Landing is CP 4.4 with one change: a submission lands as ONE squashed commit made from the gated end tree, so
+commits between base and head never reach main. The rest is as in CP 4.4: batches, the full workspace checks, GPU tests under the game lock, the game run
 gate, splitting on failure. Three additions:
 
 1. **First lock.** `land enqueue` refuses an entry that lacks a passed gate report, a passed verify run and the
@@ -420,7 +426,8 @@ copy of the title the tester owns.
 
 ### 9.1 What a tester does
 
-`sommelier test` asks the hub for a run order that fits the machine, fetches the build, checks it, runs the
+`sommelier test` asks the hub for a run order that fits the machine (run orders are their own table and do not go
+through the task queue, a tester is not a leased worker), fetches the build, checks it, runs the
 scenario of the title profile through the run script, and sends a signed report. `sommelier test --loop` keeps
 doing that while the pause file is absent.
 
@@ -473,7 +480,7 @@ GitHub stays, in the roles it is good at.
 | Optional identity | a linked account (4.3) |
 
 Pull requests are set to collaborators only, a repository setting that exists since February 2026.
-`CONTRIBUTING.md` says in three lines that contributions come through `sommelier join`, and why.
+`CONTRIBUTING.md` says that contributions come through `sommelier join`, and why.
 
 ---
 
@@ -483,7 +490,7 @@ Pull requests are set to collaborators only, a repository setting that exists si
 
 | Part | Where | Cost | Why |
 |------|-------|------|-----|
-| hub (`sommelier serve`) | one small rented server with a fixed monthly price | a few euros a month, to be confirmed with the provider's price list | the binary runs unchanged. The ceiling of the bill is the price of the server |
+| hub (`sommelier serve`) | one small rented server with a fixed monthly price | a few euros a month, to be confirmed with the provider's price list | the binary runs unchanged. The server runs Linux. The ceiling of the bill is the price of the server |
 | front door | Cloudflare free plan: a tunnel from the server, so it has no open inbound port, plus rate limiting rules | 0 | TLS, hiding the server, absorbing floods |
 | witness and status page | the existing Worker with KV, free plan | 0 | CP 13.5, a few hundred requests a day |
 | bundles | the server's disk, deleted after landing plus the keep days | 0 | small and capped by tier |
@@ -535,12 +542,14 @@ New tables, each a projection of the log as in CP section 3.
 | REVIEW | task, n | reviewer, picked_by (rule), verdict, findings, signature, audited |
 | REPORT | run id | member, build, profile, machine class, metrics, first error, signature |
 | PROPOSAL | id | member, text, state, triage task |
+| TIER | member | tier, reason, evidence message id, at. Written from the FACT `tier/<member>` |
 
-MEMBER gets `tier` and `sandbox`. TASK gets the fields of section 6. The matrix is derived at read time.
+MEMBER gets `sandbox`. The tier lives in the TIER table. TASK gets the fields of section 6. The matrix is derived at read time.
 
 New requests: `join`, `auth`, `submit`, `review.verdict`, `report`, `propose`, `key.rotate`, `key.revoke`,
 `grant` (maintainers). New FACT topics: `submission/<sha256>`, `gate/<sha256>`, `verify/<sha256>`,
-`review/<task>/<n>`, `report/<run>`, `stamp/<member>`, `key/<member>`. New alert codes: VERIFY_BACKLOG,
+`review/<task>/<n>`, `report/<run>`, `stamp/<member>`, `key/<member>`, `tier/<member>`. Only a FACT written by the hub itself counts for
+these topics, and a client that sends one is refused. New alert codes: VERIFY_BACKLOG,
 REVIEW_DISAGREE, AUDIT_FAILED, JOIN_FLOOD, KEY_REVOKED, MATRIX_REGRESSION, LOCK_MISMATCH (GitHub refused what the
 hub passed, or the other way round).
 
@@ -672,15 +681,18 @@ candidate_builds = "off"
 Each phase is visible on its own and is switched on separately. Rows inside a phase follow the brief form of CP
 10.2.
 
-| # | Delivers | Main parts | Done when |
-|---|----------|-----------|-----------|
-| F0 | The repositories can go public safely | scrub for old names, hostnames and personal paths. Pull requests set to collaborators only. `CONTRIBUTING.md` pointer. Ruleset on main with the required check | the grep gate is empty. A test account cannot open a pull request. A direct push to main is refused |
-| F1 | **Anyone can join and watch.** | KEY table, `join`, key proof on connect, signed requests, tier 0 typed requests only, limits of 11.3, public read of the bus | a fresh machine joins in under a minute with no person involved. `drill join-flood` leaves a tier 1 member's requests unaffected |
-| F2 | **The hub is always up.** | the server, the tunnel from it, the owner PC as standby, the witness | `drill hub-dies` of CP 13.7 passes with the places swapped. The owner PC can be off for a day |
-| F3 | **Anyone with the title can test.** | title profiles, release workflow with attestation, `sommelier test`, REPORT, quorum, the matrix view, run orders by `needs` | a tester with no model and no account sends a report. `drill fake-reports`: two lying keys in one address block cannot settle a cell. A build without attestation is refused |
-| F4 | **A stranger's patch can reach main.** | bundle intake, static gates, `factory-verify`, assigned review by trusted seats, the two locks, trailers, tier 0 coding behind its switch | `drill bad-patch`: fixture patches (out of scope, hold path, new dependency, secret, deleted test, wrong base) are each stopped at the named stage. A good fixture patch lands with zero maintainer actions. An enqueue without a review is refused. GitHub refuses a push without the check |
-| F5 | **Standing is earned by rule.** | STAMP, `tier()`, tier 1 by rule, tier 2 by grant, peer reviewers, audits, redundancy, the public board | replay rebuilds every tier. `drill colluding-review`: an author never draws its own second key. A reverted commit drops the tier within one tick |
-| F6 | Sandboxes | the `container` profile, `doctor` level, `reproduce` orders | a worker in the profile cannot read a file placed in the home folder of the test user |
+| # | Delivers | Main parts | Done when | Status |
+|---|----------|-----------|-----------|--------|
+| F0 | The repositories can go public safely | scrub for old names, hostnames and personal paths. Pull requests set to collaborators only. `CONTRIBUTING.md` pointer. Ruleset on main with the required check | the grep gate is empty. A test account cannot open a pull request. A direct push to main is refused | designed only. The documents are written, the owner's settings are open |
+| F1 | **Anyone can join and watch.** | KEY table, `join`, key proof on connect, signed requests, tier 0 typed requests only, limits of 11.3, public read of the bus | a fresh machine joins in under a minute with no person involved. `drill join-flood` leaves a tier 1 member's requests unaffected | wired in part. `join`, key sign in, rotate and revoke work on a hub started with `--join on`. The limits of 11.3 and the public read are not built |
+| F2 | **The hub is always up.** | the server, the tunnel from it, the owner PC as standby, the witness | `drill hub-dies` of CP 13.7 passes with the places swapped. The owner PC can be off for a day | designed only |
+| F3 | **Anyone with the title can test.** | title profiles, release workflow with attestation, `sommelier test`, REPORT, quorum, the matrix view, run orders by `needs` | a tester with no model and no account sends a report. `drill fake-reports`: two lying keys in one address block cannot settle a cell. A build without attestation is refused | built as a library (profiles, reports, quorum, matrix). `sommelier test` is a stub, wiring in progress |
+| F4 | **A stranger's patch can reach main.** | bundle intake, static gates, `factory-verify`, assigned review by trusted seats, the two locks, trailers, tier 0 coding behind its switch | `drill bad-patch`: fixture patches (out of scope, hold path, new dependency, secret, deleted test, wrong base) are each stopped at the named stage. A good fixture patch lands with zero maintainer actions. An enqueue without a review is refused. GitHub refuses a push without the check | built as a library (bundles, gates, review choice, verify state machine, workflow templates). `sommelier submit` and `review` are stubs, wiring in progress |
+| F5 | **Standing is earned by rule.** | STAMP, `tier()`, tier 1 by rule, tier 2 by grant, peer reviewers, audits, redundancy, the public board | replay rebuilds every tier. `drill colluding-review`: an author never draws its own second key. A reverted commit drops the tier within one tick | built as a library (stamps, `tier()`, the TIER table as contract). Wiring in progress |
+| F6 | Sandboxes | the `container` profile, `doctor` level, `reproduce` orders | a worker in the profile cannot read a file placed in the home folder of the test user | designed only |
+
+Status words: built as a library means the module and its tests exist and the hub does not call it yet. Wired means
+the hub or the client uses it. Designed only means no code. The wiring of F1, F3, F4 and F5 is in progress.
 
 Order: F0, F1, F2, F3 first. They let people in without letting code in. F4 and F5 open coding. F6 can run beside
 F4.
@@ -704,6 +716,126 @@ F4.
    PC, and landing waits when it is off (CP 13.5).
 9. **Who cuts the orders.** With intake solved this is the bottleneck. Proposal: one lead per subsystem as in
    `swarm/LESSONS.md`, and draft orders from tier 2.
+
+---
+
+## 17. Decisions taken while building
+
+Taken while building the libraries of wave 1, from the workers' reports and two security reviews. Where an earlier
+section differs, this section holds, and the earlier section was corrected where it was plain.
+
+### Identity
+
+* The member id is `m` plus the first 16 characters of the lower case base32 SHA 256 of the first public key. It
+  is stable across rotation. The KEY table has one row per member and public key, and a rotation marks the old row
+  `rotated`.
+* The key file is one text line. Commands find it in the default data folder, and a token wins over a key.
+* Signing in uses `Authorization: SommelierKey <member>.<nonce>.<signature>` over the text `sommelier-auth-v1`, the
+  hub id and the nonce. `/api/challenge` also returns the proof of work bits.
+* Only a FACT of the hub with topic `key/<member>` counts. A client cannot send one.
+* Joining is set with `sommelier serve --join on|off --join-pow-bits N` until the policy wiring lands.
+* On Windows the key file gets no access list change. The owner only mode is set on Unix only.
+* Tier 0 sends no HELLO, because one HELLO with a huge slot count could stall the hub. Key members are stored with
+  trust `tier0` and never get capacity rows or offers.
+* Nonces become stateless, the client pins the hub id per hub, `--join off` also refuses keys that joined earlier,
+  and the client checks what a hub returns.
+
+### Policy
+
+* `[trust.tier0]`, `[trust.tier1]` and `[trust.tier2]` are tier tables. Every other name under `[trust]` keeps the
+  old shape, so a file without factory sections keeps its hash.
+* The `[switch]` table of the factory (`intake`, `tier0_coding`, `candidate_builds`) and the `[switch]` keys of the
+  scheduler (CP 5.3) are read by two loaders and cannot be in one file yet. Merging them is open.
+* Defaults that the outline of section 12 did not give were guessed. Tier 1 gets 20 submissions a day, 1024 KiB, the
+  kinds run, fix, port, review and scout, and free text on. Tier 2 gets 5 leases, 50 submissions and 4096 KiB.
+  `other_family` accepts ignore, prefer and require.
+
+### Gates
+
+* No scope matcher existed, so the gate module has its own glob matcher. `**` matches zero or more segments. Hold
+  and manifest globs ignore case and scope globs do not.
+* The default caps for tier 0 are 256 KiB for the bundle, 300 changed lines, 10 files and 64 KiB for the largest
+  file.
+* A manifest change always raises the entry to guarded and blocks unless the order is guarded.
+* An email on an added line blocks unless its domain is on an allow list of example domains and noreply forms.
+* Each gate lists at most 100 findings. The result `passed` and the risk are computed before the cut.
+* The shingle scan of CP 4.4 is not part of the gates yet.
+* File access outside the data folder cannot be told by a line pattern, so file writes in general are flagged.
+* More hold paths are being added: `.cargo`, toolchain files, nested `.claude`, other agent config folders and the
+  script types `.bat`, `.cmd` and `.py`. New paths are limited to plain ASCII, case collisions are checked against
+  the base tree, object sizes are checked before any diff, and the whole process tree is killed on timeout.
+* What line patterns cannot catch (a call split over lines, an alias, macros, encoded secrets) is left to the clean
+  build without secrets and to the assigned review.
+
+### Bundles and landing
+
+* A submission lands as ONE squashed commit made from the gated end tree, with trailers written by the lander.
+  Commits between base and head never reach main. This closes a review finding that middle commits were not gated.
+* `pack` names the head with a temporary ref because a bundle needs a ref. A bundle must have exactly one ref and
+  its prerequisite must be the base of the lease.
+* The default limits are 20 MiB for a bundle, 200 commits, 500 files, 2 MiB for a blob, 8 MiB for a diff and 60
+  seconds per git call.
+* A memory cap for git works on Unix only. The hub server of the project is Linux.
+
+### Stamps and tiers
+
+* The stamp kinds are landed, reverted, review_confirmed, review_missed, run_agreed, run_outlier, abandoned,
+  superseded, grant_tier2, cleared and intent.
+* A `cleared` stamp closes a penalty when its evidence names the message id of the penalty stamp.
+* A revoked key or an `intent` stamp gives no tier at all, also for a maintainer. Revoking the key is a separate
+  step of the key module.
+* An open penalty of any age drops the earned tier by one. For tier 1 a penalty younger than 30 days also blocks the
+  rise.
+* Every change of a tier is a hub FACT `tier/<member>` and a row of the TIER table. A member without a row is tier 0
+  with a key, tier 2 with a token and tier 3 as orchestrator.
+
+### Review
+
+* The reviewer is chosen by ordering the candidates by HMAC SHA 256 with the hub secret over the bundle hash and
+  the candidate id. The default rule is one reviewer, minimum tier 2 for a tier 0 author and tier 1 otherwise, other
+  family preferred, and at most 3 open reviews per reviewer.
+* A verdict is one JSON object with `verdict`, `findings` and `summary`, all required, and nothing after it.
+* The prompt is a fixed guide, one marker line `DATA:`, then order, gate report and diff. An input line that looks
+  like a marker or the guide header gets `> ` in front.
+
+### Reports and the matrix
+
+* A machine counts under operating system plus normalised GPU name, such as `windows/rtx 4080`. Suffixes such as
+  Super, Ti and Laptop stay in the key.
+* Inconclusive reports are dropped first. One member counts once, with its newest report. Members of one address
+  block count once.
+* With the quorum unmet, a cell is a hint for the larger side and unknown on a tie.
+* The `cell(profile, machine class, commit range)` of 9.4 is split. The caller groups reports by profile, machine
+  key and build, and `regressions` handles the range.
+* The matrix in `/api/state` counts by member only and says so in `counted_by`.
+* Testers are not leased workers. Run orders are their own table and do not go through the task queue.
+
+### Tester side
+
+* A title profile is a TOML file with `[[scenarios]]`, `[[scenarios.inputs]]` and `[[scenarios.milestones]]`.
+* Log lines start with the second of the run. Summary lines are `name: value`, and metrics of the metrics file are
+  passed in by the caller as summary lines.
+* The build check needs exit code 0 and the text "Verification succeeded" from the GitHub tool.
+* Windows reports at most 4095 MB of GPU memory for cards above 4 GiB through the standard query.
+
+### Clean build
+
+* The verify workflow takes four inputs: submission, order, base and hub. Its run name carries the submission hash,
+  which is how the hub finds the run.
+* The hub reads the conclusion of a run through the API. The runner holds no secret, not even for reporting.
+* Tier 0 as a whole gets the floor of 20 percent of 16 parallel runs, which is 3.
+* `factory-batch` treats an entry as guarded when the trailer `Factory-Guarded:` is present or a changed path
+  matches the guarded paths. It fails closed until the maintainer signature check exists.
+* The runner calls two hub endpoints: `/api/bundle/<sha256>` and `/api/order/<task>/done_when`.
+* The workflows were never run. `templates/workflows/README.md` lists 14 points to check against the live
+  documentation before first use.
+* The `candidate` channel of 9.2 needs a second trigger in the release workflow. It is not built.
+
+### Repository hygiene
+
+* An ignore rule for `*.log` kept test fixtures out of a commit, so fixtures under `bus/tests/fixtures` are exempt.
+* Templates, fixtures and data files are pinned to LF line endings, because text checks read them byte for byte
+  and a checkout on Windows turned them into CRLF.
 
 ---
 
