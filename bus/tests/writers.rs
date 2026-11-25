@@ -28,6 +28,8 @@ async fn start() -> Wire {
     let orch = t.add("orch", Role::Orchestrator).unwrap();
     let alice = t.add("alice", Role::Member).unwrap();
     let bob = t.add("bob", Role::Member).unwrap();
+    // The alert of a parked order is addressed to the coordinator, which needs a token.
+    t.add("coordinator", Role::Member).unwrap();
     t.save(&dir.path().join("tokens.json")).unwrap();
     let mut cfg = HubConfig::new(dir.path());
     cfg.verbose = false;
@@ -387,4 +389,54 @@ fn capacity_is_capped_per_owner_in_total() {
             .map(|r| r.useful_parallel),
         Some(5)
     );
+}
+
+#[tokio::test]
+async fn only_the_holder_or_the_orchestrator_marks_an_order_stuck() {
+    let w = start().await;
+    for id in ["t1", "t2"] {
+        client::request_ok(
+            &w.orch,
+            json!({"op": "task.add", "id": id, "title": format!("order {id}"), "kind": "fix",
+                   "scope": format!("src/{id}/**"), "done_when": "cargo test"}),
+        )
+        .await
+        .unwrap();
+    }
+    // An order that nobody holds: a member may not park it.
+    let err = client::request_ok(
+        &w.bob,
+        json!({"op": "task.stuck", "task": "t1", "why": "x"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("no lease"), "{err}");
+    client::request_ok(&w.alice, json!({"op": "task.work", "task": "t1"}))
+        .await
+        .unwrap();
+    // Another member may not park the order of alice, and its lease stays.
+    let err = client::request_ok(
+        &w.bob,
+        json!({"op": "task.stuck", "task": "t1", "why": "x"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("leased to alice"), "{err}");
+    let shown = client::request_ok(&w.alice, json!({"op": "task.show", "task": "t1"}))
+        .await
+        .unwrap();
+    assert_eq!(shown["task"]["state"], "leased", "{shown}");
+    // The holder parks it, and the orchestrator may park an order with no lease.
+    client::request_ok(
+        &w.alice,
+        json!({"op": "task.stuck", "task": "t1", "why": "x"}),
+    )
+    .await
+    .unwrap();
+    client::request_ok(
+        &w.orch,
+        json!({"op": "task.stuck", "task": "t2", "why": "x"}),
+    )
+    .await
+    .unwrap();
 }
