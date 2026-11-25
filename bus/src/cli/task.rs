@@ -13,7 +13,7 @@ use crate::task::{board_row_to_task_payload, parse_board_tsv};
 
 const USAGE: &str = "\
 usage:
-  sommelier task add --kind K --title T --scope G --done-when D --brief FILE [--id ID] [--priority P] [--after ID] [--branch B] [--accepts C] [--prior-art] [--brief-sha256 H] [--json]
+  sommelier task add --kind K --title T --scope G --done-when D --brief FILE [--id ID] [--priority P] [--after ID] [--branch B] [--accepts C] [--size S] [--risk low|normal] [--min-trust 0-3] [--review RULE] [--credit handle|none] [--prior-art] [--brief-sha256 H] [--json]
   sommelier task list [--state S] [--mine] [--json]
   sommelier task show ID [--json]
   sommelier task cancel ID [--reason TEXT] [--json]
@@ -121,6 +121,51 @@ async fn call_op(opts: &Opts, op: &str, body: Value) -> Result<Value, String> {
     client::request_ok(opts, Value::Object(payload)).await
 }
 
+/// The order fields a caller asked for, as body fields. Only the flags that were given appear, so an
+/// order without them keeps the defaults of the hub. The hub decides the risk and refuses what does
+/// not fit.
+fn order_fields(a: &ParsedArgs) -> Result<Value, String> {
+    let mut out = serde_json::Map::new();
+    if let Some(r) = a.get("risk") {
+        if !matches!(r, "low" | "normal") {
+            return Err(format!(
+                "--risk takes low or normal, not `{r}`: the hub marks an order guarded by its scope"
+            ));
+        }
+        out.insert("risk".into(), json!(r));
+    }
+    if let Some(n) = a.get("min-trust") {
+        match n.parse::<u8>() {
+            Ok(v) if v <= 3 => out.insert("min_trust".into(), json!(v)),
+            _ => return Err(format!("--min-trust takes a number from 0 to 3, not `{n}`")),
+        };
+    }
+    if let Some(r) = a.get("review") {
+        if r.trim().is_empty() {
+            return Err("--review needs the name of a review rule".into());
+        }
+        out.insert("review".into(), json!(r));
+    }
+    if let Some(c) = a.get("credit") {
+        if !matches!(c, "handle" | "none") {
+            return Err(format!("--credit takes handle or none, not `{c}`"));
+        }
+        out.insert("credit".into(), json!(c));
+    }
+    Ok(Value::Object(out))
+}
+
+/// One line with the order fields of a task row.
+fn order_line(t: &Value) -> String {
+    format!(
+        "risk={} min_trust={} review={} credit={}",
+        t["risk"].as_str().unwrap_or("normal"),
+        t["min_trust"].as_u64().unwrap_or(2),
+        t["review"].as_str().unwrap_or("default"),
+        t["credit"].as_str().unwrap_or("handle"),
+    )
+}
+
 fn slug_id(title: &str) -> String {
     let slug: String = title
         .to_ascii_lowercase()
@@ -176,6 +221,11 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
             "branch",
             "accepts",
             "track",
+            "size",
+            "risk",
+            "min-trust",
+            "review",
+            "credit",
             "url",
             "token",
             "token-file",
@@ -189,6 +239,20 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
         }
     };
     let json_out = a.flag("json");
+    let order = match order_fields(&a) {
+        Ok(o) => o,
+        Err(e) => {
+            if json_out {
+                println!(
+                    "{}",
+                    json!({ "ok": false, "code": exit::WRONG_USAGE, "reason": e })
+                );
+            } else {
+                eprintln!("sommelier: {e}");
+            }
+            return Ok(exit::code(exit::WRONG_USAGE));
+        }
+    };
     let opts = client_opts(&a)?;
     let kind = a.get("kind").ok_or("--kind is required")?;
     let title = a.get("title").ok_or("--title is required")?;
@@ -221,7 +285,7 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
         .get("branch")
         .map(str::to_owned)
         .unwrap_or_else(|| format!("work/{id}"));
-    let payload = json!({
+    let mut payload = json!({
         "id": id,
         "kind": kind,
         "title": title,
@@ -235,6 +299,12 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
         "prior_art": a.flag("prior-art"),
         "brief_sha256": rec.sha256,
     });
+    if let (Some(p), Some(o)) = (payload.as_object_mut(), order.as_object()) {
+        p.extend(o.clone());
+    }
+    if let Some(size) = a.get("size") {
+        payload["size"] = json!(size);
+    }
 
     match call_op(&opts, "task.add", payload).await {
         Ok(reply) => {
@@ -255,6 +325,12 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
                     id,
                     &rec.sha256[..12.min(rec.sha256.len())]
                 );
+                println!("{}", order_line(&reply["task"]));
+                for note in reply["notes"].as_array().into_iter().flatten() {
+                    if let Some(n) = note.as_str() {
+                        println!("note: {n}");
+                    }
+                }
             }
             Ok(exit::code(exit::OK))
         }
@@ -306,12 +382,14 @@ async fn cmd_list(raw: &[String]) -> Result<ExitCode, String> {
         } else {
             for t in tasks {
                 println!(
-                    "{} [{}] {} ({}, score {})",
+                    "{} [{}] {} ({}, score {}, risk {}, min_trust {})",
                     t["id"].as_str().unwrap_or("?"),
                     t["state"].as_str().unwrap_or("?"),
                     t["title"].as_str().unwrap_or(""),
                     t["priority"].as_str().unwrap_or("normal"),
                     t["score"].as_i64().unwrap_or(0),
+                    t["risk"].as_str().unwrap_or("normal"),
+                    t["min_trust"].as_u64().unwrap_or(2),
                 );
             }
         }
@@ -358,6 +436,7 @@ async fn cmd_show(raw: &[String]) -> Result<ExitCode, String> {
                     t["attempt"].as_u64().unwrap_or(1),
                     t["scope"].as_str().unwrap_or(""),
                 );
+                println!("{}", order_line(t));
             }
             Ok(exit::code(exit::OK))
         }
@@ -534,4 +613,60 @@ async fn cmd_import_board(raw: &[String]) -> Result<ExitCode, String> {
         );
     }
     Ok(exit::code(exit::OK))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> ParsedArgs {
+        let raw: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        ParsedArgs::parse(&raw, &["risk", "min-trust", "review", "credit"], &[]).unwrap()
+    }
+
+    #[test]
+    fn order_flags_become_body_fields_and_only_those_given() {
+        assert_eq!(order_fields(&parse(&[])).unwrap(), json!({}));
+        let a = parse(&[
+            "--risk",
+            "low",
+            "--min-trust",
+            "0",
+            "--review",
+            "newcomer",
+            "--credit",
+            "none",
+        ]);
+        assert_eq!(
+            order_fields(&a).unwrap(),
+            json!({"risk": "low", "min_trust": 0, "review": "newcomer", "credit": "none"})
+        );
+    }
+
+    #[test]
+    fn bad_order_flags_say_what_to_fix() {
+        for (args, want) in [
+            (&["--risk", "guarded"][..], "--risk takes low or normal"),
+            (&["--min-trust", "4"][..], "--min-trust takes a number"),
+            (&["--min-trust", "x"][..], "--min-trust takes a number"),
+            (&["--credit", "all"][..], "--credit takes handle or none"),
+            (&["--review", " "][..], "--review needs the name"),
+        ] {
+            let e = order_fields(&parse(args)).unwrap_err();
+            assert!(e.contains(want), "{e}");
+        }
+    }
+
+    #[test]
+    fn the_order_line_shows_the_four_fields() {
+        let t = json!({"risk": "guarded", "min_trust": 2, "review": "default", "credit": "none"});
+        assert_eq!(
+            order_line(&t),
+            "risk=guarded min_trust=2 review=default credit=none"
+        );
+        assert_eq!(
+            order_line(&json!({})),
+            "risk=normal min_trust=2 review=default credit=handle"
+        );
+    }
 }

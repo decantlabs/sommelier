@@ -527,6 +527,11 @@ pub fn evaluate_slot_for_task(
         ));
     }
 
+    // 3b. The tier of the member against the order (docs/factory.md 5.1 and 6).
+    if let Some(why) = tier_block(state, task, &slot.owner) {
+        return Err(reject("trust_tier", why));
+    }
+
     // 4. Trust & kind acceptance & clean room check.
     let trust = state
         .members
@@ -665,6 +670,53 @@ pub fn evaluate_slot_for_task(
             }
         }
     }
+}
+
+/// The tier of `owner` as the scheduler sees it. The member row carries the TIER table value. A row
+/// without one (a caller that built the state by hand) follows its trust name: `tier0` is 0,
+/// `observer` is no tier, an owner or orchestrator is 3, every other member is 2. An owner with no
+/// row at all counts as an owner, as the trust check does.
+pub fn member_tier(state: &PlanState, owner: &str) -> i64 {
+    let Some(m) = state.members.get(owner) else {
+        return 3;
+    };
+    m.tier.unwrap_or(match m.trust.as_str() {
+        "owner" | "orchestrator" | "hub" => 3,
+        "observer" => -1,
+        "tier0" => 0,
+        _ => 2,
+    })
+}
+
+/// The lowest tier that may take `task`: its `min_trust`, and 2 at least when it is guarded.
+pub fn required_trust(task: &PlanTask) -> u8 {
+    if task.risk == "guarded" {
+        task.min_trust.max(2)
+    } else {
+        task.min_trust
+    }
+}
+
+/// Why a member may not take `task`, or `None` when its tier is enough. A tier 0 member gets work
+/// only while `tier0_coding` is on, and then only low risk orders of small size.
+pub fn tier_block(state: &PlanState, task: &PlanTask, owner: &str) -> Option<String> {
+    let tier = member_tier(state, owner);
+    if tier < 0 {
+        return Some("this member has no tier and gets no work".to_owned());
+    }
+    let need = required_trust(task);
+    if tier < i64::from(need) {
+        return Some(format!("needs tier {need}, this member is tier {tier}"));
+    }
+    if tier == 0 {
+        if !state.tier0_coding {
+            return Some("tier 0 members get no work while tier0_coding is off".to_owned());
+        }
+        if task.risk != "low" || !crate::task::risk::is_small(task.size) {
+            return Some("tier 0 members get only low risk orders of small size".to_owned());
+        }
+    }
+    None
 }
 
 /// Checks whether `trust` level allows claiming `kind`.

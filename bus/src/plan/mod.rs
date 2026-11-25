@@ -886,6 +886,10 @@ pub struct PlanMember {
     pub trust: String,
     #[serde(default = "default_true")]
     pub online: bool,
+    /// The tier of the member (TIER table, `-1` for no tier at all). `None` when the caller gave
+    /// none: then the tier follows from `trust` (see `assign::member_tier`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<i64>,
 }
 
 fn default_owner_trust() -> String {
@@ -959,8 +963,20 @@ pub struct PlanTask {
     pub ready_at: u64,
     #[serde(default)]
     pub closed_at: u64,
+    /// `low`, `normal` or `guarded` (docs/factory.md section 6).
+    #[serde(default = "default_risk")]
+    pub risk: String,
+    /// Lowest tier that may lease the order. An order from before the field needs tier 2.
+    #[serde(default = "default_min_trust")]
+    pub min_trust: u8,
 }
 
+fn default_risk() -> String {
+    "normal".to_owned()
+}
+fn default_min_trust() -> u8 {
+    2
+}
 fn default_fix_kind() -> String {
     "fix".to_owned()
 }
@@ -1062,6 +1078,14 @@ pub struct PlanState {
     pub hub_started_at: u64,
     #[serde(default)]
     pub safe_mode: SafeModeState,
+    /// Tier 0 members get coding orders only while this switch is on (docs/factory.md 5.1). The
+    /// policy fills it in a later wave. Off by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tier0_coding: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Unordered list form used by JSON golden fixtures and shuffled-input determinism tests.
@@ -1091,6 +1115,8 @@ pub struct PlanStateInput {
     pub hub_started_at: u64,
     #[serde(default)]
     pub safe_mode: SafeModeState,
+    #[serde(default)]
+    pub tier0_coding: bool,
 }
 
 impl PlanState {
@@ -1109,6 +1135,7 @@ impl PlanState {
         let mut st = Self {
             hub_started_at: input.hub_started_at,
             safe_mode: input.safe_mode,
+            tier0_coding: input.tier0_coding,
             ..Self::default()
         };
         for m in input.members {
@@ -1769,7 +1796,7 @@ fn select_wait_reason(rejections: &[SlotRejection]) -> String {
             "cap_per_owner" | "cap_per_machine" | "cap_per_family" => 6,
             "lock" => 5,
             "paused" => 4,
-            "clean_room" | "trust" | "slot_accepts" => 3,
+            "clean_room" | "trust" | "trust_tier" | "slot_accepts" => 3,
             "min_tier" | "spawn_disabled" => 2,
             _ => 1,
         }
@@ -2067,12 +2094,14 @@ pub fn load_plan_state_from_store(
     };
 
     for m in query_members(conn).unwrap_or_default() {
+        let tier = member_tier_from_table(conn, &m.name, &m.role);
         state.members.insert(
             m.name.clone(),
             PlanMember {
                 name: m.name,
                 trust: m.trust,
                 online: m.online,
+                tier: Some(tier),
             },
         );
     }
@@ -2146,6 +2175,8 @@ pub fn load_plan_state_from_store(
                 created_at: t.created_at,
                 ready_at: t.ready_at,
                 closed_at: t.closed_at,
+                risk: t.risk,
+                min_trust: t.min_trust,
             },
         );
     }
@@ -2229,6 +2260,25 @@ pub fn load_plan_state_from_store(
 
     state.safe_mode = query_safe_mode(conn).unwrap_or_default();
     Ok(state)
+}
+
+/// The tier of a member for the scheduler: the TIER table through `tier_from_table`. A member that
+/// joined with a key has no role to its name, so the KEY table tells it apart.
+fn member_tier_from_table(conn: &Connection, name: &str, role: &str) -> i64 {
+    let keyed = crate::key::book::current_row(conn, name)
+        .map(|r| r.is_some())
+        .unwrap_or(false);
+    let role = if keyed {
+        None
+    } else {
+        Some(match role {
+            "orchestrator" => Role::Orchestrator,
+            "hub" => Role::Hub,
+            "observer" => Role::Observer,
+            _ => Role::Member,
+        })
+    };
+    crate::stamp::tier_table::tier_from_table(conn, name, role)
 }
 
 fn parse_task_size(raw: &str) -> f64 {
