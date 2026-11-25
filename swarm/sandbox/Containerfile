@@ -1,0 +1,31 @@
+# Worker image for sandbox level `container` (swarm/sandbox/README.md).
+# Build it with build-image.sh, which passes the Rust version of bus/rust-toolchain.toml in BASE_IMAGE.
+# The image holds no secret, no login and no key. Vendor logins and caches are mounted at run time.
+ARG BASE_IMAGE=docker.io/library/rust:1.99.1-slim-bookworm
+FROM ${BASE_IMAGE}
+
+ARG TOOL_PACKAGES=""
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates build-essential pkg-config \
+ && if [ -n "$TOOL_PACKAGES" ]; then \
+      apt-get install -y --no-install-recommends nodejs npm \
+      && npm install -g $TOOL_PACKAGES; \
+    fi \
+ && rm -rf /var/lib/apt/lists/*
+
+# A standard user. Its home is replaced by a memory only folder at run time.
+RUN useradd --create-home --uid 1000 --shell /bin/sh worker \
+ && mkdir -p /work /out /prompt /hooks /home/worker/.cargo \
+ && chown -R worker:worker /home/worker
+
+ENV HOME=/home/worker \
+    CARGO_HOME=/home/worker/.cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_TARGET_DIR=/tmp/target \
+    GIT_CONFIG_GLOBAL=/tmp/gitconfig \
+    GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_TERMINAL_PROMPT=0
+
+USER worker
+WORKDIR /work
