@@ -1,5 +1,6 @@
 //! Landing queue, batches, branch sweep, and game runs (sections 3, 4.3, 5.2, step 10a).
 
+pub mod lock;
 pub mod schema;
 pub mod sweep;
 
@@ -306,6 +307,8 @@ pub fn on_op(
                 .or_else(|| str_field(body, "commit"))
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "land.enqueue requires `sha`".to_owned())?;
+
+            lock::check_enqueue(ctx.store.connection(), &ref_name)?;
 
             if let Some(existing) = query_landing(ctx.store.connection(), &ref_name, &sha)? {
                 out.insert("duplicate".into(), json!(true));
