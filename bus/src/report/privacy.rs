@@ -1,8 +1,9 @@
 //! Private data in report text: finding it and removing it.
 //!
 //! The tester side calls [`scrub`] before it sends a report. The hub side calls [`find_private`] to
-//! check what arrives. Both functions are pure. They know paths with a user folder (Windows and Unix
-//! forms), email addresses, token shaped strings and machine names in common log forms.
+//! check what arrives. Both functions are pure. They know paths with a user folder (Windows, Wine and Unix
+//! forms, names with spaces), email addresses, token shaped strings, machine names in common log
+//! forms, Windows SIDs, GUIDs, MAC addresses and IP addresses.
 
 use std::sync::LazyLock;
 
@@ -73,6 +74,22 @@ fn mixed_case_and_digit(s: &str) -> bool {
         && s.bytes().any(|b| b.is_ascii_digit())
 }
 
+fn routable_v4(s: &str) -> bool {
+    !(s == "0.0.0.0" || s.starts_with("127."))
+}
+
+fn plausible_v6(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    if lower == "::1" || lower == "::" {
+        return false;
+    }
+    s.matches(':').count() >= 3
+        || lower.starts_with("fe80:")
+        || lower.starts_with("fc")
+        || lower.starts_with("fd")
+        || (lower.starts_with('2') && lower.as_bytes().get(4) == Some(&b':'))
+}
+
 fn pattern(kind: HitKind, re: &str, group: usize, accept: fn(&str) -> bool) -> Pattern {
     Pattern {
         kind,
@@ -84,11 +101,26 @@ fn pattern(kind: HitKind, re: &str, group: usize, accept: fn(&str) -> bool) -> P
 
 static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     vec![
-        // C:\Users\name\..., C:/Users/name, C:\Documents and Settings\name
+        // C:\Users\name\..., C:/Users/name, C:\Documents and Settings\name, and the Wine form
+        // Z:\home\name. The user folder may hold spaces (`John Smith`), up to four words.
         pattern(
             HitKind::UserPath,
-            r#"(?i)\b[a-z]:[\\/]+(?:users|documents and settings)[\\/]+[^\\/\s"'<>|*?]+(?:[\\/][^\s"'<>|*?]*)?"#,
+            r#"(?i)\b[a-z]:[\\/]+(?:users|documents and settings|home)[\\/]+(?:[^\\/\s"'<>|*?]+ ){0,3}[^\\/\s"'<>|*?]+(?:[\\/][^\s"'<>|*?]*)?"#,
             0,
+            any,
+        ),
+        // A cloud folder named after an employer or an account: `OneDrive - Employer`.
+        pattern(
+            HitKind::UserPath,
+            r#"(?i)\bonedrive\s+-\s+(?:[^\s\\/"'<>|*?]+ ){0,3}[^\s\\/"'<>|*?]+"#,
+            0,
+            any,
+        ),
+        // \home\name without a drive letter.
+        pattern(
+            HitKind::UserPath,
+            r#"(?i)(?:^|[^A-Za-z0-9_.-])(\\home\\[^\s"'<>|:*?]+)"#,
+            1,
             any,
         ),
         // /home/name, /Users/name, /mnt/c/Users/name, /c/Users/name
@@ -126,7 +158,7 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         // token=..., password: ..., api_key=...
         pattern(
             HitKind::Token,
-            r"(?i)\b(?:token|secret|password|passwd|pwd|api[_-]?key|access[_-]?key|authorization)\s*[=:]\s*([A-Za-z0-9._~+/=-]{12,})",
+            r#"(?i)(?:token|secret|password|passwd|pwd|api[_-]?key|access[_-]?key|authorization)["']?\s*[=:]\s*["']?([A-Za-z0-9._~+/=-]{12,})"#,
             1,
             has_digit,
         ),
@@ -148,6 +180,37 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
             r#"(?i)\b(?:computername|hostname|machinename|machine|host|computer|node|username|user)\s*[=:]\s*([^\s,;"'<>]+)"#,
             1,
             any,
+        ),
+        // A Windows security identifier, the account behind a profile.
+        pattern(HitKind::Machine, r"(?i)\bS-1-\d+(?:-\d+){2,}\b", 0, any),
+        // A GUID: machine ids, adapter ids, profile ids.
+        pattern(
+            HitKind::Machine,
+            r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+            0,
+            any,
+        ),
+        // A MAC address.
+        pattern(
+            HitKind::Machine,
+            r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b",
+            0,
+            any,
+        ),
+        // An IPv4 address. Loopback and the empty address are not private.
+        pattern(
+            HitKind::Machine,
+            r"\b(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b",
+            0,
+            routable_v4,
+        ),
+        // An IPv6 address, full or with `::`. Short forms are left alone unless they look like a link
+        // local, unique local or global address, so `std::vec` and times survive.
+        pattern(
+            HitKind::Machine,
+            r"(?i)(?:^|[^0-9A-Za-z:])((?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,6}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,5})?|::(?:[0-9a-f]{1,4}:){0,5}[0-9a-f]{1,4})(?:[^0-9A-Za-z:]|$)",
+            1,
+            plausible_v6,
         ),
         // The server part of a UNC path.
         pattern(

@@ -167,7 +167,8 @@ impl OrderRow {
     }
 }
 
-fn plain_id(s: &str) -> bool {
+/// An id the hub accepts: 1 to 64 characters of letters, digits, `.`, `_` and `-`.
+pub fn plain_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_ID
         && s.bytes()
@@ -199,6 +200,37 @@ pub fn check_order_fields(
                 "`{name}` must be 1 to {MAX_ID} characters of letters, digits, `.`, `_` or `-`"
             ));
         }
+    }
+    Ok(())
+}
+
+/// Checks the values of a run order that a hub handed to a tester, with the rules the hub itself uses
+/// for an order. The client calls it before it uses any of them: in a folder name, in a command
+/// or in a report. It also refuses `..` in a name, which the hub rule would allow.
+pub fn check_handed_order(
+    id: &str,
+    build: &str,
+    channel: &str,
+    profile: &str,
+    scenario: &str,
+) -> Result<(), String> {
+    for (name, v) in [
+        ("id", id),
+        ("channel", channel),
+        ("profile", profile),
+        ("scenario", scenario),
+    ] {
+        if !plain_id(v) || v.contains("..") {
+            return Err(format!(
+                "the hub's order has a bad `{name}`: only letters, digits, `.`, `_` and `-` are allowed. Nothing was run or sent"
+            ));
+        }
+    }
+    if !plain_commit(build) {
+        return Err(
+            "the hub's order has a bad `build`: a commit of 7 to 64 lower case hex digits is expected. Nothing was run or sent"
+                .into(),
+        );
     }
     Ok(())
 }

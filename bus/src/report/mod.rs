@@ -8,6 +8,7 @@ pub mod ops;
 pub mod orders;
 pub mod privacy;
 pub mod quorum;
+pub mod side;
 pub mod types;
 pub mod validate;
 
@@ -21,14 +22,15 @@ use crate::store::StoreModule;
 
 pub use privacy::{Hit, HitKind, find_private, scrub};
 pub use quorum::{
-    Cell, CellState, QuorumRules, Regression, ReportView, Verdict, cell, classify, machine_key,
-    regressions,
+    Cell, CellState, QuorumRules, Regression, ReportView, Verdict, cell, classify, counted_members,
+    machine_key, regressions,
 };
 pub use validate::{MAX_LOG_BYTES, MAX_REPORT_BYTES, ReportLimits, validate_report};
 
 use types::{Outcome, Report};
 
-/// DDL of the REPORT table. No address block is stored.
+/// DDL of the REPORT table. No address block is stored here: it lives in the private side store of
+/// [`side`], never in this table, never in the log.
 pub const REPORT_SCHEMA_SQL: &str = "\
 CREATE TABLE IF NOT EXISTS REPORT (
     run TEXT NOT NULL,
@@ -125,11 +127,7 @@ impl StoreModule for ReportModule {
             "INSERT INTO REPORT (run, member, build, channel, profile, scenario, machine_key,
                                  outcome, first_error, metrics, at, msg_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-             ON CONFLICT(run, member) DO UPDATE SET
-                build = excluded.build, channel = excluded.channel, profile = excluded.profile,
-                scenario = excluded.scenario, machine_key = excluded.machine_key,
-                outcome = excluded.outcome, first_error = excluded.first_error,
-                metrics = excluded.metrics, at = excluded.at, msg_id = excluded.msg_id",
+             ON CONFLICT(run, member) DO NOTHING",
             params![
                 r.run,
                 r.member,
@@ -156,10 +154,12 @@ impl StoreModule for ReportModule {
         state: &mut Map<String, Value>,
     ) -> Result<(), String> {
         let rows = query_reports(conn)?;
+        let blocks = side::blocks_of(conn);
         state.insert(
             "matrix".into(),
-            Value::Array(matrix(&rows, &QuorumRules::default())),
+            Value::Array(matrix(&rows, &blocks, &QuorumRules::default())),
         );
+        state.insert("matrix_blocks".into(), blocks_note(conn, &blocks));
         // The open run orders. Only counts, never the members who reported.
         let counts = orders::report_counts(conn)?;
         let open: Vec<Value> = orders::query_orders(conn)?
@@ -221,9 +221,51 @@ pub fn query_reports(conn: &Connection) -> Result<Vec<ReportRow>, String> {
     Ok(rows)
 }
 
-/// The matrix: one row per profile, machine key and build. The table keeps no address block, so
-/// the counts here are by member only. Each row says so in `counted_by`.
-pub fn matrix(rows: &[ReportRow], rules: &QuorumRules) -> Vec<Value> {
+/// What the public state says about address blocks: whether the front door keeps any, and what
+/// follows when it does not. No block and no member is named.
+pub fn blocks_note(conn: &Connection, blocks: &BTreeMap<(String, String), String>) -> Value {
+    let kept =
+        !blocks.is_empty() || side::data_dir_of(conn).is_some_and(|d| side::door_keeps_blocks(&d));
+    json!({
+        "kept": kept,
+        "text": if kept {
+            "A report counts for a cell only when the hub knew an address block of its sender."
+        } else {
+            "The front door keeps no address blocks, so every report is a hint and no cell settles."
+        },
+    })
+}
+
+/// Lines for `sommelier factory status`: how many reports hold a block, and a warning when the
+/// front door keeps none.
+pub fn status_lines(conn: &Connection) -> Vec<String> {
+    let blocks = side::blocks_of(conn);
+    let total = query_reports(conn).map(|r| r.len()).unwrap_or(0);
+    let with = query_reports(conn)
+        .map(|rows| {
+            rows.iter()
+                .filter(|r| blocks.contains_key(&(r.run.clone(), r.member.clone())))
+                .count()
+        })
+        .unwrap_or(0);
+    let mut out = vec![format!("reports with a block: {with} of {total}")];
+    if blocks_note(conn, &blocks)["kept"] == json!(false) {
+        out.push(
+            "the front door keeps no address blocks: every report is a hint and no cell settles"
+                .into(),
+        );
+    }
+    out
+}
+
+/// The matrix: one row per profile, machine key and build. `blocks` are the blocks of the side
+/// store by (run, member). A report without one is a hint: it never settles a cell. Each row says
+/// how many of its reports had a block.
+pub fn matrix(
+    rows: &[ReportRow],
+    blocks: &BTreeMap<(String, String), String>,
+    rules: &QuorumRules,
+) -> Vec<Value> {
     let mut groups: BTreeMap<(&str, &str, &str), Vec<ReportView>> = BTreeMap::new();
     for r in rows {
         let Some(outcome) = outcome_from_name(&r.outcome) else {
@@ -235,7 +277,7 @@ pub fn matrix(rows: &[ReportRow], rules: &QuorumRules) -> Vec<Value> {
             .push(ReportView {
                 member: r.member.clone(),
                 tier: 0,
-                block: None,
+                block: blocks.get(&(r.run.clone(), r.member.clone())).cloned(),
                 outcome,
                 at: r.at,
             });
@@ -244,6 +286,7 @@ pub fn matrix(rows: &[ReportRow], rules: &QuorumRules) -> Vec<Value> {
         .into_iter()
         .map(|((profile, key, build), views)| {
             let c = cell(&views, rules);
+            let with_block = views.iter().filter(|v| v.block.is_some()).count();
             json!({
                 "profile": profile,
                 "machine_key": key,
@@ -253,7 +296,9 @@ pub fn matrix(rows: &[ReportRow], rules: &QuorumRules) -> Vec<Value> {
                 "fails": c.fails,
                 "need_more": c.need_more,
                 "quorum": rules.quorum,
-                "counted_by": "member",
+                "reports": views.len(),
+                "with_block": with_block,
+                "counted_by": "block",
             })
         })
         .collect()

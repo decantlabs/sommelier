@@ -20,13 +20,16 @@ Asks the hub for a run order that fits this machine, runs it and sends a signed 
 with --loop rounds until the pause file appears. Prints one line per round.
   --profile FILE     the title profile (a public TOML file)
   --title EXE        your own copy of the title. It is checked against the profile first
-  --build FILE       the build to run. Its origin is checked with `gh attestation verify` first.
-                     There is no way to switch that check off
+  --build FILE       the build archive (.tar, .tar.gz or .zip), one file. It is checked with
+                     `gh attestation verify` against the commit of the order, the main branch and the
+                     release workflow, then unpacked into a fresh folder, and the run uses that folder
+                     only. When a check fails nothing is run and nothing is sent. There is no way to
+                     switch the check off
   --repo OWNER/NAME  the repository that builds and attests the build (env SOMMELIER_BUILD_REPO)
   --gpu TEXT         state your GPU when it cannot be detected, for example \"rtx 4080\"
   --run-script PATH  the run script, default swarm/run-title.sh. It is called as
-                     `bash PATH <folder of the build> <seconds> <label> SOMMELIER_TITLE_EXE=...` and
-                     prints `run folder: <path>` at the end
+                     `bash PATH <folder of the unpacked build> <seconds> <label> SOMMELIER_TITLE_EXE=...`
+                     and prints `run folder: <path>` at the end
   --loop             go on while the pause file does not exist
   --pause-file PATH  default: .pause in SOMMELIER_RUNS, else in the client data folder
   --interval SECS    wait between rounds of a loop, default 300. Nothing to test waits ten times that
@@ -35,6 +38,32 @@ with --loop rounds until the pause file appears. Prints one line per round.
   --token-file FILE  sign in with a token file instead of your key
 Exit code 6 means there is nothing to test now.
 ";
+
+/// What a tester is told once, before the first report of this machine is sent.
+pub const NOTICE: &str = "About the reports of `sommelier test`
+A report holds your member id, the class of this machine (operating system and build, graphics card
+model and driver, memory), the time of the run, the result of the run and a scrubbed excerpt of the
+title log of up to 2048 bytes. It holds no title data, no path with a user folder and no account name.
+Reports are public by design. Everybody who can read the hub, and its public matrix, can read them,
+and they stay in its log. Do not run `sommelier test` if you do not want that.
+";
+
+/// The file in the data folder that says the notice was shown.
+const NOTICE_SEEN: &str = ".test-notice-seen";
+
+/// Prints [`NOTICE`] when this data folder has not shown it yet, and notes that it was shown.
+fn tell_once(data: &std::path::Path) {
+    let seen = data.join(NOTICE_SEEN);
+    if seen.exists() {
+        return;
+    }
+    print!("{NOTICE}");
+    let _ = std::fs::create_dir_all(data);
+    let _ = std::fs::write(
+        &seen, b"shown
+",
+    );
+}
 
 /// The help text of this command.
 pub fn help() -> &'static str {
@@ -163,6 +192,7 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
         gpu: f.gpu.clone(),
         interval_secs: interval,
     };
+    tell_once(&data);
     let fx = SystemEffects {
         run_script: PathBuf::from(
             f.run_script
@@ -170,6 +200,7 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
                 .unwrap_or_else(|| "swarm/run-title.sh".into()),
         ),
         pause_file,
+        build_root: std::env::temp_dir().join("sommelier-builds"),
     };
     if f.looping {
         run_loop(&cfg, &fx, &mut |o| println!("{}", o.line())).await?;

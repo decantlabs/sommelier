@@ -9,9 +9,13 @@
 //!
 //! 1. No pause file, else the round does not start.
 //! 2. `test.next`. Nothing to test ends the round.
-//! 3. The build check, then the title check. A failure sends an inconclusive report for the order
-//!    that was taken, so the order does not wait for this tester, and runs nothing.
-//! 4. The scenario through the run script, the report, its signature, `report.send`.
+//! 3. Every value of the order is checked with the rules of the hub. Then the build: its archive is
+//!    verified against the commit of the order, the main branch and the release workflow, and
+//!    unpacked into a fresh folder. A failure of any of this ends the round with an error. Nothing is
+//!    run and nothing is sent. The title check follows. A title that does not match sends an
+//!    inconclusive report for the order that was taken, so the order does not wait for this tester.
+//! 4. The scenario through the run script, in the folder of the unpacked build and nothing else. Then
+//!    the folder is removed, the report is built, signed and sent with `report.send`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -22,9 +26,10 @@ use super::cmd::{CommandRunner, SystemRunner};
 use super::machine::{CommandProbe, machine_class_with};
 use super::profile::{Profile, check_title};
 use super::run::{RunInput, build_report};
-use super::verify::verify_build;
+use super::verify::prepare_build;
 use crate::client::{Opts, request_ok};
 use crate::key::crypto::{MemberKey, sign_request};
+use crate::report::orders::check_handed_order;
 use crate::report::scrub;
 use crate::report::types::{MachineClass, Outcome, Report};
 
@@ -38,6 +43,7 @@ const REPORT_BYTES_MAX: usize = crate::report::MAX_REPORT_BYTES - 296;
 /// What the run script is asked to do.
 #[derive(Clone, Debug)]
 pub struct ScenarioRun<'a> {
+    /// The fresh folder that holds the unpacked build. The run uses this folder and nothing else.
     pub build: &'a Path,
     pub title: &'a Path,
     pub seconds: u32,
@@ -64,8 +70,12 @@ pub trait Effects {
     fn paused(&self) -> bool;
     /// The machine class, with the GPU the tester stated if any.
     fn machine(&self, gpu: Option<&str>) -> MachineClass;
-    /// The provenance check of the build. An error means: do not run it.
-    fn verify_build(&self, build: &Path, repo: &str) -> Result<(), String>;
+    /// Verifies the build archive against the commit of the order, the main branch and the release
+    /// workflow, and unpacks it into a fresh folder, which it returns. An error means: do not run
+    /// it and send nothing.
+    fn prepare_build(&self, archive: &Path, repo: &str, commit: &str) -> Result<PathBuf, String>;
+    /// Removes the folder of [`Effects::prepare_build`].
+    fn release_build(&self, folder: &Path);
     /// Runs the scenario once and says what it left.
     fn run_scenario(&self, run: &ScenarioRun<'_>) -> Result<ScenarioOutput, String>;
     /// Waits between rounds of a loop.
@@ -80,7 +90,7 @@ pub struct RoundConfig {
     pub profile: Profile,
     /// The tester's own copy of the title.
     pub title: PathBuf,
-    /// The build to run.
+    /// The build archive: one file, verified and unpacked for every run.
     pub build: PathBuf,
     /// `owner/name` of the repository that attests the build.
     pub repo: String,
@@ -203,6 +213,14 @@ pub async fn run_round(cfg: &RoundConfig, fx: &dyn Effects) -> Result<RoundOutco
     let build_commit = text_of(order, "build")?;
     let channel = text_of(order, "channel")?;
     let scenario = text_of(order, "scenario")?;
+    // Every value of the hub is checked before it is used for a folder, a command or a report.
+    check_handed_order(
+        &run,
+        &build_commit,
+        &channel,
+        &text_of(order, "profile")?,
+        &scenario,
+    )?;
     if text_of(order, "profile")? != cfg.profile.id {
         return Err("the hub handed out an order for another profile: update sommelier".into());
     }
@@ -214,10 +232,12 @@ pub async fn run_round(cfg: &RoundConfig, fx: &dyn Effects) -> Result<RoundOutco
         note = Some(format!("the profile has no scenario `{scenario}`"));
     }
     let mut title_ok = true;
-    if !harness_error && let Err(e) = fx.verify_build(&cfg.build, &cfg.repo) {
-        harness_error = true;
-        note = Some(e);
-    }
+    // The build check ends the round with an error: nothing is run and nothing is sent.
+    let build_dir = if harness_error {
+        None
+    } else {
+        Some(fx.prepare_build(&cfg.build, &cfg.repo, &build_commit)?)
+    };
     if !harness_error {
         match check_title(&cfg.profile, &cfg.title) {
             Ok(true) => {}
@@ -235,10 +255,11 @@ pub async fn run_round(cfg: &RoundConfig, fx: &dyn Effects) -> Result<RoundOutco
     if !harness_error
         && title_ok
         && let Some(sc) = sc
+        && let Some(dir) = &build_dir
     {
         let label = format!("test-{run}");
         match fx.run_scenario(&ScenarioRun {
-            build: &cfg.build,
+            build: dir,
             title: &cfg.title,
             seconds: sc.seconds,
             label: &label,
@@ -249,6 +270,10 @@ pub async fn run_round(cfg: &RoundConfig, fx: &dyn Effects) -> Result<RoundOutco
                 note = Some(e);
             }
         }
+    }
+
+    if let Some(dir) = &build_dir {
+        fx.release_build(dir);
     }
 
     let input = RunInput {
@@ -313,6 +338,8 @@ pub async fn run_loop(
 pub struct SystemEffects {
     pub run_script: PathBuf,
     pub pause_file: PathBuf,
+    /// The folder under which every build is unpacked into a fresh folder of its own.
+    pub build_root: PathBuf,
 }
 
 /// The run folder named in the output of the run script.
@@ -376,23 +403,29 @@ impl Effects for SystemEffects {
         machine_class_with(&CommandProbe { runner: &runner }, gpu)
     }
 
-    fn verify_build(&self, build: &Path, repo: &str) -> Result<(), String> {
-        verify_build(build, repo, &SystemRunner::default())
+    fn prepare_build(&self, archive: &Path, repo: &str, commit: &str) -> Result<PathBuf, String> {
+        // Unpacking a large build takes longer than the default of a command.
+        let runner = SystemRunner {
+            timeout: Duration::from_secs(600),
+        };
+        prepare_build(archive, repo, commit, &self.build_root, &runner)
+    }
+
+    fn release_build(&self, folder: &Path) {
+        // The folder was made by `prepare_build` under the build root. Nothing else is removed.
+        if folder.starts_with(&self.build_root) && folder != self.build_root {
+            let _ = std::fs::remove_dir_all(folder);
+        }
     }
 
     fn run_scenario(&self, run: &ScenarioRun<'_>) -> Result<ScenarioOutput, String> {
-        let worktree = run
-            .build
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+        // The first argument of the script is the folder of the unpacked build.
         let args: Vec<String> = vec![
             self.run_script.display().to_string(),
-            worktree.display().to_string(),
+            run.build.display().to_string(),
             run.seconds.to_string(),
             run.label.to_owned(),
             format!("SOMMELIER_TITLE_EXE={}", run.title.display()),
-            format!("SOMMELIER_BUILD_FILE={}", run.build.display()),
         ];
         // The script may wait in a queue behind other runs, so the time is generous.
         let runner = SystemRunner {

@@ -20,6 +20,7 @@ use sommelier::key::book::join_body;
 use sommelier::key::client as kc;
 use sommelier::key::crypto::{MemberKey, member_id};
 use sommelier::msg::{Kind, Message, Role};
+use sommelier::report::side::Side;
 use sommelier::stamp::ops::StampConfig;
 use sommelier::stamp::{TierRules, query_stamps};
 use sommelier::store::Store;
@@ -150,6 +151,13 @@ impl World {
             "log_excerpt": "", "at": 1_000_000
         });
         self.line(Kind::Fact, &format!("report/{run}"), &body.to_string());
+        // The block of the sender, as the hub keeps it in its side store when a report arrives.
+        // Every member sits in a block of its own.
+        let mut side = Side::open(self.path()).unwrap();
+        side.hand(member, run, "windows/gpu one", 1).unwrap();
+        let block = format!("blk-{member}");
+        side.claim(member, run, "windows/gpu one", &block, 2, u64::MAX / 4)
+            .unwrap();
     }
 
     /// Writes one SUBMISSION row through the contract DDL. Call it before the hub starts.
@@ -373,10 +381,12 @@ fn rules_world() -> Rules {
     world.submission("sl0", "task-a0", &loser.member, "rejected", 1_000_500);
     world.review("task-a0", &reviewer.member, "sa0", "pass");
     // Two runs, three testers see it work and one fails: the cell settles on works.
+    // The token member alice vouches for the cell: a ring of fresh keys would not lift itself.
     for run in ["r1", "r2"] {
         for (i, t) in testers.iter().enumerate() {
             world.report(run, &t.member, if i < 3 { "works" } else { "fails" });
         }
+        world.report(run, "alice", "works");
     }
     Rules {
         world,
@@ -392,8 +402,8 @@ fn each_rule_writes_its_stamp_once_also_across_a_restart() {
     run(async {
         let w = rules_world();
         let r = launch(&w.world, |c| c.stamp = standing_on());
-        // 2 landed, 1 superseded, 1 review_confirmed, 6 agreed, 2 outlier.
-        wait_stamps(&w.world, 12).await;
+        // 2 landed, 1 superseded, 1 review_confirmed, 8 agreed (alice too), 2 outlier.
+        wait_stamps(&w.world, 14).await;
         tokio::time::sleep(Duration::from_millis(800)).await;
         let mut want: Vec<(String, String)> = vec![
             ("landed".into(), w.author.member.clone()),
@@ -407,6 +417,8 @@ fn each_rule_writes_its_stamp_once_also_across_a_restart() {
             want.push(("run_agreed".into(), t.member.clone()));
             want.push(("run_agreed".into(), t.member.clone()));
         }
+        want.push(("run_agreed".into(), "alice".into()));
+        want.push(("run_agreed".into(), "alice".into()));
         want.sort();
         assert_eq!(kinds(&w.world), want, "one stamp per rule and evidence");
         let tiers_before = w.world.facts_on("tier/").len();

@@ -248,7 +248,23 @@ fn signed(t: &Tester, r: &Report) -> Value {
     v
 }
 
+/// Asks `test.next` as the tester does, so the order of the report is handed to this member. A
+/// report counts only for an order that `test.next` handed out.
+async fn handed(opts: &Opts, report: &Value) {
+    let got = client::request_ok(
+        opts,
+        json!({"op": "test.next", "machine": report["machine"], "profiles": [report["profile"]]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        got["order"]["id"], report["run"],
+        "test.next handed another order: {got}"
+    );
+}
+
 async fn send(opts: &Opts, report: Value) -> Result<Value, String> {
+    handed(opts, &report).await;
     client::request_ok(opts, json!({"op": "report.send", "report": report})).await
 }
 
@@ -802,6 +818,9 @@ struct Fake {
     sleeps: Cell<usize>,
     pause_after_sleeps: usize,
     seen: RefCell<Vec<String>>,
+    commits: RefCell<Vec<String>>,
+    released: RefCell<Vec<PathBuf>>,
+    labels: RefCell<Vec<String>>,
 }
 
 impl Fake {
@@ -815,6 +834,9 @@ impl Fake {
             sleeps: Cell::new(0),
             pause_after_sleeps: usize::MAX,
             seen: RefCell::new(vec![]),
+            commits: RefCell::new(vec![]),
+            released: RefCell::new(vec![]),
+            labels: RefCell::new(vec![]),
         }
     }
 }
@@ -829,13 +851,23 @@ impl Effects for Fake {
     fn machine(&self, gpu: Option<&str>) -> MachineClass {
         serde_json::from_value(machine("windows", gpu.unwrap_or("rtx 4080"))).unwrap()
     }
-    fn verify_build(&self, _build: &Path, repo: &str) -> Result<(), String> {
+    fn prepare_build(&self, archive: &Path, repo: &str, commit: &str) -> Result<PathBuf, String> {
         self.verified.set(self.verified.get() + 1);
         self.seen.borrow_mut().push(repo.to_owned());
-        self.verify.clone()
+        self.commits.borrow_mut().push(commit.to_owned());
+        self.verify.clone()?;
+        Ok(archive.with_file_name("unpacked"))
     }
-    fn run_scenario(&self, _run: &ScenarioRun<'_>) -> Result<ScenarioOutput, String> {
+    fn release_build(&self, folder: &Path) {
+        self.released.borrow_mut().push(folder.to_path_buf());
+    }
+    fn run_scenario(&self, run: &ScenarioRun<'_>) -> Result<ScenarioOutput, String> {
+        assert!(
+            run.build.ends_with("unpacked"),
+            "the run uses the unpacked folder"
+        );
         self.ran.set(self.ran.get() + 1);
+        self.labels.borrow_mut().push(run.label.to_owned());
         self.scenario.clone()
     }
     fn sleep(&self, _secs: u64) {
@@ -952,6 +984,9 @@ async fn a_round_with_a_working_run_sends_a_signed_report() {
     assert!(o.line().contains("works") && o.line().contains(&id));
     assert_eq!((fake.verified.get(), fake.ran.get()), (1, 1));
     assert_eq!(fake.seen.borrow()[0], "example/decant");
+    // The build is checked against the commit of the order, and the folder is given back.
+    assert_eq!(fake.commits.borrow()[0], B1);
+    assert_eq!(fake.released.borrow().len(), 1);
     assert_eq!(outcome_of(&hub, &t.member, &id), "works");
     let row = hub.tables().1.remove(0);
     assert!(row.metrics.contains("fps_median"));
@@ -985,7 +1020,7 @@ async fn a_round_with_a_failing_run_reports_fails() {
 }
 
 #[tokio::test]
-async fn a_failed_build_check_runs_nothing_and_sends_inconclusive() {
+async fn a_failed_build_check_runs_nothing_and_sends_nothing() {
     let hub = start().await;
     let files = Files::new();
     let t = tester(&hub, None).await;
@@ -995,17 +1030,14 @@ async fn a_failed_build_check_runs_nothing_and_sends_inconclusive() {
         Err("the attestation of the build does not verify".into()),
         Ok(works_output()),
     );
-    let o = run_round(&cfg, &fake).await.unwrap();
-    assert!(matches!(
-        o,
-        RoundOutcome::Reported {
-            outcome: Outcome::Inconclusive,
-            note: Some(_),
-            ..
-        }
-    ));
+    let e = run_round(&cfg, &fake).await.unwrap_err();
+    assert!(e.contains("does not verify"), "{e}");
     assert_eq!(fake.ran.get(), 0, "the scenario must not run");
-    assert_eq!(outcome_of(&hub, &t.member, &id), "inconclusive");
+    assert!(
+        hub.facts("report/").is_empty() && hub.tables().1.is_empty(),
+        "a failed check sends nothing"
+    );
+    assert_eq!(hub.order(&id).state, "open");
 }
 
 #[tokio::test]

@@ -420,10 +420,18 @@ fn machine() -> Value {
 }
 
 fn signed_report(p: &Person, order: &Value, outcome: &str) -> Value {
+    let mut v = report_of(&p.member, order, outcome);
+    let sig = sign_request(&p.key, &v);
+    v["sig"] = json!(sig);
+    v
+}
+
+/// The report of a member, unsigned. A token member needs no signature.
+fn report_of(member: &str, order: &Value, outcome: &str) -> Value {
     let report = Report {
         v: 1,
         run: order["id"].as_str().unwrap().into(),
-        member: p.member.clone(),
+        member: member.into(),
         build: order["build"].as_str().unwrap().into(),
         channel: order["channel"].as_str().unwrap().into(),
         profile: order["profile"].as_str().unwrap().into(),
@@ -441,10 +449,7 @@ fn signed_report(p: &Person, order: &Value, outcome: &str) -> Value {
         at: sommelier::time::now_ms() / 1000,
         sig: None,
     };
-    let mut v = serde_json::to_value(report).unwrap();
-    let sig = sign_request(&p.key, &v);
-    v["sig"] = json!(sig);
-    v
+    serde_json::to_value(report).unwrap()
 }
 
 const PASS: &str = r#"{"verdict":"pass","findings":[],"summary":"fine"}"#;
@@ -579,11 +584,26 @@ async fn the_factory_runs_from_join_to_landing_and_the_log_replays() {
         )
         .await;
     let order_id = order["id"].as_str().unwrap().to_owned();
-    let testers = [
-        person(&w.url, "t-one").await,
-        person(&w.url, "t-two").await,
-        person(&w.url, "t-three").await,
-    ];
+    // Two fresh keys and the token member carol, who is vouched for by the owner. A ring of fresh
+    // keys would not lift itself: one agreeing report must come from a member of tier 1 or above.
+    let testers = [person(&w.url, "t-one").await, person(&w.url, "t-two").await];
+    let carol = call_from(
+        &w.url,
+        &w.carol,
+        "198.51.100.9",
+        json!({"op": "test.next", "machine": machine(), "profiles": ["p1"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(carol["order"]["id"], order_id.as_str(), "{carol}");
+    call_from(
+        &w.url,
+        &w.carol,
+        "198.51.100.9",
+        json!({"op": "report.send", "report": report_of("carol", &carol["order"], "works")}),
+    )
+    .await
+    .unwrap();
     for (i, p) in testers.iter().enumerate() {
         let addr = format!("203.0.{}.7", 110 + i);
         let got = call_from(
@@ -613,7 +633,8 @@ async fn the_factory_runs_from_join_to_landing_and_the_log_replays() {
             .any(|o| o.id == order_id && o.state == "settled")
     })
     .await;
-    let members: Vec<String> = testers.iter().map(|p| p.member.clone()).collect();
+    let mut members: Vec<String> = testers.iter().map(|p| p.member.clone()).collect();
+    members.push("carol".into());
     w.until("run_agreed for every tester", |s| {
         let stamps = sommelier::stamp::query_stamps(s.connection()).unwrap();
         members.iter().all(|m| {
