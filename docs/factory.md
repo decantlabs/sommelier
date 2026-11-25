@@ -427,8 +427,9 @@ copy of the title the tester owns.
 ### 9.1 What a tester does
 
 `sommelier test` asks the hub for a run order that fits the machine (run orders are their own table and do not go
-through the task queue, a tester is not a leased worker), fetches the build, checks it, runs the
-scenario of the title profile through the run script, and sends a signed report. `sommelier test --loop` keeps
+through the task queue, a tester is not a leased worker), checks and unpacks the build, runs the
+scenario of the title profile through the run script, and sends a signed report. Before the first report of a
+machine it says what a report holds and that reports are public. `sommelier test --loop` keeps
 doing that while the pause file is absent.
 
 ### 9.2 Builds a tester may run
@@ -438,8 +439,12 @@ doing that while the pause file is absent.
 | `main` | every landed commit | the release workflow, with a provenance attestation | every tester |
 | `candidate` | a batch that passed S1 to S3 | the same workflow | maintainers' machines. Tier 2 testers who opted in |
 
-The client verifies the attestation before it runs anything. A build from anywhere else is refused. Unreviewed
-code never runs on a tester's gaming PC.
+A build is one archive file. The client verifies its attestation before it runs anything: the attestation must
+name the commit of the run order, the main branch and the release workflow of the repository, so an older release
+of the same repository fails. The client unpacks the archive into a fresh folder, and the run uses that folder and
+nothing else. When any check fails nothing is run and nothing is sent. A build from anywhere else is refused.
+Unreviewed code never runs on a tester's gaming PC. Every value that comes from a hub (order id, build, channel,
+profile, scenario) is checked on the client with the rules the hub uses before it is used.
 
 ### 9.3 Title profiles and reports
 
@@ -456,9 +461,14 @@ the machine unless a maintainer asks and the tester agrees.
 
 A single report is a hint. `cell(profile, machine class, commit range)` is a pure function over the reports:
 
-* `works` or `fails` needs `test.quorum` (default 3) reports from distinct owners in distinct address blocks,
+* `works` or `fails` needs `test.quorum` (default 3) reports from distinct owners in distinct address blocks.
+  The block of a sender is taken when its report arrives and is kept in a private side store, never in the log. A
+  report without a block, and a report for an order that `test.next` did not hand to that member, never count: they
+  are hints. The public matrix says for each cell how many of its reports had a block,
 * a hint schedules more run orders for testers with that hardware,
-* a report against a settled cell gets `run_outlier`, a matching one `run_agreed`,
+* a report against a settled cell gets `run_outlier`, a matching one `run_agreed`. `run_agreed` is written only
+  when at least one agreeing report of the cell comes from a member of tier 1 or above, so a ring of fresh keys
+  cannot lift itself,
 * a cell that turns from `works` to `fails` raises MATRIX_REGRESSION and creates a bisect order (CP 4.5).
 
 The matrix is the public compatibility table of the project.
@@ -819,7 +829,9 @@ section differs, this section holds, and the earlier section was corrected where
 * With the quorum unmet, a cell is a hint for the larger side and unknown on a tie.
 * The `cell(profile, machine class, commit range)` of 9.4 is split. The caller groups reports by profile, machine
   key and build, and `regressions` handles the range.
-* The matrix in `/api/state` counts by member only and says so in `counted_by`.
+* The matrix in `/api/state` counts by address block (`counted_by`) and says for each cell how many reports it
+  has and how many had a block. `matrix_blocks` says whether the front door keeps blocks at all. When it keeps
+  none, every report is shown as a hint and no cell settles.
 * Testers are not leased workers. Run orders are their own table and do not go through the task queue.
 
 ### Tester side
@@ -827,7 +839,9 @@ section differs, this section holds, and the earlier section was corrected where
 * A title profile is a TOML file with `[[scenarios]]`, `[[scenarios.inputs]]` and `[[scenarios.milestones]]`.
 * Log lines start with the second of the run. Summary lines are `name: value`, and metrics of the metrics file are
   passed in by the caller as summary lines.
-* The build check needs exit code 0 and the text "Verification succeeded" from the GitHub tool.
+* The build check needs exit code 0 and the text "Verification succeeded" from the GitHub tool, with the commit of
+  the order, `refs/heads/main` and the release workflow of the repository as conditions. The build is then
+  unpacked with `tar` into a fresh folder, and a link inside refuses it.
 * Windows reports at most 4095 MB of GPU memory for cards above 4 GiB through the standard query.
 
 ### Clean build

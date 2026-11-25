@@ -449,30 +449,52 @@ machine class is `{"os","os_build","gpu","gpu_memory_mb","driver","memory_mb"}`.
 machine, its profile is one of `profiles`, the member has not reported on it, and it has the fewest reports so far
 (then the oldest). Without a match the answer is `{"order":null,"reason":"nothing to test now"}` and the client
 exits with code 6. A member may hold `test.max_handed_per_member` handed orders that it has not answered. The
-answer says nothing about other testers.
+answer says nothing about other testers. The hub notes the hand out with the machine key of the request in its
+private side store, `report_side.db` in the data folder (a file of its own, never part of `state.db`, never
+logged, never served), so a restart does not forget it. A hand out ends with the report, with the closing of the
+order, or after `test.hand_hold_secs`. The tick drops hand outs that ended, for every member.
 
 **`report.send`** (any member, tier 0 too): `{"op":"report.send","report":{...}}`. The report is the one of
 `report::types::Report`. A key member signs it: `sig` is the signature (base64url) of the member's current key
 over the canonical form of the report without `sig` (the compact JSON with sorted keys). A token member needs no
 signature. `report.member` must be the sender. The run order must exist and be open, and build, channel,
-profile and scenario must match it. One report per member and order. Then the report is checked (privacy,
-limits) and the hub writes the FACT `report/<run>`. A message body of the hub is at most 4096 bytes, so the log
+profile and scenario must match it. The machine of the report must fit the `needs` of the order. The order must
+have been handed to this member by `test.next`, for the same machine key (os and normalised GPU), and not longer
+ago than `test.hand_hold_secs`: otherwise the answer is `run order <id> was not handed to you`. One report per
+member and order. The hub takes the address block of the sender at this moment and keeps it with the report in
+the side store. The use of the hand out, the one report per order and the block are decided in one transaction,
+so two sends at once write one report. Then the report is checked (privacy, limits) and the hub writes the FACT
+`report/<run>`. A message body of the hub is at most 4096 bytes, so the log
 excerpt is at most 2048 bytes and the whole report as JSON at most 4096 bytes. Answers `{"run","id"}`.
 
 **Only the hub writes `report/` and `runorder/` facts.** The tables are projected only from FACT messages of the
 hub (role `hub`), so a FACT of a client in the log changes nothing, and a replay of the log gives the same
-tables. `/api/state` keeps `matrix` and gains `run_orders`, the open orders with the number of their reports.
+tables. `/api/state` keeps `matrix` and gains `run_orders`, the open orders with the number of their reports. Each
+row of `matrix` has `reports` (members), `with_block` (how many of them had a block) and `counted_by: "block"`.
+`matrix_blocks` is `{"kept":bool,"text"}`. It says whether the front door keeps address blocks. No block and no
+member is ever named.
+
+**A report without a block is a hint.** When the front door knew no block of the sender, the report is taken, shown
+in the matrix as `hint_works` or `hint_fails`, and never counts toward a quorum, a stamp or a regression. A hub
+whose door keeps no blocks (`door.keep_days` is 0, the default) therefore settles nothing.
 
 **The tick** settles an order when the reports of one machine class agree at `wanted` independent owners
-(distinct members in distinct address blocks), closes an order older than `test.order_ttl_secs`, and raises one
+(distinct members in distinct address blocks, the block each report arrived with), closes an order older than `test.order_ttl_secs`, and raises one
 alert MATRIX_REGRESSION with `data.last_good` and `data.first_bad` when a profile and machine class goes from
 `works` on an older build to `fails` on a newer one. The order of builds is the order of their first run orders.
 
 **`sommelier test`** runs one round: machine class, `test.next`, the check of the build with `gh attestation
 verify` (no flag turns it off), the check of the title against the profile, the scenario through the run script
-(`swarm/run-title.sh`), the report, its signature, `report.send`. A failed build or title check sends an
-inconclusive report for the order that was taken and runs nothing. `--loop` repeats while the pause file does
-not exist. See `sommelier test --help`.
+(`swarm/run-title.sh`), the report, its signature, `report.send`. The client first checks every value of the
+order with the rules of the hub (a name of 1 to 64 letters, digits, `.`, `_` or `-` without `..`, the build as
+hex). The build is one archive file. `gh attestation verify` must succeed with the commit of the order
+(`--source-digest`), `--source-ref refs/heads/main` and `--signer-workflow <repo>/.github/workflows/release.yml`.
+The archive is unpacked with `tar` into a fresh folder, a link inside refuses it, and the run script gets that
+folder as its first argument and nothing else. A failed order check or build check ends the round with an error:
+nothing is run and nothing is sent. A failed title check sends an inconclusive report for the order that was taken
+and runs nothing. The run script refuses a label with a slash, a backslash or two dots. Before the first report of
+a machine `sommelier test` prints what a report holds and that reports are public. `--loop` repeats while the
+pause file does not exist. See `sommelier test --help`.
 
 ## 12. Reviews
 

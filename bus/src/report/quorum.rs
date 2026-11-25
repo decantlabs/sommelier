@@ -140,7 +140,7 @@ fn newer_key(r: &ReportView) -> (u64, u8, &str) {
 
 /// The members whose report counts toward the quorum of a cell: one per address block, the newest
 /// of the block, never an inconclusive one, and never a report without a block.
-fn counted<'a>(reports: &'a [ReportView]) -> BTreeMap<String, &'a ReportView> {
+fn counted(reports: &[ReportView]) -> BTreeMap<String, &ReportView> {
     let mut by_member: BTreeMap<&str, &ReportView> = BTreeMap::new();
     for r in reports
         .iter()
