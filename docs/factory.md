@@ -162,7 +162,7 @@ landed then gets a triage order for audit. Revocation is a row in the log like e
 | Tier | Reached by | May | Limits |
 |------|-----------|-----|--------|
 | 0 newcomer | joining | run tests. Take coding orders of risk `low` and size `small`. Send typed requests only, no free text on the bus and no HELLO | one lease at a time, a few submissions a day, always reviewed by a trusted seat |
-| 1 contributor | a rule: landed orders and agreed test reports above the policy numbers, key older than a week, no revert for cause | orders of risk `normal`, several leases, second reviewer for tier 0 and 1 work, free text on the bus | may not be the only reviewer |
+| 1 contributor | a rule: landed orders and agreed test reports above the policy numbers, key older than a week, no revert for cause | orders of risk `normal`, several leases, test results with weight, free text on the bus. It reviews code only with a `landed` stamp of its own | may not be the only reviewer |
 | 2 trusted | the facts of the rule and a grant signed by a maintainer | sole reviewer for `low` and `normal`, draft orders, the limited coordinator role of CP 13.3, candidate builds | needs a linked account that a maintainer knows |
 | 3 maintainer | named in the policy by the owner | approve hold paths, write orders, grant tier 2, revoke keys | the policy and the tokens stay with the owner |
 
@@ -181,6 +181,10 @@ subject, the kind, the evidence and the issuer.
 | `review_missed` | a change the member passed was reverted for cause | the review and the revert |
 | `run_agreed`, `run_outlier` | a test report matched or contradicted the quorum | the cell of the matrix |
 | `abandoned` | a lease ran out without a checkpoint | the lease |
+
+A reviewer needs standing in code, not only in tests. A member below tier 2 may review only when it holds at
+least one `landed` stamp of its own (and more `landed` than `reverted` stamps). Tier 1 reached by test reports
+alone gives weight to test results and does not make a reviewer.
 
 Rules: no stamp without an evidence id. Nobody issues a stamp about their own work. Stamps come from a rule in the
 hub, or from a maintainer's signed statement. Replay rebuilds them. `tier(member, stamps, policy, now)` is a pure
@@ -370,14 +374,21 @@ The hub creates a review order and picks the holder by rule:
 
 * never the author, never the same address block or linked account,
 * tier at least the author's, and at least 1,
+* tier 2 or at least one `landed` stamp of its own (tier 1 by test reports alone does not review code),
 * for a tier 0 author: a tier 2 member or a maintainer seat, always,
-* a different model family from the author's when one is free,
-* chosen among the candidates by a keyed hash of the submission, so the author cannot predict or steer it.
+* chosen among the candidates by a keyed hash of the submission, so the author cannot predict or steer it. A
+  model family that a member declares is at most a tie break between equal ranks, the default rule ignores it,
+* different reviewers for the required passes: one member who holds two rows counts once.
 
 The reviewer gets a guide from the binary, the order text, the gate report, and the diff after the marker `DATA:`.
 The guide asks three things: does the diff do what the order says, does it do anything the order does not need,
 are the tests real. The answer is one JSON object: `pass`, `fail` or `escalate`, with findings by file and line.
-An `escalate` goes to a maintainer. Reviews are signed and feed the stamps of 5.2.
+An `escalate` goes to a maintainer. Reviews are signed and feed the stamps of 5.2. The signature names the
+submission and the hub, and the hub keeps the signed text in the log.
+
+The tier and the minimum of the rule are checked again when the verdict arrives. Whether a passed review gets an
+audit is decided and shown only after the required passes. A reviewer who is silent past the due time is left
+out of that one round and may be picked again later.
 
 ### 8.5 S4 landing and the two locks
 

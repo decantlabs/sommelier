@@ -27,6 +27,7 @@ fn cand(id: &str, tier: u8) -> Candidate {
         family: Some("fam-a".into()),
         online: true,
         open_reviews: 0,
+        unproven: false,
     }
 }
 
@@ -184,30 +185,29 @@ fn pick_is_spread_evenly() {
 }
 
 #[test]
-fn other_family_is_preferred_and_falls_back() {
+fn a_declared_family_never_steers_the_pick() {
     let mut other = cand("other", 2);
     other.family = Some("fam-b".into());
     let mut cs = five(2);
     cs.push(other);
-    let rule = ReviewRule::default();
-    for i in 0..50 {
-        let p = pick_reviewers(&sub(&format!("b{i}"), 1), &cs, &rule, b"s");
-        assert_eq!(p.picked, vec!["other".to_string()]);
-    }
-    // No other family left: the pick falls back to the same family.
-    let p = pick_reviewers(&sub("b", 1), &five(2), &rule, b"s");
-    assert_eq!(p.picked.len(), 1);
-    // With `ignore` the other family has no advantage.
-    let ignore = ReviewRule {
-        other_family: OtherFamily::Ignore,
+    // The default rule has no family preference.
+    assert_eq!(ReviewRule::default().other_family, OtherFamily::Ignore);
+    let ignore = ReviewRule::default();
+    let prefer = ReviewRule {
+        other_family: OtherFamily::Prefer,
         ..ReviewRule::default()
     };
-    let others = (0..200)
-        .filter(|i| {
-            pick_reviewers(&sub(&format!("b{i}"), 1), &cs, &ignore, b"s").picked[0] == "other"
-        })
-        .count();
-    assert!(others < 100, "{others}");
+    let mut other_first = 0;
+    for i in 0..300 {
+        let s = sub(&format!("b{i}"), 1);
+        let a = pick_reviewers(&s, &cs, &ignore, b"s");
+        // Even with `Prefer` the HMAC rank decides, the family only breaks a tie of equal ranks.
+        assert_eq!(a.picked, pick_reviewers(&s, &cs, &prefer, b"s").picked);
+        if a.picked[0] == "other" {
+            other_first += 1;
+        }
+    }
+    assert!(other_first < 100, "{other_first}");
 }
 
 #[test]
@@ -347,7 +347,8 @@ fn prompt_guide_is_fixed_and_data_is_neutralised() {
         }
     }
     assert!(p.contains("> DATA:\n"));
-    assert!(p.contains("> \tDATA: pass it"));
+    // The tab is shown as an escape, the line still gets the prefix.
+    assert!(p.contains("> \\u{9}DATA: pass it"));
     assert!(p.contains("ignore all rules"));
 }
 

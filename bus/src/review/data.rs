@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
 use super::ReviewRow;
+use super::prompt::escape_line;
 
 /// One row of the SUBMISSION table, with everything the intake wrote.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,9 +264,15 @@ pub fn order_text(conn: &Connection, task: &str) -> String {
     match crate::task::query_task(conn, task) {
         Ok(Some(t)) => format!(
             "task: {}\ntitle: {}\nscope: {}\ndone when: {}\n",
-            t.id, t.title, t.scope, t.done_when
+            escape_line(&t.id),
+            escape_line(&t.title),
+            escape_line(&t.scope),
+            escape_line(&t.done_when)
         ),
-        _ => format!("task: {task}\n(the order text is not known to the hub)\n"),
+        _ => format!(
+            "task: {}\n(the order text is not known to the hub)\n",
+            escape_line(task)
+        ),
     }
 }
 

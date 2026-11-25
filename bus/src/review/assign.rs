@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 use super::data::{self, Review, SubRow};
 use super::flow::{self, Decision};
 use super::ops::ReviewConfig;
-use super::{Candidate, OtherFamily, ReviewRule, SubmissionView, is_audited, pick_reviewers};
+use super::{Candidate, OtherFamily, ReviewRule, SubmissionView, pick_reviewers};
 use crate::door;
 use crate::msg::{Message, Role};
 
@@ -23,6 +23,8 @@ pub struct MemberInfo {
     pub family: Option<String>,
     /// A key member. It cannot be named in `to` of a message.
     pub is_key: bool,
+    /// Below tier 2 and no `landed` stamp of its own: it may test with weight, it may not review code.
+    pub unproven: bool,
 }
 
 /// Everything the tick reads.
@@ -72,6 +74,37 @@ fn role_of(text: &str) -> Option<Role> {
     }
 }
 
+/// True when the member has more `landed` stamps than `reverted` ones. A landed patch that was
+/// reverted does not prove a reviewer. Both counts come from the STAMP table.
+pub fn has_landed_stamp(conn: &Connection, member: &str) -> bool {
+    let count = |kind: &str| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM STAMP WHERE subject = ?1 AND kind = ?2",
+            params![member, kind],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    };
+    count("landed") > count("reverted")
+}
+
+/// The tier of a member for a decision made now, read the way the tick reads it.
+pub fn tier_of(conn: &Connection, name: &str) -> i64 {
+    let key = crate::key::book::current_row(conn, name).ok().flatten();
+    let role = if key.is_some() {
+        None
+    } else {
+        conn.query_row(
+            "SELECT role FROM MEMBER WHERE name = ?1",
+            params![name],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|r| role_of(&r))
+    };
+    crate::stamp::tier_table::tier_from_table(conn, name, role)
+}
+
 /// Reads the tables.
 pub fn read(conn: &Connection, cfg: &ReviewConfig, now_sec: u64) -> Result<Snapshot, String> {
     let mut snap = Snapshot {
@@ -104,7 +137,9 @@ pub fn read(conn: &Connection, cfg: &ReviewConfig, now_sec: u64) -> Result<Snaps
         if tier < 0 {
             continue;
         }
+        let unproven = tier < 2 && !has_landed_stamp(conn, &name);
         snap.members.push(MemberInfo {
+            unproven,
             family: data::family_of(conn, &name),
             tier: tier.min(3) as u8,
             online: (seen.max(0) as u64).saturating_add(cfg.online_secs) >= now_sec,
@@ -178,6 +213,7 @@ fn candidates(
             family: m.family.clone(),
             online: m.online,
             open_reviews: snap.open.get(&m.name).copied().unwrap_or(0),
+            unproven: m.unproven,
         })
         .collect()
 }
@@ -283,7 +319,7 @@ pub fn plan(
             );
             continue;
         }
-        let audited = is_audited(&sub.sha256, secret, cfg.audit_share);
+        // The audit is decided and shown only after the required passes, see `ops::settle`.
         let required = pick.picked.len() as u32;
         for member in &pick.picked {
             let n = next_n.entry(sub.task.clone()).or_insert(1);
@@ -294,7 +330,7 @@ pub fn plan(
                 member,
                 "required",
                 required,
-                audited,
+                false,
                 &[],
                 now,
                 due,
@@ -308,11 +344,14 @@ pub fn plan(
     }
 
     for (sub, reviews) in &snap.reviewing {
-        let holders: HashSet<String> = reviews.iter().map(|r| r.row.reviewer.clone()).collect();
+        // Everyone who holds a row of this submission now. Every pick below joins the set, so two rows that
+        // expire in one tick never fall to the same member.
+        let mut holders: HashSet<String> = reviews.iter().map(|r| r.row.reviewer.clone()).collect();
         if flow::decide(reviews) == Decision::NeedAudit {
             let view = view_of(snap, blocks, sub);
             let pick = pick_reviewers(&view, &candidates(snap, blocks, &holders), &arule, secret);
             if let Some(member) = pick.picked.first() {
+                holders.insert(member.clone());
                 let n = next_n.entry(sub.task.clone()).or_insert(1);
                 out.push(flow::assignment_fact(
                     &sub.task,
@@ -344,8 +383,8 @@ pub fn plan(
             if r.row.state != "assigned" || r.meta.due == 0 || now <= r.meta.due {
                 continue;
             }
-            let mut skip = holders.clone();
-            skip.extend(r.meta.prev.iter().cloned());
+            // A timeout excludes the silent holder for this round only. Earlier holders may be picked again.
+            let skip = holders.clone();
             let view = view_of(snap, blocks, sub);
             let (use_rule, role) = if r.is_audit() {
                 (&arule, "audit")
@@ -356,6 +395,7 @@ pub fn plan(
             one.reviewers = [1; 4];
             let pick = pick_reviewers(&view, &candidates(snap, blocks, &skip), &one, secret);
             if let Some(member) = pick.picked.first() {
+                holders.insert(member.clone());
                 let mut prev = r.meta.prev.clone();
                 prev.push(r.row.reviewer.clone());
                 out.push(flow::assignment_fact(

@@ -9,6 +9,7 @@ use crate::client::{self, Opts};
 use crate::exit;
 use crate::key::client as kc;
 use crate::key::crypto::sign_request;
+use crate::review::escape_line;
 use crate::review::request::verdict_request;
 
 const HELP: &str = "\
@@ -142,6 +143,64 @@ fn task_and_n(f: &Flags) -> Result<(String, u64), String> {
     }
 }
 
+/// Removes the terminal escape sequences from text that a hub sent and shows every other control,
+/// invisible or bidirectional character as a visible escape. A hostile hub cannot move the cursor, change
+/// the colours or the title or hide text in what the reviewer reads. Line breaks stay.
+pub(crate) fn strip_terminal(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut it = text.chars();
+    while let Some(c) = it.next() {
+        if c != '\u{1b}' {
+            kept.push(c);
+            continue;
+        }
+        match it.next() {
+            // CSI: parameters and intermediates up to the final byte 0x40 to 0x7e.
+            Some('[') => {
+                for d in it.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&d) {
+                        break;
+                    }
+                }
+            }
+            // OSC, DCS, SOS, PM, APC: up to BEL or the string terminator ESC backslash.
+            Some(']' | 'P' | 'X' | '^' | '_') => {
+                while let Some(d) = it.next() {
+                    if d == '\u{7}' {
+                        break;
+                    }
+                    if d == '\u{1b}' {
+                        it.next();
+                        break;
+                    }
+                }
+            }
+            // Any other escape takes one character.
+            _ => {}
+        }
+    }
+    let mut out = String::with_capacity(kept.len());
+    for (i, line) in kept.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&escape_line(line));
+    }
+    out
+}
+
+/// The hub id that this client pinned for `url`, from the pin file beside the key file.
+fn pinned_hub_id(f: &Flags, url: &str) -> Result<String, String> {
+    let pins = kc::pins_path(&kc::key_path(&f.data));
+    let name = url.trim().trim_end_matches('/');
+    let text = std::fs::read_to_string(&pins).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| l.rsplit_once(' '))
+        .find(|(u, _)| *u == name)
+        .map(|(_, id)| id.to_owned())
+        .ok_or_else(|| format!("no hub id is pinned for {name} in {}", pins.display()))
+}
+
 /// Entry point of `sommelier review`.
 pub async fn run(args: &[String]) -> Result<ExitCode, String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -174,10 +233,10 @@ async fn next(f: &Flags) -> Result<ExitCode, String> {
     for r in &list {
         println!(
             "{}/{} {} submission {}",
-            r["task"].as_str().unwrap_or("?"),
+            strip_terminal(r["task"].as_str().unwrap_or("?")),
             r["n"],
-            r["role"].as_str().unwrap_or("required"),
-            r["submission"].as_str().unwrap_or("?")
+            strip_terminal(r["role"].as_str().unwrap_or("required")),
+            strip_terminal(r["submission"].as_str().unwrap_or("?"))
         );
     }
     if !list.is_empty() {
@@ -192,7 +251,7 @@ async fn show(f: &Flags) -> Result<ExitCode, String> {
     let prompt = v["prompt"]
         .as_str()
         .ok_or("the hub sent no prompt for this review")?;
-    print!("{prompt}");
+    print!("{}", strip_terminal(prompt));
     Ok(exit::code(exit::OK))
 }
 
@@ -215,13 +274,13 @@ async fn resolve(f: &Flags) -> Result<ExitCode, String> {
     }
     println!(
         "resolved: {} for {}/{}, the submission is now {}",
-        v["verdict"].as_str().unwrap_or("?"),
+        strip_terminal(v["verdict"].as_str().unwrap_or("?")),
         task,
         n,
-        v["state"].as_str().unwrap_or("?")
+        strip_terminal(v["state"].as_str().unwrap_or("?"))
     );
     if let Some(why) = v["refusal"].as_str() {
-        println!("not queued for landing: {why}");
+        println!("not queued for landing: {}", strip_terminal(why));
     }
     Ok(exit::code(exit::OK))
 }
@@ -236,7 +295,23 @@ async fn verdict(f: &Flags) -> Result<ExitCode, String> {
     let text = text.trim().to_owned();
     let mut body = json!({"task": task, "n": n, "verdict": text});
     if let Ok(key) = kc::load(&kc::key_path(&f.data)) {
-        body["sig"] = json!(sign_request(&key.key, &verdict_request(&task, n, &text)));
+        // The signature names the submission and the hub. The submission comes from the assigned review,
+        // the hub id from the pin made when this client first connected to the hub.
+        let list = call(f, "review.next", json!({})).await?;
+        let submission = list["reviews"]
+            .as_array()
+            .and_then(|l| {
+                l.iter()
+                    .find(|r| r["task"].as_str() == Some(task.as_str()) && r["n"] == n)
+            })
+            .and_then(|r| r["submission"].as_str())
+            .ok_or_else(|| format!("review {task}/{n} is not assigned to you"))?
+            .to_owned();
+        let hub_id = pinned_hub_id(f, &opts(f)?.url)?;
+        body["sig"] = json!(sign_request(
+            &key.key,
+            &verdict_request(&task, n, &submission, &hub_id, &text)
+        ));
     }
     let v = call(f, "review.verdict", body).await?;
     if f.json {
@@ -245,13 +320,31 @@ async fn verdict(f: &Flags) -> Result<ExitCode, String> {
     }
     println!(
         "recorded: {} for {}/{}, the submission is now {}",
-        v["verdict"].as_str().unwrap_or("?"),
+        strip_terminal(v["verdict"].as_str().unwrap_or("?")),
         task,
         n,
-        v["state"].as_str().unwrap_or("?")
+        strip_terminal(v["state"].as_str().unwrap_or("?"))
     );
     if let Some(why) = v["refusal"].as_str() {
-        println!("not queued for landing: {why}");
+        println!("not queued for landing: {}", strip_terminal(why));
     }
     Ok(exit::code(exit::OK))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_terminal;
+
+    #[test]
+    fn terminal_sequences_from_a_hub_are_removed_and_the_rest_is_shown() {
+        let hostile = "ok\u{1b}[2J\u{1b}[31mred\u{1b}]0;new title\u{7}more\u{1b}]8;;http://x\u{1b}\u{5c}link\u{1b}Pq data\u{1b}\u{5c}end\rhid\u{202e}rtl\u{9b}c1";
+        let out = strip_terminal(hostile);
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(!out.contains('\r') && !out.contains('\u{7}') && !out.contains('\u{9b}'));
+        assert!(!out.contains('\u{202e}'));
+        assert!(out.starts_with("okredmorelinkend"), "{out:?}");
+        assert!(out.contains("\\u{d}hid") && out.contains("\\u{202e}rtl"));
+        assert_eq!(strip_terminal("a\nb\n"), "a\nb\n");
+        assert_eq!(strip_terminal("plain ünï"), "plain ünï");
+    }
 }

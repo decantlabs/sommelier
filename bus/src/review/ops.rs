@@ -15,9 +15,8 @@ use super::{ReviewRule, assign, parse_verdict, review_prompt};
 use crate::gate::diff::ParsedDiff;
 use crate::hooks::OpContext;
 use crate::hub::Hub;
-use crate::key::crypto::{unb64, verify_request};
+use crate::key::crypto::{canonical_bytes, unb64, verify_request};
 use crate::msg::Message;
-use crate::stamp::tier_table::tier_from_table;
 use crate::task::TaskState;
 
 /// Settings of this part of the hub. Lives in `HubConfig.review`. Everything is off by default.
@@ -170,16 +169,24 @@ fn next(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, Str
     Ok(out)
 }
 
+/// The id of this hub, from its data folder. Empty for a context without a data folder.
+fn hub_id_of(config: &crate::hub::HubConfig) -> String {
+    std::fs::read_to_string(config.data_dir.join("hub_id"))
+        .map(|t| t.trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// The signature of a key member, checked against the signed form of the verdict. Returns the signature and
+/// the exact signed text (for a key member), which the answer FACT keeps.
 fn check_signature(
     ctx: &OpContext<'_>,
-    task: &str,
-    n: u64,
+    review: &Review,
     verdict_text: &str,
     body: &Value,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     let sig = body.get("sig").and_then(Value::as_str).unwrap_or_default();
     if ctx.caller.trust != crate::key::ops::TRUST {
-        return Ok(sig.to_owned());
+        return Ok((sig.to_owned(), None));
     }
     if sig.is_empty() {
         return Err(
@@ -191,10 +198,101 @@ fn check_signature(
         crate::key::book::current_row(ctx.store.connection(), &ctx.caller.name)?
             .ok_or_else(|| format!("no key is registered for `{}`", ctx.caller.name))?;
     let public = unb64(&public).map_err(|_| "the stored key is damaged".to_string())?;
-    let mut request = super::request::verdict_request(task, n, verdict_text);
+    let mut request = super::request::verdict_request(
+        &review.row.task,
+        review.row.n,
+        &review.row.submission,
+        &hub_id_of(ctx.config()),
+        verdict_text,
+    );
     request["sig"] = sig.into();
     verify_request(&request, &public).map_err(|e| format!("bad signature on the verdict: {e}"))?;
-    Ok(sig.to_owned())
+    let signed = String::from_utf8(canonical_bytes(&request))
+        .map_err(|_| "the signed verdict is not text".to_string())?;
+    if signed.len() > flow::MAX_SIGNED_BYTES {
+        return Err(format!(
+            "the signed verdict is longer than {} bytes and the hub keeps it with the answer: shorten the findings and the summary",
+            flow::MAX_SIGNED_BYTES
+        ));
+    }
+    Ok((sig.to_owned(), Some(signed)))
+}
+
+/// The tier of a member for a decision now, as the tick reads it.
+fn member_tier(conn: &rusqlite::Connection, name: &str) -> i64 {
+    assign::tier_of(conn, name)
+}
+
+/// Whether `me` may answer `review` now. The tier, the minimum of the rule for the author's tier at this
+/// moment and the proof of a reviewer are checked again here, the tick checked them at assignment.
+fn check_standing(
+    ctx: &OpContext<'_>,
+    me: &str,
+    review: &Review,
+    sub: &SubRow,
+) -> Result<(), String> {
+    let conn = ctx.store.connection();
+    let role = (ctx.caller.trust != crate::key::ops::TRUST).then_some(ctx.caller.role);
+    let tier = crate::stamp::tier_table::tier_from_table(conn, me, role);
+    if tier < 1 {
+        return Err("tier 0 may not review: a verdict needs tier 1 or above".into());
+    }
+    let author_now = member_tier(conn, &sub.member).clamp(0, 3) as u8;
+    let author_tier = author_now.max(sub.tier);
+    let rule = &ctx.config().review.rule;
+    let need = if review.is_audit() {
+        3
+    } else {
+        1.max(i64::from(author_tier))
+            .max(i64::from(rule.min_tier[usize::from(author_tier)]))
+    };
+    if tier < need {
+        return Err(format!(
+            "tier {tier} may not answer this review: the rule asks for tier {need} or above"
+        ));
+    }
+    if tier < 2 && !assign::has_landed_stamp(conn, me) {
+        return Err(
+            "tier 1 by test reports alone does not review code: a reviewer needs a landed patch of its own or tier 2"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Decides, after a pass that completes the required reviews, whether this submission gets an audit. The
+/// answer is a function of the hub secret and the submission, and it is written only now, so nobody sees it
+/// while required reviews are open. The required rows get the audit mark and the decision is read again.
+fn settle(
+    ctx: &mut OpContext<'_>,
+    sub: &SubRow,
+    secret: Option<&[u8]>,
+) -> Result<Vec<Review>, String> {
+    let reviews = data::reviews_of(ctx.store.connection(), &sub.sha256)?;
+    let Some(secret) = secret else {
+        return Ok(reviews);
+    };
+    let marked = reviews.iter().any(|r| r.is_audit() || r.row.audited);
+    if marked
+        || flow::decide(&reviews) != Decision::Approve
+        || !super::is_audited(&sub.sha256, secret, ctx.config().review.audit_share)
+    {
+        return Ok(reviews);
+    }
+    let now_sec = ctx.now_ms / 1000;
+    for r in reviews.iter().filter(|r| r.row.state == "answered") {
+        ctx.emit(flow::audit_mark_fact(r, now_sec))?;
+    }
+    data::reviews_of(ctx.store.connection(), &sub.sha256)
+}
+
+/// The hub secret, only when the audit is switched on. Read before anything is written.
+fn audit_secret(ctx: &OpContext<'_>) -> Result<Option<Vec<u8>>, String> {
+    if ctx.config().review.audit_share > 0.0 {
+        load_secret(&ctx.config().data_dir).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 fn verdict(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, String> {
@@ -210,10 +308,6 @@ fn verdict(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, 
     if review.row.state != "assigned" {
         return Err(format!("review {task}/{n} has an answer already"));
     }
-    let role = (ctx.caller.trust != crate::key::ops::TRUST).then_some(ctx.caller.role);
-    if tier_from_table(ctx.store.connection(), &me, role) < 1 {
-        return Err("tier 0 may not review: a verdict needs tier 1 or above".into());
-    }
     let sub = data::query_submission(ctx.store.connection(), &review.row.submission)?
         .ok_or_else(|| "the submission of this review is unknown".to_string())?;
     if sub.state != "reviewing" {
@@ -222,11 +316,19 @@ fn verdict(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, 
             sub.state
         ));
     }
-    let sig = check_signature(ctx, &task, n, &verdict_text, body)?;
+    check_standing(ctx, &me, &review, &sub)?;
+    let (sig, signed) = check_signature(ctx, &review, &verdict_text, body)?;
     let parsed = parse_verdict(&verdict_text)?;
+    let secret = audit_secret(ctx)?;
 
-    ctx.emit(flow::answer_fact(&review, &parsed, &sig, now_sec))?;
-    let reviews = data::reviews_of(ctx.store.connection(), &sub.sha256)?;
+    ctx.emit(flow::answer_fact(
+        &review,
+        &parsed,
+        &sig,
+        signed.as_deref(),
+        now_sec,
+    ))?;
+    let reviews = settle(ctx, &sub, secret.as_deref())?;
     let decision = flow::decide(&reviews);
 
     let mut out = Map::new();
@@ -305,6 +407,7 @@ fn resolve(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, 
             ));
         }
     }
+    let secret = audit_secret(ctx)?;
     ctx.emit(flow::resolution_fact(
         &review,
         &decision,
@@ -326,7 +429,7 @@ fn resolve(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, 
         requeue_task(ctx, &sub, &note)?;
         "review_failed"
     } else {
-        let reviews = data::reviews_of(ctx.store.connection(), &sub.sha256)?;
+        let reviews = settle(ctx, &sub, secret.as_deref())?;
         match flow::decide(&reviews) {
             Decision::Approve => approve(ctx, &sub, &mut out)?,
             _ => "reviewing",

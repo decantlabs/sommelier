@@ -26,7 +26,7 @@ pub use hmac::{hmac_sha256, hmac_sha256_parts};
 pub use pick::{
     Candidate, Exclusion, OtherFamily, Pick, ReviewRule, SubmissionView, is_audited, pick_reviewers,
 };
-pub use prompt::{GUIDE, MARKER, neutralise, review_prompt};
+pub use prompt::{GUIDE, MARKER, escape_line, neutralise, review_prompt};
 pub use verdict::{Finding, Verdict, VerdictWord, parse_verdict};
 
 /// DDL of the REVIEW table.
