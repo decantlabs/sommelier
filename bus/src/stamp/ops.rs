@@ -513,7 +513,7 @@ fn cause_of(body: &Value) -> Result<String, String> {
 
 /// An orchestrator, a member the config lists (a token name or a member id), or a key member that
 /// holds tier 3.
-fn is_maintainer(ctx: &OpContext<'_>) -> bool {
+pub(crate) fn is_maintainer(ctx: &OpContext<'_>) -> bool {
     ctx.caller.role == Role::Orchestrator
         || ctx.config().stamp.is_listed_maintainer(&ctx.caller.name)
         || (ctx.caller.trust == crate::key::ops::TRUST

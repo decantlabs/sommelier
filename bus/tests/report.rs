@@ -731,7 +731,7 @@ fn validate_refuses_each_bad_case() {
         "inf_value",
     );
     refused(
-        |r| r.log_excerpt = "x".repeat(16 * 1024 + 1),
+        |r| r.log_excerpt = "x".repeat(2048 + 1),
         "report.log_excerpt",
     );
     refused(
@@ -751,8 +751,25 @@ fn validate_allows_exactly_the_limits() {
     for i in 0..64 {
         r.metrics.insert(format!("m{i}"), i as f64);
     }
-    r.log_excerpt = "x".repeat(16 * 1024);
+    r.log_excerpt = "x".repeat(2048);
     assert_eq!(validate_report(&r, &ReportLimits::default()), Ok(()));
+}
+
+#[test]
+fn a_report_that_does_not_fit_a_hub_message_is_refused_with_the_real_number() {
+    let mut r = report("run1", "m1", Outcome::Works);
+    r.metrics.clear();
+    for i in 0..64 {
+        r.metrics
+            .insert(format!("{i:02}{}", "n".repeat(60)), 1234.5678);
+    }
+    r.log_excerpt = "x".repeat(2048);
+    let err = validate_report(&r, &ReportLimits::default()).unwrap_err();
+    assert!(
+        err.contains("4096") && err.contains("message of the hub"),
+        "{err}"
+    );
+    assert_eq!(ReportLimits::default().max_log_bytes, 2048);
 }
 
 // ---------- projection ----------

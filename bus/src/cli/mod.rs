@@ -24,6 +24,7 @@ pub mod state;
 pub mod submit;
 pub mod task;
 pub mod test;
+pub mod verify;
 pub mod work;
 
 fn unimplemented(cmd: &str) -> Result<ExitCode, String> {
@@ -55,6 +56,7 @@ pub async fn dispatch(cmd: &str, args: &[String]) -> Option<Result<ExitCode, Str
         "join" | "key" => Some(key::run(cmd, args).await),
         "submit" => Some(submit::run(args).await),
         "review" => Some(review::run(args).await),
+        "verify" => Some(verify::run(args).await),
         "test" => Some(test::run(args).await),
         "standing" => Some(standing::run(args).await),
         _ => None,

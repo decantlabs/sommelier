@@ -430,6 +430,15 @@ fn worktree_git_dir(worktree: &Path) -> Option<PathBuf> {
 /// Spawns the launcher hook script in the foreground with the exact environment variables
 /// of section 5.4 and with all bus token variables removed.
 pub fn spawn_hook(hook_script: &Path, env: &HookEnv) -> Result<Child, String> {
+    spawn_hook_with(hook_script, env, None)
+}
+
+/// [`spawn_hook`] with a sandbox level from the supervisor config. `Some` wins over `SOMMELIER_SANDBOX`.
+pub fn spawn_hook_with(
+    hook_script: &Path,
+    env: &HookEnv,
+    sandbox_level: Option<&str>,
+) -> Result<Child, String> {
     if !hook_script.is_file() {
         return Err(format!("hook script not found: {}", hook_script.display()));
     }
@@ -444,7 +453,10 @@ pub fn spawn_hook(hook_script: &Path, env: &HookEnv) -> Result<Child, String> {
         let _ = fs::remove_file(env.out_dir.join(name));
     }
 
-    let argv = plan_hook_command(hook_script, env, &|k| std::env::var(k).ok())?;
+    let argv = plan_hook_command(hook_script, env, &|k| match (k, sandbox_level) {
+        ("SOMMELIER_SANDBOX", Some(level)) => Some(level.to_owned()),
+        _ => std::env::var(k).ok(),
+    })?;
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
 

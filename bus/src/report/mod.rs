@@ -24,7 +24,7 @@ pub use quorum::{
     Cell, CellState, QuorumRules, Regression, ReportView, Verdict, cell, classify, machine_key,
     regressions,
 };
-pub use validate::{ReportLimits, validate_report};
+pub use validate::{MAX_LOG_BYTES, MAX_REPORT_BYTES, ReportLimits, validate_report};
 
 use types::{Outcome, Report};
 

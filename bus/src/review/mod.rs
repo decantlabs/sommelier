@@ -108,6 +108,9 @@ struct ReviewFact {
     due: Option<u64>,
     /// Reviewers that already had this review and did not answer.
     prev: Option<Value>,
+    /// A maintainer settled an escalated or disagreeing review: who, and why.
+    resolved_by: Option<String>,
+    reason: Option<String>,
 }
 
 /// Splits `review/<task>/<n>` into task and n.
@@ -207,9 +210,22 @@ pub fn apply_review_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), S
         msg_id: 0,
     });
     if row.state == "answered" {
-        // An answered review is frozen. Only the audit flag may still change.
+        // An answered review is frozen. Only the audit flag may still change, and a maintainer may settle
+        // it with a FACT that names `resolved_by` and the new verdict.
         if let Some(a) = fact.audited {
             row.audited = a;
+        }
+        if let (Some(by), Some(v @ ("pass" | "fail"))) =
+            (fact.resolved_by.as_deref(), fact.verdict.as_deref())
+        {
+            row.verdict = v.to_owned();
+            let mut findings: Vec<Value> = serde_json::from_str(&row.findings).unwrap_or_default();
+            findings.push(json!({
+                "path": "",
+                "line": 0,
+                "text": format!("resolved by {by}: {}", fact.reason.as_deref().unwrap_or_default()),
+            }));
+            row.findings = Value::Array(findings).to_string();
         }
     } else {
         if let Some(s) = fact.submission {

@@ -158,6 +158,32 @@ pub fn answer_fact(review: &Review, verdict: &Verdict, signature: &str, now_sec:
     }
 }
 
+/// The FACT that a maintainer writes to settle an escalated review or a disagreeing audit. It changes the
+/// verdict of an answered review to `pass` or `fail` and names who decided and why. The projection accepts a
+/// change of an answered row only for a FACT that carries `resolved_by`.
+pub fn resolution_fact(
+    review: &Review,
+    decision: &str,
+    by: &str,
+    reason: &str,
+    now_sec: u64,
+) -> Message {
+    hub_message(
+        Kind::Fact,
+        format!("review/{}/{}", review.row.task, review.row.n),
+        json!({
+            "v": 1,
+            "state": "answered",
+            "submission": review.row.submission,
+            "verdict": decision,
+            "was": review.row.verdict,
+            "resolved_by": clean(by),
+            "reason": clean(reason),
+            "at": now_sec,
+        }),
+    )
+}
+
 /// The FACT `submission/<sha256>` with a new state. Every other field stays as the row had it.
 pub fn submission_fact(sub: &SubRow, state: &str, now_sec: u64) -> Message {
     hub_message(

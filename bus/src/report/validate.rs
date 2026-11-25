@@ -3,6 +3,13 @@
 use super::privacy::find_private;
 use super::types::Report;
 
+/// The most bytes of a log excerpt. A message body of the hub holds at most 4096 bytes and the whole
+/// report must fit into it, so the excerpt gets half.
+pub const MAX_LOG_BYTES: usize = 2048;
+
+/// The most bytes of a whole report as JSON: the body limit of a hub message.
+pub const MAX_REPORT_BYTES: usize = 4096;
+
 /// Limits of [`validate_report`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReportLimits {
@@ -14,6 +21,8 @@ pub struct ReportLimits {
     pub max_metrics: usize,
     /// Most bytes of the log excerpt.
     pub max_log_bytes: usize,
+    /// Most bytes of the whole report as JSON, the signature included.
+    pub max_report_bytes: usize,
     /// Longest id, metric name or error class in bytes.
     pub max_id_len: usize,
 }
@@ -24,7 +33,8 @@ impl Default for ReportLimits {
             version: 1,
             channels: vec!["main".to_string(), "candidate".to_string()],
             max_metrics: 64,
-            max_log_bytes: 16 * 1024,
+            max_log_bytes: MAX_LOG_BYTES,
+            max_report_bytes: MAX_REPORT_BYTES,
             max_id_len: 64,
         }
     }
@@ -125,6 +135,13 @@ pub fn validate_report(r: &Report, limits: &ReportLimits) -> Result<(), String> 
             "report.log_excerpt is {} bytes, at most {} are allowed",
             r.log_excerpt.len(),
             limits.max_log_bytes
+        ));
+    }
+    let whole = serde_json::to_string(r).map_or(0, |s| s.len());
+    if whole > limits.max_report_bytes {
+        return Err(format!(
+            "the report is {whole} bytes as JSON, at most {} fit a message of the hub: cut the log excerpt or the metrics",
+            limits.max_report_bytes
         ));
     }
     if let Some(hit) = find_private(&r.log_excerpt).first() {

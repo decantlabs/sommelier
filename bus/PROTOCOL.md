@@ -456,8 +456,8 @@ answer says nothing about other testers.
 over the canonical form of the report without `sig` (the compact JSON with sorted keys). A token member needs no
 signature. `report.member` must be the sender. The run order must exist and be open, and build, channel,
 profile and scenario must match it. One report per member and order. Then the report is checked (privacy,
-limits, a log excerpt of at most 2048 bytes by default) and the hub writes the FACT `report/<run>`. A message
-body of the hub is at most 4096 bytes, so a report must stay below that. Answers `{"run","id"}`.
+limits) and the hub writes the FACT `report/<run>`. A message body of the hub is at most 4096 bytes, so the log
+excerpt is at most 2048 bytes and the whole report as JSON at most 4096 bytes. Answers `{"run","id"}`.
 
 **Only the hub writes `report/` and `runorder/` facts.** The tables are projected only from FACT messages of the
 hub (role `hub`), so a FACT of a client in the log changes nothing, and a replay of the log gives the same
@@ -516,12 +516,23 @@ answer, and only with tier 1 or above. A key member must sign: `sig` is `sign_re
 **The first lock.** `land.enqueue` of a ref that starts with `bundle:` is refused unless the submission is
 `approved`, its gate report passed, its clean build concluded `passed` and it holds the passing reviews its
 rule asked for. The error is one line that names the missing part. Other refs are not touched.
-The rule of `ReviewConfig` is read by the tick only. The requests cannot see the hub settings, so they read the
-bundles from the default folder `<data>/bundles`, and the number of required reviews travels in the FACTs.
+The requests and the tick read the bundles and diffs from the store of the intake (`[intake] bundle_store`, default
+`<data>/bundles`). The number of required reviews travels in the FACTs.
 
 **`/api/state`.** `reviews` lists the open reviews, `review_counts` the number of reviews by state.
 
-**CLI.** `sommelier review next`, `review show TASK N` (prints the prompt), `review verdict TASK N --file FILE`.
+**`review.resolve`** `{"task","n","decision","reason"}` (a maintainer: an orchestrator, a member that the hub config lists, or
+a key member at tier 3). It settles a review that waits for ever, an escalated review or an audit that disagrees.
+`decision` is `pass` or `fail`. The hub writes a FACT `review/<task>/<n>` that changes the verdict of the answered
+review and carries `resolved_by`, `was` and `reason`, the only change an answered review accepts. A `pass` lets the
+rule decide again (it may approve and enqueue), a `fail` fails the submission and returns the order. Answers `{"task",
+"n","verdict","state"}`.
+
+**Retry of the enqueue.** An approved submission without a landing row (the enqueue failed after the approval) is
+enqueued again on the tick, through the first lock.
+
+**CLI.** `sommelier review next`, `review show TASK N` (prints the prompt), `review verdict TASK N --file FILE`,
+`review resolve TASK N --decision pass|fail --reason TEXT`.
 
 ## 13. Submissions
 
@@ -562,7 +573,11 @@ reads the conclusion of the run through the GitHub API. Each step is a FACT `ver
 `failing_step` and `minutes`, plus `order`, `dispatches` and `started_ms` so a restart can go on. A dispatch that
 shows no run is retried once. The submission moves to `verifying`, then `verified` or `verify_failed`. A failed
 build returns the order with the failing step as the resume note. `verify.retry` (orchestrator only,
-`{"op":"verify.retry","sha256"}`) puts a `verify_failed` submission back to `gated`.
+`{"op":"verify.retry","sha256"}`) puts a `verify_failed` submission back to `gated`. `verify.override` (orchestrator
+only, `{"op":"verify.override","submission","conclusion","reason"}`, `conclusion` is `passed` or `failed`) marks a
+`gated` submission verified or failed without a run. The FACT `verify/<sha256>` carries `overridden`, `by` and
+`reason`. A `failed` override returns the order like a failed run. It is the way to go on while GitHub is down.
+CLI: `sommelier verify override SUBMISSION --conclusion passed|failed --reason TEXT`, `verify retry SUBMISSION`.
 
 **Reads for the runner (no credentials, the hash is the key).**
 `GET /api/bundle/<sha256>` serves the bundle of a submission that passed the gates, else `404`.

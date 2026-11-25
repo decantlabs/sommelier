@@ -37,7 +37,7 @@ use super::disk::{DiskGuardConfig, check_disk};
 use super::exec::{build_exit_fact_request, build_status_request};
 use super::launch::{
     HookEnv, assemble_role_seat_prompt, assemble_worker_prompt, guide_vendor, prepare_worktree,
-    resolve_hook_script, spawn_hook, vendor_for_class,
+    resolve_hook_script, spawn_hook_with, vendor_for_class,
 };
 use super::outbox::Outbox;
 use super::rescue::{make_rescue_ref, worktree_head_sha};
@@ -141,6 +141,10 @@ pub struct SupervisorConfig {
     /// Optional injected free disk space in GiB for deterministic tests.
     #[serde(default)]
     pub injected_free_gb: Option<u64>,
+    /// Sandbox level of the hooks: `container`, `user` or `none`. Wins over `SOMMELIER_SANDBOX`. Checked
+    /// when the supervisor starts, so an unknown value fails there and not at the first hook start.
+    #[serde(default)]
+    pub sandbox: Option<String>,
 }
 
 fn default_owner() -> String {
@@ -220,11 +224,24 @@ impl Default for SupervisorConfig {
             role_seat: None,
             min_free_gb: default_min_free_gb(),
             injected_free_gb: Some(100),
+            sandbox: None,
         }
     }
 }
 
 impl SupervisorConfig {
+    /// Checks the sandbox level of the config. `Ok(None)` when the config names none.
+    pub fn sandbox_level(&self) -> Result<Option<&str>, String> {
+        match self.sandbox.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(v) => crate::agent::sandbox::SandboxLevel::parse(v)
+                .map(|_| Some(v))
+                .map_err(|_| {
+                    format!("config sandbox `{v}` is unknown: use container, user or none")
+                }),
+        }
+    }
+
     /// Loads a `SupervisorConfig` from a TOML or JSON file.
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let text = fs::read_to_string(path)
@@ -385,7 +402,7 @@ pub async fn start_role_seat(
             effort: "medium".into(),
             out_dir: seat_dir.clone(),
         };
-        let mut child = spawn_hook(&hook_script, &env)?;
+        let mut child = spawn_hook_with(&hook_script, &env, cfg.sandbox_level()?)?;
         let status = child.wait().map_err(|e| format!("wait role seat: {e}"))?;
         exit_code = status.code();
     }
@@ -411,6 +428,7 @@ pub async fn start_role_seat(
 ///      and sends `task.exit` + exit `FACT` + final `STATUS`.
 ///    - Runs `worktree_sweep`.
 pub async fn run_supervisor(cfg: &SupervisorConfig) -> Result<SupervisorSummary, String> {
+    cfg.sandbox_level()?;
     let mut disk_cfg = DiskGuardConfig::default().with_min_free_gb(cfg.min_free_gb);
     if let Some(gb) = cfg.injected_free_gb {
         disk_cfg = disk_cfg.with_injected_free_gb(gb);
@@ -723,7 +741,7 @@ async fn execute_leased_task(
 
     // 5. Spawn child process via launcher hook
     let _ = children_store.remove(&worker_name);
-    let mut child = spawn_hook(&hook_script, &hook_env)?;
+    let mut child = spawn_hook_with(&hook_script, &hook_env, cfg.sandbox_level()?)?;
     let pid = child.id();
     let start_sec = now_ms() / 1000;
 

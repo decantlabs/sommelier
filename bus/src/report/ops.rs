@@ -44,8 +44,8 @@ pub struct TestConfig {
     pub enabled: bool,
     /// Independent owners that settle a cell. A run order may want its own number.
     pub rules: QuorumRules,
-    /// What a report may hold. The default log excerpt is smaller than the 16 KiB of the wave one
-    /// limit, because a message body of the hub is at most 4096 bytes.
+    /// What a report may hold. The log excerpt is at most 2048 bytes and the whole report at most
+    /// 4096 bytes, because a message body of the hub is at most 4096 bytes.
     pub limits: ReportLimits,
     /// How many open orders a member may hold at once: orders handed to it by `test.next` and not
     /// answered yet. At the limit `test.next` hands out only orders it already handed.
@@ -69,10 +69,7 @@ impl Default for TestConfig {
         TestConfig {
             enabled: false,
             rules: QuorumRules::default(),
-            limits: ReportLimits {
-                max_log_bytes: 2048,
-                ..ReportLimits::default()
-            },
+            limits: ReportLimits::default(),
             max_handed_per_member: 2,
             hand_hold_secs: 3600,
             order_ttl_secs: 7 * 24 * 3600,

@@ -289,6 +289,16 @@ fn fact_msg(topic: String, row: Value, ts: String) -> Message {
     }
 }
 
+/// The FACT of the hub that puts one row in the landing queue. `land.enqueue` writes it after its lock,
+/// and the review tick writes it again for an approved submission whose enqueue failed.
+pub fn queue_fact(row: &LandingRow, now_ms: u64) -> Message {
+    fact_msg(
+        format!("land/{}", row.ref_name),
+        json!(row),
+        rfc3339(now_ms),
+    )
+}
+
 fn query_open_alert_keys(conn: &Connection, code: &str) -> Result<BTreeSet<String>, String> {
     let mut stmt = conn
         .prepare("SELECT key FROM ALERT WHERE code = ?1 AND state != 'closed'")
@@ -349,7 +359,7 @@ pub fn on_op(
                 enqueued_at: now_sec,
                 ..LandingRow::default()
             };
-            let msg_id = ctx.emit(fact_msg(format!("land/{ref_name}"), json!(row), ts))?;
+            let msg_id = ctx.emit(queue_fact(&row, ctx.now_ms))?;
             out.insert("duplicate".into(), json!(false));
             out.insert("landing".into(), json!(row));
             out.insert("msg_id".into(), json!(msg_id));

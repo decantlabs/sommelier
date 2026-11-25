@@ -912,6 +912,12 @@ impl StoreModule for RoleStoreModule {
             } else {
                 &msg.from
             };
+            // A key member below tier 1 has no capacity and so no row of what it announced.
+            if crate::store::core::key_member_without_capacity(tx, owner)
+                || crate::store::core::key_member_without_capacity(tx, &msg.from)
+            {
+                return Ok(());
+            }
             let (caps, roles) = parse_hello_capabilities_and_roles(&msg.body, &msg.refs);
             let caps_json = serde_json::to_string(&caps).unwrap_or_else(|_| "[]".into());
             let roles_json = serde_json::to_string(&roles).unwrap_or_else(|_| "[]".into());

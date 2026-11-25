@@ -924,3 +924,29 @@ async fn timeout_kills_spawned_child_process_tree() {
     hub_handle.abort();
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn an_unknown_sandbox_value_fails_at_supervisor_start() {
+    let dir = temp_dir("sandbox-start");
+    let cfg = SupervisorConfig {
+        owner: "sup1".into(),
+        data_dir: dir.join("sup1-data"),
+        max_iterations: Some(1),
+        sandbox: Some("fortress".into()),
+        ..SupervisorConfig::default()
+    };
+    let err = run_supervisor(&cfg).await.unwrap_err();
+    assert!(err.contains("sandbox") && err.contains("fortress"), "{err}");
+    // A known level passes the check, and so does none at all.
+    for ok in [Some("container"), Some("user"), Some("none"), None] {
+        let cfg = SupervisorConfig {
+            sandbox: ok.map(str::to_owned),
+            ..SupervisorConfig::default()
+        };
+        assert!(cfg.sandbox_level().is_ok(), "{ok:?}");
+    }
+    // The field reads from a TOML config file.
+    let text = "owner = \"o\"\nsandbox = \"container\"\n";
+    let parsed: SupervisorConfig = toml::from_str(text).unwrap();
+    assert_eq!(parsed.sandbox.as_deref(), Some("container"));
+}

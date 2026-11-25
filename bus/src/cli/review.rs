@@ -16,6 +16,7 @@ usage:
   sommelier review next [--json]
   sommelier review show TASK N
   sommelier review verdict TASK N --file FILE [--json]
+  sommelier review resolve TASK N --decision pass|fail --reason TEXT [--json]
   common flags: --url URL, --token T, --token-file FILE, --data DIR
 next     lists the reviews the hub assigned to you.
 show     prints the prompt of one review: the guide, then the marker line DATA:, then the order, the
@@ -23,6 +24,8 @@ show     prints the prompt of one review: the guide, then the marker line DATA:,
 verdict  sends your answer. FILE holds one JSON object, as the guide describes:
          {\"verdict\":\"pass|fail|escalate\",\"findings\":[{\"path\":\"f\",\"line\":1,\"text\":\"t\"}],\"summary\":\"s\"}
          A key member signs the verdict with its key file automatically.
+resolve  maintainers only. Settles a review that waits for ever: an escalated review or an audit that
+         disagrees. `pass` lets the rule decide again, `fail` fails the submission and returns the order.
 ";
 
 /// The help text of this command.
@@ -30,23 +33,29 @@ pub fn help() -> &'static str {
     HELP
 }
 
-struct Flags {
+pub(crate) struct Flags {
     url: Option<String>,
     token: Option<String>,
     token_file: Option<String>,
     data: PathBuf,
     file: Option<String>,
-    json: bool,
-    rest: Vec<String>,
+    decision: Option<String>,
+    pub(crate) reason: Option<String>,
+    pub(crate) conclusion: Option<String>,
+    pub(crate) json: bool,
+    pub(crate) rest: Vec<String>,
 }
 
-fn parse(args: &[String]) -> Result<Flags, String> {
+pub(crate) fn parse(args: &[String]) -> Result<Flags, String> {
     let mut f = Flags {
         url: None,
         token: None,
         token_file: None,
         data: crate::default_data_dir(),
         file: None,
+        decision: None,
+        reason: None,
+        conclusion: None,
         json: false,
         rest: Vec::new(),
     };
@@ -68,6 +77,9 @@ fn parse(args: &[String]) -> Result<Flags, String> {
             "--token-file" => f.token_file = Some(value("--token-file")?),
             "--data" => f.data = PathBuf::from(value("--data")?),
             "--file" => f.file = Some(value("--file")?),
+            "--decision" => f.decision = Some(value("--decision")?),
+            "--reason" => f.reason = Some(value("--reason")?),
+            "--conclusion" => f.conclusion = Some(value("--conclusion")?),
             "--json" => f.json = true,
             other if other.starts_with("--") => {
                 return Err(format!(
@@ -114,7 +126,7 @@ fn opts(f: &Flags) -> Result<Opts, String> {
     Ok(Opts { url, token })
 }
 
-async fn call(f: &Flags, op: &str, mut body: Value) -> Result<Value, String> {
+pub(crate) async fn call(f: &Flags, op: &str, mut body: Value) -> Result<Value, String> {
     body["op"] = json!(op);
     client::request_ok(&opts(f)?, body).await
 }
@@ -141,7 +153,11 @@ pub async fn run(args: &[String]) -> Result<ExitCode, String> {
         Some("next") => next(&f).await,
         Some("show") => show(&f).await,
         Some("verdict") => verdict(&f).await,
-        _ => Err("usage: sommelier review next | show TASK N | verdict TASK N --file FILE".into()),
+        Some("resolve") => resolve(&f).await,
+        _ => Err(
+            "usage: sommelier review next | show TASK N | verdict TASK N --file FILE | resolve TASK N --decision pass|fail --reason TEXT"
+                .into(),
+        ),
     }
 }
 
@@ -177,6 +193,36 @@ async fn show(f: &Flags) -> Result<ExitCode, String> {
         .as_str()
         .ok_or("the hub sent no prompt for this review")?;
     print!("{prompt}");
+    Ok(exit::code(exit::OK))
+}
+
+async fn resolve(f: &Flags) -> Result<ExitCode, String> {
+    let (task, n) = task_and_n(f)?;
+    let decision = f
+        .decision
+        .as_deref()
+        .ok_or("--decision pass|fail is needed")?;
+    let reason = f.reason.as_deref().ok_or("--reason TEXT is needed")?;
+    let v = call(
+        f,
+        "review.resolve",
+        json!({"task": task, "n": n, "decision": decision, "reason": reason}),
+    )
+    .await?;
+    if f.json {
+        println!("{v}");
+        return Ok(exit::code(exit::OK));
+    }
+    println!(
+        "resolved: {} for {}/{}, the submission is now {}",
+        v["verdict"].as_str().unwrap_or("?"),
+        task,
+        n,
+        v["state"].as_str().unwrap_or("?")
+    );
+    if let Some(why) = v["refusal"].as_str() {
+        println!("not queued for landing: {why}");
+    }
     Ok(exit::code(exit::OK))
 }
 

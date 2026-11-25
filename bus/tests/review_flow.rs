@@ -562,6 +562,178 @@ fn an_audit_that_disagrees_raises_the_alert_and_nothing_lands() {
     assert!(e.landings().is_empty());
 }
 
+fn resolve_body(task: &str, n: u64, decision: &str) -> Value {
+    json!({"task": task, "n": n, "decision": decision, "reason": "read the diff myself"})
+}
+
+fn orch_op(e: &mut Env, op: &str, body: Value) -> Result<Map<String, Value>, String> {
+    e.run("orch", Role::Orchestrator, "owner", op, body)
+}
+
+#[test]
+fn a_maintainer_resolves_an_escalated_review_to_pass() {
+    let (mut e, s) = reviewing(false);
+    e.member("bob", "review.verdict", verdict_body("t1", 1, ESCALATE))
+        .unwrap();
+    // Not allowed: the reviewer itself, and any other member.
+    for who in ["bob", "carol"] {
+        let err = e
+            .member(who, "review.resolve", resolve_body("t1", 1, "pass"))
+            .unwrap_err();
+        assert!(err.contains("only a maintainer"), "{err}");
+    }
+    assert_eq!(e.sub_state(&s), "reviewing");
+    // A bad decision and a missing reason are refused.
+    let err = orch_op(&mut e, "review.resolve", resolve_body("t1", 1, "maybe")).unwrap_err();
+    assert!(err.contains("pass"), "{err}");
+    let err = orch_op(
+        &mut e,
+        "review.resolve",
+        json!({"task": "t1", "n": 1, "decision": "pass"}),
+    )
+    .unwrap_err();
+    assert!(err.contains("reason"), "{err}");
+    // A review that waits for no decision cannot be resolved.
+    let err = orch_op(&mut e, "review.resolve", resolve_body("t1", 7, "pass")).unwrap_err();
+    assert!(err.contains("no review"), "{err}");
+
+    let out = orch_op(&mut e, "review.resolve", resolve_body("t1", 1, "pass")).unwrap();
+    assert_eq!(out["state"], "approved");
+    assert_eq!(e.sub_state(&s), "approved");
+    assert_eq!(e.landings(), vec![format!("bundle:{s}")]);
+    let row = data::review_of(e.store.connection(), "t1", 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.row.verdict, "pass");
+    assert!(
+        row.row.findings.contains("resolved by orch"),
+        "{}",
+        row.row.findings
+    );
+    let fact = e
+        .log
+        .iter()
+        .rev()
+        .find(|m| m.topic == "review/t1/1")
+        .unwrap();
+    let body: Value = serde_json::from_str(&fact.body).unwrap();
+    assert_eq!(body["resolved_by"], "orch");
+    assert_eq!(body["was"], "escalate");
+    // It cannot be resolved twice.
+    let err = orch_op(&mut e, "review.resolve", resolve_body("t1", 1, "fail")).unwrap_err();
+    assert!(
+        err.contains("needs no decision") || err.contains("waits for no decision"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_listed_maintainer_may_resolve_and_a_fail_returns_the_order() {
+    let (mut e, s) = reviewing(false);
+    e.config.stamp.enabled = true;
+    e.config.stamp.maintainers = vec!["carol".into()];
+    e.member("bob", "review.verdict", verdict_body("t1", 1, ESCALATE))
+        .unwrap();
+    let out = e
+        .member("carol", "review.resolve", resolve_body("t1", 1, "fail"))
+        .unwrap();
+    assert_eq!(out["state"], "review_failed");
+    assert_eq!(e.sub_state(&s), "review_failed");
+    assert!(e.landings().is_empty());
+    let task = sommelier::task::query_task(e.store.connection(), "t1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(task.state, "ready");
+    assert!(
+        task.resume_note.contains("maintainer decided"),
+        "{}",
+        task.resume_note
+    );
+}
+
+#[test]
+fn a_maintainer_settles_an_audit_that_disagrees() {
+    let (mut e, s) = audited_after_first_pass();
+    e.tick(&audit_cfg());
+    orch_op(&mut e, "review.verdict", verdict_body("t1", 2, FAIL)).unwrap();
+    assert_eq!(e.sub_state(&s), "reviewing");
+    let out = orch_op(&mut e, "review.resolve", resolve_body("t1", 2, "pass")).unwrap();
+    assert_eq!(out["state"], "approved");
+    assert_eq!(e.landings(), vec![format!("bundle:{s}")]);
+}
+
+fn gated(e: &mut Env, c: char) -> String {
+    let s = sha(c);
+    e.task("t1", "delivered");
+    e.submission(&s, "t1", "alice", 1, "gated");
+    s
+}
+
+#[test]
+fn only_the_orchestrator_overrides_the_clean_build_and_the_fact_names_who_and_why() {
+    let mut e = Env::new();
+    let s = gated(&mut e, 'e');
+    let body = |c: &str| json!({"submission": s, "conclusion": c, "reason": "GitHub is down"});
+    let err = e
+        .member("bob", "verify.override", body("passed"))
+        .unwrap_err();
+    assert!(err.contains("only an orchestrator"), "{err}");
+    let err = orch_op(&mut e, "verify.override", body("maybe")).unwrap_err();
+    assert!(err.contains("passed"), "{err}");
+    let err = orch_op(
+        &mut e,
+        "verify.override",
+        json!({"submission": s, "conclusion": "passed"}),
+    )
+    .unwrap_err();
+    assert!(err.contains("reason"), "{err}");
+    assert_eq!(e.sub_state(&s), "gated");
+
+    let out = orch_op(&mut e, "verify.override", body("passed")).unwrap();
+    assert_eq!(out["state"], "verified");
+    assert_eq!(e.sub_state(&s), "verified");
+    let fact = e
+        .log
+        .iter()
+        .rev()
+        .find(|m| m.topic == format!("verify/{s}"))
+        .unwrap();
+    assert_eq!(fact.role, Role::Hub);
+    let b: Value = serde_json::from_str(&fact.body).unwrap();
+    assert_eq!(b["by"], "orch");
+    assert_eq!(b["reason"], "GitHub is down");
+    assert_eq!(b["conclusion"], "passed");
+    assert_eq!(b["overridden"], true);
+    // The first lock reads the conclusion like that of a real run.
+    assert_eq!(
+        data::verify_conclusion(e.store.connection(), &s)
+            .unwrap()
+            .as_deref(),
+        Some("passed")
+    );
+    // A second override is refused: the submission is not gated any more.
+    let err = orch_op(&mut e, "verify.override", body("failed")).unwrap_err();
+    assert!(err.contains("gated"), "{err}");
+}
+
+#[test]
+fn an_override_to_failed_returns_the_order_to_the_queue() {
+    let mut e = Env::new();
+    let s = gated(&mut e, 'f');
+    let out = orch_op(
+        &mut e,
+        "verify.override",
+        json!({"submission": s, "conclusion": "failed", "reason": "the build is broken"}),
+    )
+    .unwrap();
+    assert_eq!(out["state"], "verify_failed");
+    assert_eq!(e.sub_state(&s), "verify_failed");
+    let task = sommelier::task::query_task(e.store.connection(), "t1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(task.state, "ready");
+}
+
 #[test]
 fn a_review_nobody_answers_goes_to_someone_else() {
     let mut e = Env::new();
@@ -892,6 +1064,70 @@ fn a_ready_of_a_trusted_sender_cannot_enqueue_a_bundle_around_the_lock() {
         &refs,
     );
     assert!(e.landings().contains(&"fx/b".to_string()));
+}
+
+/// Starts a hub on the data folder of `e`: the log is what the environment applied.
+async fn hub_of(e: Env) -> TestHub {
+    let Env {
+        dir, store, log, ..
+    } = e;
+    drop(store);
+    let mut t = TokenFile::default();
+    let orch = t.add("orch", Role::Orchestrator).unwrap();
+    t.save(&dir.path().join("tokens.json")).unwrap();
+    let text: String = log
+        .iter()
+        .map(|m| {
+            format!(
+                "{}
+",
+                serde_json::to_string(m).unwrap()
+            )
+        })
+        .collect();
+    std::fs::write(dir.path().join("bus.jsonl"), text).unwrap();
+    let mut cfg = HubConfig::new(dir.path());
+    cfg.verbose = false;
+    cfg.sweep_every = Duration::from_millis(100);
+    cfg.review.enabled = true;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        hub::run(cfg, listener).await.unwrap();
+    });
+    TestHub {
+        url,
+        dir,
+        orch,
+        task,
+    }
+}
+
+#[tokio::test]
+async fn an_approved_submission_whose_enqueue_failed_is_enqueued_again_on_the_tick() {
+    let mut e = Env::new();
+    // Approved, every part of the first lock holds, but nothing reached the landing queue.
+    let s = locked(&mut e, 'b', true, "passed", Some(("answered", "pass")));
+    // Another approved one that lacks its clean build stays out.
+    let lacking = locked(&mut e, 'c', true, "failed", Some(("answered", "pass")));
+    let h = hub_of(e).await;
+    wait_for("the landing row", || {
+        h.facts("land/")
+            .iter()
+            .any(|m| m.topic == format!("land/bundle:{s}"))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let state = api_state(&h).await;
+    let refs: Vec<&str> = state["landing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["ref"].as_str().unwrap())
+        .collect();
+    assert_eq!(refs, vec![format!("bundle:{s}")], "{lacking}");
+    // Once only, however many ticks ran.
+    assert_eq!(h.facts("land/").len(), 1);
 }
 
 // ---------------------------------------------------------------------------------------------

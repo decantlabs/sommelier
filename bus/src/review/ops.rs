@@ -93,8 +93,9 @@ pub fn on_op(
     match op {
         "review.next" => next(ctx, body),
         "review.verdict" => verdict(ctx, body),
+        "review.resolve" => resolve(ctx, body),
         other => Err(format!(
-            "unknown op `{other}` (review.next, review.verdict)"
+            "unknown op `{other}` (review.next, review.verdict, review.resolve)"
         )),
     }
 }
@@ -265,6 +266,76 @@ fn verdict(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, 
     Ok(out)
 }
 
+/// `review.resolve {task, n, decision, reason}`: a maintainer settles a review that waits for ever, an
+/// escalated review or an audit that disagrees. `decision` is `pass` or `fail`. The answer is a FACT like any
+/// verdict, with `resolved_by` and the reason. A `pass` lets the rule decide again, a `fail` fails the submission.
+fn resolve(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, String> {
+    if !crate::stamp::ops::is_maintainer(ctx) {
+        return Err("only a maintainer may resolve a review".into());
+    }
+    let task = text(body, "task")?.to_owned();
+    let n = number(body, "n")?;
+    let decision = match text(body, "decision")? {
+        d @ ("pass" | "fail") => d.to_owned(),
+        _ => return Err("`decision` is `pass` or `fail`".into()),
+    };
+    let reason = text(body, "reason")?.trim();
+    if reason.is_empty() {
+        return Err("the request needs a `reason`".into());
+    }
+    let reason = flow::clean(reason).chars().take(300).collect::<String>();
+    let now_sec = ctx.now_ms / 1000;
+
+    let review = data::review_of(ctx.store.connection(), &task, n)?
+        .ok_or_else(|| format!("no review {task}/{n}"))?;
+    let sub = data::query_submission(ctx.store.connection(), &review.row.submission)?
+        .ok_or_else(|| "the submission of this review is unknown".to_string())?;
+    if sub.state != "reviewing" {
+        return Err(format!(
+            "the submission is `{}`, a review of it needs no decision now",
+            sub.state
+        ));
+    }
+    let reviews = data::reviews_of(ctx.store.connection(), &sub.sha256)?;
+    match flow::decide(&reviews) {
+        Decision::Escalate { n: at } | Decision::Disagree { n: at } if at == n => {}
+        _ => {
+            return Err(format!(
+                "review {task}/{n} waits for no decision: only an escalated review or an audit that disagrees can be resolved"
+            ));
+        }
+    }
+    ctx.emit(flow::resolution_fact(
+        &review,
+        &decision,
+        &ctx.caller.name.clone(),
+        &reason,
+        now_sec,
+    ))?;
+
+    let mut out = Map::new();
+    out.insert("task".into(), task.clone().into());
+    out.insert("n".into(), n.into());
+    out.insert("verdict".into(), decision.clone().into());
+    let state = if decision == "fail" {
+        ctx.emit(flow::submission_fact(&sub, "review_failed", now_sec))?;
+        let note = format!(
+            "review failed: a maintainer decided against this patch: {}",
+            flow::clean(&reason)
+        );
+        requeue_task(ctx, &sub, &note)?;
+        "review_failed"
+    } else {
+        let reviews = data::reviews_of(ctx.store.connection(), &sub.sha256)?;
+        match flow::decide(&reviews) {
+            Decision::Approve => approve(ctx, &sub, &mut out)?,
+            _ => "reviewing",
+        }
+    };
+    out.insert("state".into(), state.into());
+    Ok(out)
+}
+
 /// One ALERT to the maintainers, once per review.
 fn raise(
     ctx: &mut OpContext<'_>,
@@ -339,12 +410,60 @@ fn approve(
     Ok("approved")
 }
 
+/// An approved submission whose enqueue failed (the hub stopped or the call was refused after the
+/// approval) has no row in the landing queue. The tick tries it again, through the first lock.
+fn retry_enqueues(hub: &Hub, now_ms: u64) -> Vec<Message> {
+    let Some(Ok(approved)) =
+        hub.with_store(|s| data::submissions_in_state(s.connection(), "approved"))
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for sub in approved {
+        let ref_name = format!("{}{}", crate::land::lock::BUNDLE_PREFIX, sub.sha256);
+        let ok = hub
+            .with_store(|s| {
+                let conn = s.connection();
+                // Any row of this ref, in any state, means the enqueue happened.
+                let queued = crate::land::query_landings(conn)
+                    .map(|l| l.iter().any(|r| r.ref_name == ref_name))
+                    .unwrap_or(true);
+                if queued {
+                    return false;
+                }
+                crate::land::lock::read_inputs(conn, &sub.sha256)
+                    .is_ok_and(|i| crate::land::lock::evaluate(&sub.sha256, &i, true).is_ok())
+            })
+            .unwrap_or(false);
+        if ok {
+            let row = crate::land::LandingRow {
+                ref_name,
+                sha: sub.head.clone(),
+                task_id: sub.task.clone(),
+                state: "queued".into(),
+                priority: "normal".into(),
+                enqueued_at: now_ms / 1000,
+                ..Default::default()
+            };
+            out.push(crate::land::queue_fact(&row, now_ms));
+        }
+    }
+    out
+}
+
 /// Called on every hub tick. Returns messages for the hub to append.
 pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     let cfg = &hub.config().review;
     if !cfg.enabled {
         return Vec::new();
     }
+    let mut out = retry_enqueues(hub, now_ms);
+    out.extend(plan_reviews(hub, now_ms));
+    out
+}
+
+fn plan_reviews(hub: &Hub, now_ms: u64) -> Vec<Message> {
+    let cfg = &hub.config().review;
     let now_sec = now_ms / 1000;
     let Some(read) = hub.with_store(|s| assign::read(s.connection(), cfg, now_sec)) else {
         return Vec::new();

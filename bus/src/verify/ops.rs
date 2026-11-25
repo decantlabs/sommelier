@@ -543,8 +543,76 @@ pub fn on_op(
 ) -> Result<Map<String, Value>, String> {
     match op {
         "verify.retry" => retry(ctx, body),
-        other => Err(format!("unknown op `{other}` (verify.retry)")),
+        "verify.override" => override_run(ctx, body),
+        other => Err(format!(
+            "unknown op `{other}` (verify.retry, verify.override)"
+        )),
     }
+}
+
+/// Longest reason of an override, in characters.
+const MAX_REASON: usize = 200;
+
+/// `verify.override {submission, conclusion, reason}`: the orchestrator marks a `gated` submission verified
+/// (`passed`) or failed (`failed`) without a run. It is the way to go on while GitHub is down. The FACT
+/// `verify/<sha256>` names who did it and why, so the log shows that no run happened.
+fn override_run(ctx: &mut OpContext<'_>, body: &Value) -> Result<Map<String, Value>, String> {
+    if !matches!(ctx.caller.role, Role::Orchestrator | Role::Hub) {
+        return Err("only an orchestrator may run `verify.override`".into());
+    }
+    let sha = body
+        .get("submission")
+        .or_else(|| body.get("sha256"))
+        .and_then(Value::as_str)
+        .filter(|s| crate::intake::facts::is_sha256(s))
+        .ok_or("verify.override needs `submission`, 64 lower case hex characters")?
+        .to_owned();
+    let conclusion = match body.get("conclusion").and_then(Value::as_str) {
+        Some(c @ ("passed" | "failed")) => c.to_owned(),
+        _ => return Err("verify.override needs `conclusion`: `passed` or `failed`".into()),
+    };
+    let reason = body
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .ok_or("verify.override needs a `reason`")?;
+    let reason = one_line(reason, MAX_REASON);
+    let row = query_submission(ctx.store.connection(), &sha)
+        .ok_or_else(|| format!("no submission {}", one_line(&sha, 64)))?;
+    if row.state != "gated" {
+        return Err(format!(
+            "only a submission in the state `gated` can be overridden, this one is `{}`",
+            row.state
+        ));
+    }
+    let sec = ctx.now_ms / 1000;
+    let done = json!({
+        "v": 1, "submission": sha, "order": row.task, "run_id": null, "state": "done",
+        "conclusion": conclusion, "failing_step": null, "minutes": 0, "dispatches": 0,
+        "started_ms": 0, "at": sec, "overridden": true, "by": ctx.caller.name, "reason": reason,
+    });
+    ctx.emit(fact(format!("verify/{sha}"), &done))?;
+    let verified = conclusion == "passed";
+    let state = if verified {
+        "verified"
+    } else {
+        "verify_failed"
+    };
+    let id = ctx.emit(submission_fact(&row, state, sec))?;
+    if !verified {
+        let note = format!("the clean build was marked failed by the owner: {reason}");
+        let conn = ctx.store.connection();
+        if let Some(msg) = requeue_message(conn, &row, "verify_failed", &note, ctx.now_ms) {
+            ctx.emit(msg)?;
+        }
+    }
+    let mut out = Map::new();
+    out.insert("submission".into(), sha.into());
+    out.insert("state".into(), state.into());
+    out.insert("conclusion".into(), conclusion.into());
+    out.insert("id".into(), id.into());
+    Ok(out)
 }
 
 /// `verify.retry <sha256>`: a submission whose clean build failed goes back to `gated`.

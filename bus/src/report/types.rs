@@ -54,7 +54,7 @@ pub struct Report {
     /// Metric name to value, for example `fps_median`.
     pub metrics: BTreeMap<String, f64>,
     pub secs_alive: u32,
-    /// Scrubbed tail of the log, at most 16 KiB.
+    /// Scrubbed tail of the log, at most [`super::validate::MAX_LOG_BYTES`] (2048) bytes.
     pub log_excerpt: String,
     /// UTC epoch seconds when the run ended.
     pub at: u64,

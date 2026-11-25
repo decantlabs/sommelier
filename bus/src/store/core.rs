@@ -143,6 +143,12 @@ fn is_key_member(tx: &Transaction<'_>, name: &str) -> bool {
             > 0
 }
 
+/// True for a key member that has no capacity: its TIER row is missing or below 1. A key member at tier 1
+/// or above has machines and capacity like a token member.
+pub(crate) fn key_member_without_capacity(tx: &Transaction<'_>, name: &str) -> bool {
+    is_key_member(tx, name) && crate::stamp::tier_table::tier_from_table(tx, name, None) < 1
+}
+
 fn role_trust(role: Role) -> &'static str {
     match role {
         Role::Orchestrator | Role::Hub => "owner",
@@ -191,10 +197,11 @@ pub fn apply_core_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
         }
     }
 
-    // A key member declares no machine and no capacity: old lines in a log change nothing.
+    // A key member below tier 1 declares no machine and no capacity: old lines in a log change nothing.
     let capacity_line =
         msg.kind == Kind::Hello || (msg.kind == Kind::Fact && msg.topic.starts_with("capacity/"));
-    if capacity_line && (is_key_member(tx, &msg.from) || topic_owner_is_key(tx, msg)) {
+    if capacity_line && (key_member_without_capacity(tx, &msg.from) || topic_owner_is_key(tx, msg))
+    {
         return Ok(());
     }
 
@@ -225,12 +232,12 @@ pub fn apply_core_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
     Ok(())
 }
 
-/// True for a `capacity/<owner>/...` FACT that names a key member as the owner.
+/// True for a `capacity/<owner>/...` FACT that names a key member below tier 1 as the owner.
 fn topic_owner_is_key(tx: &Transaction<'_>, msg: &Message) -> bool {
     msg.topic
         .strip_prefix("capacity/")
         .and_then(|rest| rest.split('/').next())
-        .is_some_and(|owner| is_key_member(tx, owner))
+        .is_some_and(|owner| key_member_without_capacity(tx, owner))
 }
 
 #[allow(clippy::too_many_arguments)]

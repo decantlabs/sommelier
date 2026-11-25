@@ -28,12 +28,12 @@ use crate::key::crypto::{MemberKey, sign_request};
 use crate::report::scrub;
 use crate::report::types::{MachineClass, Outcome, Report};
 
-/// The excerpt that goes to the hub is cut to this many bytes. A message body of the hub is at most
-/// 4096 bytes, so a report must stay far below the 16 KiB the report module could take.
-pub const SEND_EXCERPT_MAX: usize = 2048;
+/// The excerpt that goes to the hub is cut to the limit of the hub: a message body is at most 4096 bytes.
+pub const SEND_EXCERPT_MAX: usize = crate::report::MAX_LOG_BYTES;
 
-/// A whole report as text must stay below this, before the signature is added.
-const REPORT_BYTES_MAX: usize = 3800;
+/// A whole report as text must stay below this, before the signature is added. The rest of the body
+/// of the hub is kept for the signature of a key member.
+const REPORT_BYTES_MAX: usize = crate::report::MAX_REPORT_BYTES - 296;
 
 /// What the run script is asked to do.
 #[derive(Clone, Debug)]

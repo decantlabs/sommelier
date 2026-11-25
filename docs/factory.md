@@ -793,6 +793,9 @@ section differs, this section holds, and the earlier section was corrected where
   rise.
 * Every change of a tier is a hub FACT `tier/<member>` and a row of the TIER table. A member without a row is tier 0
   with a key, tier 2 with a token and tier 3 as orchestrator.
+* Nothing writes a linked account yet, so tier 2 today rests on the maintainer's grant alone.
+* A key member has no machine, no capacity and no role row while its tier is below 1. At tier 1 and above it has them
+  like a token member (its next HELLO is kept).
 
 ### Review
 

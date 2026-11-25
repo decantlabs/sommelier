@@ -296,6 +296,87 @@ async fn a_key_member_has_trust_tier0_and_no_capacity_rows() {
     assert_eq!(alice["trust"], "guest");
 }
 
+/// A key member at tier 1 has capacity like a token member: its HELLO is kept.
+#[tokio::test]
+async fn a_key_member_at_tier_1_has_machine_and_capacity_rows() {
+    let key = MemberKey::generate().unwrap();
+    let member = member_id(&key.public());
+    let mut log = join_line(1, &key);
+    log += &line(
+        2,
+        "hub",
+        Role::Hub,
+        Kind::Fact,
+        &format!("tier/{member}"),
+        &json!({"v": 1, "member": member, "tier": 1, "reasons": ["test"], "at": 1}).to_string(),
+    );
+    log += &line(
+        3,
+        &member,
+        Role::Member,
+        Kind::Hello,
+        "",
+        "machine=box class=codex:2 accepts=fix",
+    );
+    let hub = start(false, Some(&log)).await;
+    let state = hub.state().await;
+    let owners: Vec<&str> = state["store"]["capacities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["owner"].as_str().unwrap())
+        .collect();
+    assert!(owners.contains(&member.as_str()), "{owners:?}");
+    let machines = state["store"]["machines"].as_array().unwrap();
+    assert!(machines.iter().any(|m| m["owner"] == member.as_str()));
+}
+
+/// A HELLO of a key member at tier 0 leaves no ROLE_HELLO row, at tier 1 it does.
+#[test]
+fn a_hello_of_a_key_member_writes_a_role_row_only_from_tier_1() {
+    let key = MemberKey::generate().unwrap();
+    let member = member_id(&key.public());
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = sommelier::store::Store::open(dir.path()).unwrap();
+    let mut id = 0;
+    let mut put = |store: &mut sommelier::store::Store, text: String| {
+        id += 1;
+        let mut m: Message = serde_json::from_str(text.trim()).unwrap();
+        m.id = id;
+        store.apply(&m).unwrap();
+    };
+    put(&mut store, join_line(1, &key));
+    let hello = line(
+        1,
+        &member,
+        Role::Member,
+        Kind::Hello,
+        "",
+        "machine=box class=codex:2 accepts=fix",
+    );
+    put(&mut store, hello.clone());
+    let rows = |store: &sommelier::store::Store| -> i64 {
+        store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM ROLE_HELLO", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(rows(&store), 0);
+    put(
+        &mut store,
+        line(
+            1,
+            "hub",
+            Role::Hub,
+            Kind::Fact,
+            &format!("tier/{member}"),
+            &json!({"v": 1, "member": member, "tier": 1, "reasons": [], "at": 1}).to_string(),
+        ),
+    );
+    put(&mut store, hello);
+    assert_eq!(rows(&store), 1);
+}
+
 // Finding 3: stateless nonces.
 
 #[test]
