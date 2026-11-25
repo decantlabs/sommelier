@@ -136,6 +136,11 @@ pub fn apply_land_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
 
     match msg.kind {
         Kind::Fact => {
+            // Only the hub writes the rows of the landing queue, the batches, the branches and the runs. A line of a
+            // member in an old log changes none of them.
+            if msg.role != Role::Hub {
+                return Ok(());
+            }
             if msg.topic.starts_with("land/") {
                 let v: Value = serde_json::from_str(&msg.body)
                     .map_err(|e| format!("invalid land FACT JSON: {e}"))?;
@@ -266,6 +271,57 @@ fn require_orchestrator(ctx: &OpContext<'_>, op: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The holder of the role `lander`, an orchestrator or the hub. The lander writes the results of a landing.
+fn require_lander(ctx: &OpContext<'_>, op: &str) -> Result<(), String> {
+    if matches!(ctx.caller.role, Role::Orchestrator | Role::Hub)
+        || crate::role::writers::holds_role(ctx.store.connection(), "lander", &ctx.caller.name)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "only the holder of the role lander or an orchestrator may run `{op}`"
+    ))
+}
+
+/// The sha of a `bundle:` ref must be the head of its submission. Another ref passes untouched.
+fn check_bundle_head(conn: &Connection, ref_name: &str, sha: &str) -> Result<(), String> {
+    let Some(sub_sha) = ref_name.strip_prefix(BUNDLE_REF_PREFIX) else {
+        return Ok(());
+    };
+    let head = crate::review::data::query_submission(conn, sub_sha)?.map(|s| s.head);
+    if head.as_deref() != Some(sha) {
+        return Err(format!(
+            "refused: `{sha}` is not the head of submission {sub_sha}"
+        ));
+    }
+    Ok(())
+}
+
+/// A run row belongs to the member that asked for it. Any other caller than an orchestrator, the lander or the
+/// hub may not change it.
+fn check_run_owner(
+    ctx: &OpContext<'_>,
+    run_id: &str,
+    existing: Option<&RunRow>,
+) -> Result<(), String> {
+    if is_lander_or_orchestrator(ctx) {
+        return Ok(());
+    }
+    match existing {
+        Some(r) if r.requested_by != ctx.caller.name => Err(format!(
+            "run `{run_id}` belongs to `{}`, not `{}`",
+            r.requested_by, ctx.caller.name
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// True for an orchestrator, the hub, or the holder of the role `lander`.
+fn is_lander_or_orchestrator(ctx: &OpContext<'_>) -> bool {
+    matches!(ctx.caller.role, Role::Orchestrator | Role::Hub)
+        || crate::role::writers::holds_role(ctx.store.connection(), "lander", &ctx.caller.name)
+}
+
 fn fact_msg(topic: String, row: Value, ts: String) -> Message {
     let mut body_obj = match row {
         Value::Object(m) => m,
@@ -335,6 +391,7 @@ pub fn on_op(
                 .ok_or_else(|| "land.enqueue requires `sha`".to_owned())?;
 
             lock::check_enqueue(ctx.store.connection(), &ref_name)?;
+            check_bundle_head(ctx.store.connection(), &ref_name, &sha)?;
 
             if let Some(existing) = query_landing(ctx.store.connection(), &ref_name, &sha)? {
                 out.insert("duplicate".into(), json!(true));
@@ -372,6 +429,10 @@ pub fn on_op(
                 .unwrap_or(8)
                 .clamp(1, 64) as usize;
             let claim = body.get("claim").and_then(Value::as_bool).unwrap_or(false);
+            // Reading the queue is open. Taking entries into a batch is the work of the lander.
+            if claim {
+                require_lander(ctx, "land.next` with `claim")?;
+            }
             let base_sha = str_field(body, "base_sha").unwrap_or_default();
 
             let mut queued: Vec<LandingRow> = query_landings(ctx.store.connection())?
@@ -429,6 +490,7 @@ pub fn on_op(
             Ok(out)
         }
         "land.result" => {
+            require_lander(ctx, op)?;
             let batch_id = str_field(body, "batch_id").unwrap_or_default();
             let result = str_field(body, "result")
                 .filter(|s| !s.is_empty())
@@ -443,6 +505,15 @@ pub fn on_op(
 
             let specific_ref = str_field(body, "ref").filter(|s| !s.is_empty());
             let specific_sha = str_field(body, "sha").filter(|s| !s.is_empty());
+            // A `bundle:` row exists only through `land.enqueue` and its lock. A result never creates one.
+            if let (Some(r), Some(s)) = (&specific_ref, &specific_sha)
+                && r.starts_with(BUNDLE_REF_PREFIX)
+                && query_landing(ctx.store.connection(), r, s)?.is_none()
+            {
+                return Err(format!(
+                    "refused: `{r}` is not in the landing queue, a bundle row is made only by land.enqueue"
+                ));
+            }
 
             let mut updated_landings = Vec::new();
             if !batch_id.is_empty() {
@@ -558,6 +629,13 @@ pub fn on_op(
             let approver = str_field(body, "by")
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| ctx.caller.name.clone());
+            // A `bundle:` row that does not exist yet is made only past the first lock.
+            if ref_name.starts_with(BUNDLE_REF_PREFIX)
+                && query_landing(ctx.store.connection(), &ref_name, &sha)?.is_none()
+            {
+                lock::check_enqueue(ctx.store.connection(), &ref_name)?;
+                check_bundle_head(ctx.store.connection(), &ref_name, &sha)?;
+            }
 
             let mut row =
                 query_landing(ctx.store.connection(), &ref_name, &sha)?.unwrap_or_else(|| {
@@ -593,6 +671,7 @@ pub fn on_op(
             Ok(out)
         }
         "land.branch_upsert" => {
+            require_lander(ctx, op)?;
             let row: BranchRow = serde_json::from_value(body.clone())
                 .map_err(|e| format!("invalid branch payload: {e}"))?;
             if row.ref_name.is_empty() {
@@ -609,6 +688,7 @@ pub fn on_op(
             Ok(out)
         }
         "land.sweep" => {
+            require_lander(ctx, op)?;
             if let Some(branches_val) = body.get("branches").and_then(Value::as_array) {
                 for bv in branches_val {
                     if let Ok(b) = serde_json::from_value::<BranchRow>(bv.clone())
@@ -692,6 +772,11 @@ pub fn on_op(
             let run_id = str_field(body, "run_id")
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("run-{now_sec}-{}", &sha[..sha.len().min(8)]));
+            check_run_owner(
+                ctx,
+                &run_id,
+                query_run(ctx.store.connection(), &run_id)?.as_ref(),
+            )?;
             let row = RunRow {
                 run_id: run_id.clone(),
                 machine: str_field(body, "machine").unwrap_or_default(),
@@ -719,6 +804,8 @@ pub fn on_op(
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("run-{now_sec}"));
             let existing = query_run(ctx.store.connection(), &run_id)?;
+            check_run_owner(ctx, &run_id, existing.as_ref())?;
+            let privileged = is_lander_or_orchestrator(ctx);
             let row = RunRow {
                 run_id: run_id.clone(),
                 machine: str_field(body, "machine")
@@ -737,7 +824,9 @@ pub fn on_op(
                 task_id: str_field(body, "task_id")
                     .or_else(|| existing.as_ref().map(|r| r.task_id.clone()))
                     .unwrap_or_default(),
+                // A member registers its own runs: the name in the body counts only for the lander and the orchestrator.
                 requested_by: str_field(body, "requested_by")
+                    .filter(|_| privileged)
                     .or_else(|| existing.as_ref().map(|r| r.requested_by.clone()))
                     .unwrap_or_else(|| ctx.caller.name.clone()),
                 started_at: body
@@ -771,9 +860,12 @@ pub fn on_op(
             let outcome = str_field(body, "outcome")
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "run.result requires `outcome`".to_owned())?;
-            let mut row = query_run(ctx.store.connection(), &run_id)?.unwrap_or_else(|| RunRow {
+            let found = query_run(ctx.store.connection(), &run_id)?;
+            check_run_owner(ctx, &run_id, found.as_ref())?;
+            let mut row = found.unwrap_or_else(|| RunRow {
                 run_id: run_id.clone(),
                 kind: "check".into(),
+                requested_by: ctx.caller.name.clone(),
                 started_at: now_sec,
                 registered: true,
                 ..RunRow::default()
@@ -820,6 +912,7 @@ pub fn on_op(
             Ok(out)
         }
         "run.sweep" => {
+            require_lander(ctx, op)?;
             let folders: Vec<RunFolderInfo> = body
                 .get("folders")
                 .cloned()

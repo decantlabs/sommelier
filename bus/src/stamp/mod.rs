@@ -241,6 +241,10 @@ pub fn apply_stamp_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), St
     let Some(topic_member) = msg.topic.strip_prefix("stamp/") else {
         return Ok(());
     };
+    // Only the hub writes stamps. A line of a member in an old log gives no stamp.
+    if msg.role != Role::Hub {
+        return Ok(());
+    }
     let maintainer = sender_is_maintainer(tx, msg);
     let Ok(stamp) = validate_stamp(&msg.body, maintainer) else {
         return Ok(());

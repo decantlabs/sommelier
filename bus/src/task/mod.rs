@@ -212,6 +212,10 @@ fn merge_task_fields(row: &mut TaskRow, src: &Value) {
 /// Projects `TASK_UPDATE`, `OFFER`, and task-related `FACT` messages into `TASK`, `LEASE`, `OFFER`, and `CHECKPOINT`.
 pub fn apply_task_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), String> {
     let ts_sec = parse_ms(&msg.ts).unwrap_or(0) / 1000;
+    // Only the hub writes TASK_UPDATE and OFFER. A line of anyone else in an old log gives no lease and no offer.
+    if matches!(msg.kind, Kind::TaskUpdate | Kind::Offer) && msg.role != Role::Hub {
+        return Ok(());
+    }
     match msg.kind {
         Kind::TaskUpdate => {
             let body: Value = serde_json::from_str(&msg.body)
@@ -1017,6 +1021,23 @@ pub fn on_op(
                     "cannot mark task `{id}` stuck from `{}`",
                     task.state
                 ));
+            }
+            // Only the holder of the lease, the orchestrator or the hub may park an order. Any other caller is
+            // refused, also when the order has no lease: it would stop the work of someone else.
+            let privileged = matches!(ctx.caller.role, Role::Orchestrator | Role::Hub);
+            match query_active_lease_for_task(ctx.store.connection(), &id)? {
+                Some(l) if l.owner != ctx.caller.name && !privileged => {
+                    return Err(format!(
+                        "task `{id}` is leased to {}, not {}",
+                        l.owner, ctx.caller.name
+                    ));
+                }
+                None if !privileged => {
+                    return Err(format!(
+                        "task `{id}` has no lease, only its holder or an orchestrator may mark it stuck"
+                    ));
+                }
+                _ => {}
             }
             let mut update = json!({
                 "v": 1,

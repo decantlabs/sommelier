@@ -474,6 +474,21 @@ async fn idle_cli_json_matches_fixture() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A message of the hub itself. A client may not send an ALERT or a FACT on `role/`, so a test writes them like the hub.
+fn hub_message(kind: sommelier::msg::Kind, topic: &str, body: String) -> sommelier::msg::Message {
+    sommelier::msg::Message {
+        id: 0,
+        ts: String::new(),
+        from: "hub".into(),
+        role: Role::Hub,
+        kind,
+        topic: topic.into(),
+        body,
+        refs: vec![],
+        to: vec![],
+    }
+}
+
 #[tokio::test]
 async fn alerts_open_wait_and_alert_ack_with_epoch_fencing() {
     let dir = std::env::temp_dir().join(format!("sommelier-cli-alerts-{}", std::process::id()));
@@ -487,7 +502,8 @@ async fn alerts_open_wait_and_alert_ack_with_epoch_fencing() {
     cfg.verbose = false;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
-    tokio::spawn(hub::run(cfg, listener));
+    let hub_handle = hub::Hub::open(cfg).unwrap();
+    tokio::spawn(hub::serve(hub_handle.clone(), listener));
 
     let bus = Bus {
         url,
@@ -523,11 +539,9 @@ async fn alerts_open_wait_and_alert_ack_with_epoch_fencing() {
         })
         .to_string();
         let topic = format!("alert/{code}/{key}");
-        assert!(
-            run_cli(&["send", "ALERT", &body, "--topic", &topic])
-                .await
-                .0
-        );
+        hub_handle
+            .append_hook_message(hub_message(sommelier::msg::Kind::Alert, &topic, body))
+            .unwrap();
     }
 
     let role_fact = serde_json::json!({
@@ -546,11 +560,13 @@ async fn alerts_open_wait_and_alert_ack_with_epoch_fencing() {
         "frozen": false,
     })
     .to_string();
-    assert!(
-        run_cli(&["send", "FACT", &role_fact, "--topic", "role/coordinator"])
-            .await
-            .0
-    );
+    hub_handle
+        .append_hook_message(hub_message(
+            sommelier::msg::Kind::Fact,
+            "role/coordinator",
+            role_fact,
+        ))
+        .unwrap();
 
     // 3. `sommelier alerts --open --wait 5 --json` returns immediately with code 0, oldest first.
     let (ok, out, err) = run_cli(&["alerts", "--open", "--wait", "5", "--json"]).await;

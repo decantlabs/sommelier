@@ -131,6 +131,7 @@ struct TestHub {
     orch: String,
     alice: String,
     task: tokio::task::JoinHandle<()>,
+    hub: Arc<hub::Hub>,
 }
 
 impl Drop for TestHub {
@@ -228,8 +229,8 @@ impl TestHub {
             .unwrap();
     }
 
-    /// Leases the order to a key member. A tier 0 member may not run `task.work`, so the
-    /// orchestrator writes the lease as the hub would.
+    /// Leases the order to a key member. A tier 0 member may not run `task.work`, so the test writes the
+    /// lease as the hub would. A client may not send a TASK_UPDATE.
     async fn lease_to_member(&self, id: &str, member: &str) {
         let far = sommelier::time::now_ms() / 1000 + 86_400;
         let body = json!({
@@ -238,13 +239,19 @@ impl TestHub {
             "lease": {"task_id": id, "attempt": 1, "owner": member, "worker": member,
                       "state": "active", "expires_at": far, "heartbeat_at": far - 86_000},
         });
-        client::request_ok(
-            &self.orch(),
-            json!({"op": "send", "kind": "TASK_UPDATE", "topic": format!("task/{id}"),
-                   "body": body.to_string()}),
-        )
-        .await
-        .unwrap();
+        self.hub
+            .append_hook_message(Message {
+                id: 0,
+                ts: String::new(),
+                from: "hub".into(),
+                role: Role::Hub,
+                kind: Kind::TaskUpdate,
+                topic: format!("task/{id}"),
+                body: body.to_string(),
+                refs: vec![],
+                to: vec![],
+            })
+            .unwrap();
     }
 }
 
@@ -262,13 +269,15 @@ fn config(dir: &Path, r: &Repos, tweak: impl FnOnce(&mut HubConfig)) -> HubConfi
     cfg
 }
 
-async fn serve(cfg: HubConfig) -> (String, tokio::task::JoinHandle<()>) {
+async fn serve(cfg: HubConfig) -> (String, tokio::task::JoinHandle<()>, Arc<hub::Hub>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
+    let handle = hub::Hub::open(cfg).unwrap();
+    let serving = handle.clone();
     let task = tokio::spawn(async move {
-        hub::run(cfg, listener).await.unwrap();
+        hub::serve(serving, listener).await.unwrap();
     });
-    (url, task)
+    (url, task, handle)
 }
 
 async fn start(r: &Repos, tweak: impl FnOnce(&mut HubConfig)) -> TestHub {
@@ -277,13 +286,14 @@ async fn start(r: &Repos, tweak: impl FnOnce(&mut HubConfig)) -> TestHub {
     let orch = t.add("orch", Role::Orchestrator).unwrap();
     let alice = t.add("alice", Role::Member).unwrap();
     t.save(&dir.path().join("tokens.json")).unwrap();
-    let (url, task) = serve(config(dir.path(), r, tweak)).await;
+    let (url, task, handle) = serve(config(dir.path(), r, tweak)).await;
     TestHub {
         url,
         dir,
         orch,
         alice,
         task,
+        hub: handle,
     }
 }
 
@@ -291,9 +301,10 @@ async fn start(r: &Repos, tweak: impl FnOnce(&mut HubConfig)) -> TestHub {
 async fn restart(hub: &mut TestHub, r: &Repos, tweak: impl FnOnce(&mut HubConfig)) {
     hub.task.abort();
     let _ = (&mut hub.task).await;
-    let (url, task) = serve(config(hub.dir.path(), r, tweak)).await;
+    let (url, task, handle) = serve(config(hub.dir.path(), r, tweak)).await;
     hub.url = url;
     hub.task = task;
+    hub.hub = handle;
 }
 
 async fn get_json(url: &str, path: &str, auth: Option<&str>) -> (u16, Value) {

@@ -136,7 +136,10 @@ impl AssignContext {
                 .owner_total_parallel
                 .entry(cap.owner.clone())
                 .or_insert(0);
-            *total = total.saturating_add(cap.useful_parallel);
+            // One owner never counts for more than the total of one declaration, whatever the table holds.
+            *total = total
+                .saturating_add(cap.useful_parallel)
+                .min(crate::derive::capacity::MAX_TOTAL_SLOTS);
         }
 
         // Seed externally held locks.
@@ -533,10 +536,8 @@ pub fn evaluate_slot_for_task(
     }
 
     // 4. Trust & kind acceptance & clean room check.
-    let trust = state
-        .members
-        .get(&slot.owner)
-        .map_or("owner", |m| m.trust.as_str());
+    let trust = effective_trust(state, &slot.owner);
+    let trust = trust.as_str();
     if !trust_allows_kind(trust, &task.kind, policy) {
         return Err(reject(
             "trust",
@@ -686,6 +687,20 @@ pub fn member_tier(state: &PlanState, owner: &str) -> i64 {
         "tier0" => 0,
         _ => 2,
     })
+}
+
+/// The trust name that decides which kinds `owner` may claim. A key member always carries `tier0` in MEMBER, and
+/// `tier0` gets no kind. A key member at tier 1 or above is offered work like a token member of that standing,
+/// so it counts as a `guest`. Its tier is checked on its own by [`tier_block`].
+pub fn effective_trust(state: &PlanState, owner: &str) -> String {
+    let trust = state
+        .members
+        .get(owner)
+        .map_or("owner", |m| m.trust.as_str());
+    if trust == "tier0" && member_tier(state, owner) >= 1 {
+        return "guest".to_owned();
+    }
+    trust.to_owned()
 }
 
 /// The lowest tier that may take `task`: its `min_trust`, and 2 at least when it is guarded.
@@ -853,4 +868,57 @@ pub fn is_slot_admissible(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::PlanMember;
+
+    fn state_with(name: &str, trust: &str, tier: Option<i64>) -> PlanState {
+        let mut s = PlanState::default();
+        s.members.insert(
+            name.to_owned(),
+            PlanMember {
+                name: name.to_owned(),
+                trust: trust.to_owned(),
+                online: true,
+                tier,
+            },
+        );
+        s
+    }
+
+    #[test]
+    fn a_key_member_at_tier_one_or_two_is_offered_work_like_a_guest() {
+        let policy = PlanPolicy::default();
+        for tier in [1, 2] {
+            let s = state_with("m1", "tier0", Some(tier));
+            assert_eq!(effective_trust(&s, "m1"), "guest");
+            assert!(trust_allows_kind(
+                &effective_trust(&s, "m1"),
+                "fix",
+                &policy
+            ));
+        }
+        // Tier 0 and no tier get nothing, a token member and the owner are as before.
+        for tier in [0, -1] {
+            let s = state_with("m1", "tier0", Some(tier));
+            assert_eq!(effective_trust(&s, "m1"), "tier0");
+            assert!(!trust_allows_kind(
+                &effective_trust(&s, "m1"),
+                "fix",
+                &policy
+            ));
+        }
+        assert_eq!(
+            effective_trust(&state_with("g", "guest", Some(2)), "g"),
+            "guest"
+        );
+        assert_eq!(
+            effective_trust(&state_with("o", "owner", Some(3)), "o"),
+            "owner"
+        );
+        assert_eq!(effective_trust(&PlanState::default(), "nobody"), "owner");
+    }
 }

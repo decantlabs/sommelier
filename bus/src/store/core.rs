@@ -6,7 +6,7 @@ use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::derive::capacity::{MAX_CLASS_SLOTS, MAX_CLASSES};
+use crate::derive::capacity::{MAX_CLASS_SLOTS, MAX_CLASSES, MAX_TOTAL_SLOTS};
 use crate::derive::parse_hello_capacity;
 use crate::msg::{Kind, Message, Role};
 use crate::time::parse_ms;
@@ -204,6 +204,13 @@ pub fn apply_core_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
     {
         return Ok(());
     }
+    // A member declares capacity for itself only. The owner of a capacity FACT is the sender, never the topic.
+    if msg.kind == Kind::Fact
+        && msg.topic.starts_with("capacity/")
+        && !crate::role::writers::own_topic_ok(msg)
+    {
+        return Ok(());
+    }
 
     match msg.kind {
         Kind::Hello => {
@@ -220,7 +227,8 @@ pub fn apply_core_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
         Kind::Status => {
             apply_status(tx, msg, ts_sec, msg_id)?;
         }
-        Kind::Alert => {
+        // Only the hub writes alerts. A line of a member in an old log opens, changes or closes none.
+        Kind::Alert if msg.role == Role::Hub => {
             apply_alert(tx, msg, ts_sec, msg_id)?;
         }
         Kind::Policy => {
@@ -238,6 +246,52 @@ fn topic_owner_is_key(tx: &Transaction<'_>, msg: &Message) -> bool {
         .strip_prefix("capacity/")
         .and_then(|rest| rest.split('/').next())
         .is_some_and(|owner| key_member_without_capacity(tx, owner))
+}
+
+/// Most machines one owner keeps in the table. A declaration of a new machine past this is ignored.
+pub const MAX_MACHINES_PER_OWNER: i64 = 16;
+
+/// True when `owner` may keep a machine with this name: it is known already, or the owner is below the cap.
+fn machine_room(tx: &Transaction<'_>, owner: &str, machine: &str) -> bool {
+    let known: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM MACHINE WHERE owner = ?1 AND machine = ?2",
+            params![owner, machine],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if known > 0 {
+        return true;
+    }
+    let all: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM MACHINE WHERE owner = ?1",
+            params![owner],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    all < MAX_MACHINES_PER_OWNER
+}
+
+/// Cuts `wanted` so that all slots of `owner` together stay within the total of one declaration. The cap holds per
+/// owner, whatever the number of declarations or the machine names in them.
+fn clamp_owner_slots(
+    tx: &Transaction<'_>,
+    owner: &str,
+    machine: &str,
+    class: &str,
+    wanted: i64,
+) -> i64 {
+    let others: i64 = tx
+        .query_row(
+            "SELECT COALESCE(SUM(useful_parallel), 0) FROM CAPACITY
+             WHERE owner = ?1 AND NOT (machine = ?2 AND class = ?3)",
+            params![owner, machine, class],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let room = i64::from(MAX_TOTAL_SLOTS).saturating_sub(others).max(0);
+    wanted.min(room)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -288,6 +342,9 @@ fn apply_hello_or_capacity(
                 .collect()
         })
         .unwrap_or_default();
+    if !machine_room(tx, owner, &machine) {
+        return Ok(());
+    }
 
     tx.execute(
         "INSERT INTO MACHINE (
@@ -350,7 +407,7 @@ fn apply_hello_or_capacity(
                     machine,
                     cls,
                     cap.mode.as_str(),
-                    useful_parallel as i64,
+                    clamp_owner_slots(tx, owner, &machine, cls, useful_parallel as i64),
                     accepts_json,
                     pools_json,
                     ts_sec,
@@ -386,6 +443,9 @@ fn apply_capacity_fact(
         && v.is_object()
     {
         let machine = v["machine"].as_str().unwrap_or(machine_from_topic);
+        if !machine_room(tx, owner, machine) {
+            return Ok(());
+        }
         let os = v["os"].as_str().unwrap_or("");
         let gpu = v["gpu"].as_str().unwrap_or("");
         let machine_class = v["machine_class"]
@@ -450,6 +510,7 @@ fn apply_capacity_fact(
                 .as_u64()
                 .unwrap_or(1)
                 .min(u64::from(MAX_CLASS_SLOTS)) as i64;
+            let useful_parallel = clamp_owner_slots(tx, owner, machine, cls, useful_parallel);
             let pools_json = default_pools_json.unwrap_or_else(|| {
                 serde_json::to_string(&default_pools_for_class(cls)).unwrap_or_else(|_| "[]".into())
             });
@@ -488,6 +549,7 @@ fn apply_capacity_fact(
                     .as_u64()
                     .unwrap_or(0)
                     .min(u64::from(MAX_CLASS_SLOTS)) as i64;
+                let useful_parallel = clamp_owner_slots(tx, owner, machine, cls, useful_parallel);
                 let pools_json = default_pools_json.clone().unwrap_or_else(|| {
                     serde_json::to_string(&default_pools_for_class(cls))
                         .unwrap_or_else(|_| "[]".into())
@@ -537,6 +599,10 @@ fn apply_exit_fact(
     let Some(worker) = parts.get(2).copied().filter(|w| !w.is_empty()) else {
         return Ok(());
     };
+    // A member reports the exit of its own agents. The hub reports for anyone.
+    if msg.role != Role::Hub && owner != msg.from {
+        return Ok(());
+    }
     let state = serde_json::from_str::<Value>(&msg.body)
         .ok()
         .and_then(|v| {

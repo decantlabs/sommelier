@@ -1019,11 +1019,11 @@ fn a_fact_on_a_bundle_landing_row_counts_only_from_the_hub() {
         &[],
     );
     assert_eq!(e.landings(), vec![format!("bundle:{s}")]);
-    // An ordinary branch row keeps working for any sender, as before.
+    // An ordinary branch row also counts only from the hub now (land/ is a topic of the hub).
     apply_as(
         &mut e,
-        "orch",
-        Role::Orchestrator,
+        "hub",
+        Role::Hub,
         Kind::Fact,
         "land/fx/a",
         row_of("fx/a", 'e'),
@@ -1825,4 +1825,121 @@ fn a_signed_verdict_too_long_to_keep_is_refused_before_anything_is_written() {
     assert!(err.contains("shorten"), "{err}");
     assert!(answer_facts(&e, "t1", 1).is_empty());
     assert_eq!(e.sub_state(&s), "reviewing");
+}
+
+#[test]
+fn enqueue_checks_that_the_sha_is_the_head_of_the_submission() {
+    let mut e = Env::new();
+    let s = locked(&mut e, 'a', true, "passed", Some(("answered", "pass")));
+    let wrong = e
+        .run(
+            "orch",
+            Role::Orchestrator,
+            "owner",
+            "land.enqueue",
+            json!({"ref": format!("bundle:{s}"), "sha": "d".repeat(40), "task_id": "t1"}),
+        )
+        .unwrap_err();
+    assert!(wrong.contains("not the head of submission"), "{wrong}");
+    assert!(e.landings().is_empty());
+    enqueue(&mut e, &format!("bundle:{s}")).unwrap();
+    assert_eq!(e.landings(), vec![format!("bundle:{s}")]);
+}
+
+#[test]
+fn a_result_or_an_approval_never_creates_a_bundle_row_past_the_lock() {
+    let mut e = Env::new();
+    // A submission that is still reviewing: the lock refuses it.
+    let s = sha('b');
+    e.submission(&s, "t1", "alice", 1, "reviewing");
+    e.parts(&s, true, "passed");
+    let r = format!("bundle:{s}");
+    let head = "c".repeat(40);
+    let err = e
+        .run(
+            "orch",
+            Role::Orchestrator,
+            "owner",
+            "land.result",
+            json!({"ref": r, "sha": head, "result": "landed", "batch_id": "b1"}),
+        )
+        .unwrap_err();
+    assert!(err.contains("made only by land.enqueue"), "{err}");
+    let err = e
+        .run(
+            "orch",
+            Role::Orchestrator,
+            "owner",
+            "land.approve",
+            json!({"ref": r, "sha": head}),
+        )
+        .unwrap_err();
+    assert!(err.contains("must be `approved`"), "{err}");
+    assert!(e.landings().is_empty(), "{:?}", e.landings());
+    // An ordinary ref is still written by the lander through land.result.
+    e.run(
+        "orch",
+        Role::Orchestrator,
+        "owner",
+        "land.result",
+        json!({"ref": "fx/a", "sha": head, "result": "landed", "batch_id": "b2"}),
+    )
+    .unwrap();
+    assert!(e.landings().contains(&"fx/a".to_string()));
+}
+
+#[test]
+fn land_result_and_a_claiming_next_need_the_lander_or_the_orchestrator() {
+    let mut e = Env::new();
+    let head = "c".repeat(40);
+    for (op, body) in [
+        (
+            "land.result",
+            json!({"ref": "fx/a", "sha": head, "result": "landed"}),
+        ),
+        ("land.next", json!({"claim": true})),
+        ("land.sweep", json!({})),
+        ("land.branch_upsert", json!({"ref": "fx/a"})),
+        ("run.sweep", json!({})),
+    ] {
+        let err = e
+            .run("mallory", Role::Member, "guest", op, body.clone())
+            .unwrap_err();
+        assert!(err.contains("holder of the role lander"), "{op}: {err}");
+    }
+    // Reading the queue stays open.
+    e.run("mallory", Role::Member, "guest", "land.next", json!({}))
+        .unwrap();
+    // The holder of the role lander may write results.
+    e.fact(
+        "role/lander",
+        json!({"role": "lander", "scope": "global", "holder": "lena", "state": "held", "epoch": 1}),
+    );
+    e.run(
+        "lena",
+        Role::Member,
+        "guest",
+        "land.result",
+        json!({"ref": "fx/a", "sha": head, "result": "landed"}),
+    )
+    .unwrap();
+    // A member keeps its own run rows and no one else's.
+    e.run(
+        "mallory",
+        Role::Member,
+        "guest",
+        "run.register",
+        json!({"run_id": "r1", "sha": head, "requested_by": "someone"}),
+    )
+    .unwrap();
+    let err = e
+        .run(
+            "bob",
+            Role::Member,
+            "guest",
+            "run.result",
+            json!({"run_id": "r1", "outcome": "pass"}),
+        )
+        .unwrap_err();
+    assert!(err.contains("belongs to `mallory`"), "{err}");
 }

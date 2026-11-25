@@ -18,7 +18,7 @@ use sommelier::hub::{self, Hub, HubConfig};
 use sommelier::intake;
 use sommelier::key::JoinRules;
 use sommelier::key::client as kc;
-use sommelier::msg::Role;
+use sommelier::msg::{Kind, Message, Role};
 use sommelier::policy::{Change, DEFAULT_POLICY, Store as PolicyStore};
 use sommelier::tokens::{Member, TokenFile};
 use sommelier::verify::ops::SharedApi;
@@ -217,13 +217,19 @@ impl TestHub {
             "lease": {"task_id": id, "attempt": 1, "owner": member, "worker": member,
                       "state": "active", "expires_at": far, "heartbeat_at": far - 86_000},
         });
-        client::request_ok(
-            &self.orch(),
-            json!({"op": "send", "kind": "TASK_UPDATE", "topic": format!("task/{id}"),
-                   "body": body.to_string()}),
-        )
-        .await
-        .unwrap();
+        self.hub
+            .append_hook_message(Message {
+                id: 0,
+                ts: String::new(),
+                from: "hub".into(),
+                role: Role::Hub,
+                kind: Kind::TaskUpdate,
+                topic: format!("task/{id}"),
+                body: body.to_string(),
+                refs: vec![],
+                to: vec![],
+            })
+            .unwrap();
     }
 
     /// A raw `PUT /api/submit/...` with the token of alice.

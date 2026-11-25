@@ -552,7 +552,7 @@ fn log() -> Vec<Message> {
             "other/m1",
             body("landed", "m1", "hub", ev.clone()),
         ),
-        // A guest may issue an ordinary stamp in its own name.
+        // Only the hub issues a stamp, so a guest line in its own name leaves no row either.
         fact(
             12,
             "guest",
@@ -581,7 +581,7 @@ fn replay_twice_gives_equal_tables_and_bad_lines_leave_no_row() {
     let rb = query_stamps(b.connection()).unwrap();
     assert_eq!(ra, rb);
     let ids: Vec<u64> = ra.iter().map(|s| s.id).collect();
-    assert_eq!(ids, vec![1, 2, 3, 12]);
+    assert_eq!(ids, vec![1, 2, 3]);
     assert_eq!(ra[0].evidence_commit, "abc123");
     assert!(ra.iter().all(|s| s.msg_id == s.id && s.evidence_msg == 5));
 
@@ -601,7 +601,7 @@ fn standing_counts_by_kind_and_api_has_no_tier() {
     assert_eq!(names, vec!["m1", "m2"]);
     assert_eq!(rows[0].counts["landed"], 1);
     assert_eq!(rows[0].counts["run_agreed"], 1);
-    assert_eq!(rows[0].counts["review_confirmed"], 1);
+    assert_eq!(rows[0].counts["review_confirmed"], 0);
     assert_eq!(rows[0].counts["intent"], 0);
     assert_eq!(rows[1].counts["landed"], 1);
 
