@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14171c" media="(prefers-color-scheme: dark)">
+<title>sommelier</title>
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css?v=2026-11-25-json1">
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-branch" viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.75"/><circle cx="4.5" cy="12.5" r="1.75"/><circle cx="11.5" cy="5" r="1.75"/><path d="M4.5 5.25v5.5M11.5 6.75c0 3-7 2.25-7 4"/></symbol>
+  <symbol id="i-commit" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.75"/><path d="M1 8h4.25M10.75 8H15"/></symbol>
+  <symbol id="i-link" viewBox="0 0 16 16"><path d="M6.5 4.5h-2a3.5 3.5 0 0 0 0 7h2M9.5 4.5h2a3.5 3.5 0 0 1 0 7h-2M5.5 8h5"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 16 16"><path d="M2.5 8h10M9 4.5 12.5 8 9 11.5"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="m5.5 3.5 4.5 4.5-4.5 4.5"/></symbol>
+  <symbol id="i-key" viewBox="0 0 16 16"><circle cx="5" cy="8" r="2.75"/><path d="M7.75 8H14.5M12 8v2.5M14.5 8v2"/></symbol>
+  <symbol id="i-x" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+  <symbol id="i-flag" viewBox="0 0 16 16"><path d="M3.5 14.5V2M3.5 2.5h8.5l-2 3 2 3H3.5"/></symbol>
+</svg>
+
+<header class="bar" id="bar">
+  <div class="stale-banner" id="stale-banner" role="alert" hidden></div>
+  <div class="bar-in">
+    <a class="mark" href="#roster" aria-label="sommelier, back to the top">
+      <svg class="mark-glyph" viewBox="0 0 28 12" aria-hidden="true"><path d="M1 6h26"/><circle cx="5" cy="6" r="3"/><circle cx="14" cy="6" r="3"/><circle cx="23" cy="6" r="3"/></svg>
+      <span class="mark-word">sommelier</span>
+    </a>
+    <p class="pulse" id="pulse" aria-live="polite"></p>
+    <div class="conn" id="conn" role="status">
+      <span class="conn-dot" aria-hidden="true"></span>
+      <span class="conn-text" id="conn-text">not connected</span>
+    </div>
+    <button class="btn btn-quiet" id="forget" type="button" hidden>
+      <svg class="ic" aria-hidden="true"><use href="#i-key"/></svg><span>Forget token</span>
+    </button>
+  </div>
+  <nav class="jump" aria-label="Sections">
+    <a href="#roster">People</a><a href="#views">Control plane</a><a href="#ledger">Claims and runs</a><a href="#feed">Feed</a>
+  </nav>
+</header>
+
+<main id="app">
+  <section class="gate" id="gate" hidden aria-labelledby="gate-h">
+    <div class="gate-in">
+      <svg class="gate-glyph" viewBox="0 0 120 24" aria-hidden="true"><path d="M2 12h116"/><circle cx="14" cy="12" r="5"/><circle cx="46" cy="12" r="5"/><circle cx="78" cy="12" r="5"/><circle cx="106" cy="12" r="5" class="hollow"/></svg>
+      <h1 id="gate-h">Watch the bus</h1>
+      <p>Paste an <strong>observer token</strong>. It can only read, which is why the hub accepts it from a browser. Member and orchestrator tokens are refused here on purpose.</p>
+      <form id="gate-form" autocomplete="off">
+        <label for="gate-token">Observer token</label>
+        <div class="gate-row">
+          <input id="gate-token" name="token" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" required placeholder="sb_…">
+          <button class="btn btn-primary" type="submit">Connect</button>
+        </div>
+        <p class="gate-err" id="gate-err" role="alert" hidden></p>
+        <p class="gate-note">Kept in this browser only, never in the address bar. Ask the hub owner for one: <code>sommelier token add &lt;name&gt; --role observer</code></p>
+        <details class="gate-hub">
+          <summary>Hub address</summary>
+          <div class="gate-row">
+            <input id="gate-hub" type="text" spellcheck="false" autocapitalize="off" placeholder="wss://hub.example.com">
+          </div>
+          <p class="gate-note">Leave empty to use the server this page came from.</p>
+        </details>
+      </form>
+    </div>
+  </section>
+
+  <div class="board" id="board" hidden>
+    <section class="roster" id="roster" aria-labelledby="roster-h">
+      <h2 class="sr" id="roster-h">Participants and their agents</h2>
+      <div id="people"></div>
+    </section>
+
+    <section class="views" id="views" aria-label="Control plane views">
+      <div id="view-tasks"></div>
+      <div id="view-pools"></div>
+      <div id="view-landing"></div>
+      <div id="view-runs"></div>
+      <div id="view-branches"></div>
+      <div id="view-metrics"></div>
+    </section>
+
+    <section class="ledger" id="ledger" aria-label="Claims and run requests">
+      <div class="panel">
+        <h2 class="panel-h">Claims <span class="count" id="claims-n"></span></h2>
+        <ul class="claims" id="claims"></ul>
+      </div>
+      <div class="panel">
+        <h2 class="panel-h">Run requests <span class="count" id="runs-n"></span></h2>
+        <ul class="runs" id="runs"></ul>
+      </div>
+    </section>
+
+    <section class="feed" id="feed" aria-labelledby="feed-h">
+      <div class="feed-head">
+        <h2 class="panel-h" id="feed-h">Feed <span class="count" id="feed-n"></span></h2>
+        <div class="filters" id="filters">
+          <div class="kinds" id="kinds" role="group" aria-label="Kinds"></div>
+          <div class="filter-row">
+            <label class="fld"><span class="sr">Participant</span>
+              <select id="f-from"><option value="">Everyone</option></select>
+            </label>
+            <label class="fld fld-grow"><span class="sr">Topic</span>
+              <input id="f-topic" type="search" placeholder="Topic, like issue/194 or issue/*" spellcheck="false" autocapitalize="off">
+            </label>
+            <button class="btn btn-quiet" id="f-clear" type="button" hidden>Clear</button>
+          </div>
+        </div>
+      </div>
+      <ol class="msgs" id="msgs" aria-live="off"></ol>
+      <p class="empty" id="feed-empty" hidden></p>
+    </section>
+  </div>
+</main>
+
+<script type="module" src="views/index.js"></script>
+<script src="app.js?v=2026-11-25-json1"></script>
+</body>
+</html>

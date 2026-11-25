@@ -1,0 +1,108 @@
+{
+  "name": "17_admit_bridge_reset_and_low_conf",
+  "description": "Low confidence doubles margin to 2.0 so need=30 exceeds head=15; checkpointable task bridges the reset in 90 min while non-checkpointable task is denied.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t-bridge",
+        "title": "Checkpointable bridges reset",
+        "kind": "fix",
+        "priority": "high",
+        "state": "ready",
+        "scope": "src/bridge/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "checkpointable": true,
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t-nobridge",
+        "title": "Cannot bridge reset",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/nobridge/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "checkpointable": false,
+        "ready_at": 1795600000
+      }
+    ],
+    "meters": [
+      {
+        "owner": "hub-owner",
+        "vendor": "codex",
+        "pool": "codex.5h",
+        "window": "5h",
+        "policy": {
+          "vendor": "codex",
+          "window": "5h",
+          "stop_at": 90.0,
+          "reserve_pct": 10.0,
+          "pace": false,
+          "drain_min": 30,
+          "drain_band_pct": 5.0,
+          "fresh_min": 5,
+          "burn_window_min": 30,
+          "window_duration_sec": 18000
+        },
+        "series": [],
+        "latest": {
+          "owner": "hub-owner",
+          "vendor": "codex",
+          "pool": "codex.5h",
+          "window": "5h",
+          "observed_at": 1795599990,
+          "used_pct": 75.0,
+          "resets_at": 1795605400,
+          "source": "inferred",
+          "confidence": 0.4
+        },
+        "resets_at": 1795605400,
+        "unit": "weighted_tokens",
+        "pct_per_unit": 0.00001,
+        "n_calibration": 0,
+        "capacity_units": 10000000.0,
+        "probe_enabled": true
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "lease",
+      "task_id": "t-bridge",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "codex",
+      "slot_key": "hub-owner/box1/codex/1",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    }
+  ],
+  "expected_wait_reasons": {
+    "t-nobridge": "no headroom on codex.5h"
+  }
+}

@@ -1,0 +1,43 @@
+[package]
+name = "sommelier"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+description = "Coordination bus for coding agents on several machines: a small WebSocket hub with JSON line messages"
+
+# Standalone on purpose: this folder is its own Cargo project and its own workspace root.
+[workspace]
+
+[features]
+default = ["tls"]
+# wss:// support for clients (a hub behind a Cloudflare tunnel is reached with wss://).
+# The hub itself never terminates TLS.
+tls = ["tokio-tungstenite/rustls-tls-webpki-roots", "dep:rustls", "reqwest/rustls-tls"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-std", "io-util", "fs", "signal"] }
+tokio-tungstenite = "0.30"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+sha2 = "0.10"
+semver = { version = "1", features = ["serde"] }
+toml = "0.9"
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false }
+rusqlite = { version = "0.43", features = ["bundled"] }
+sysinfo = "0.40"
+regex = "1"
+
+[dev-dependencies]
+jsonschema = { version = "0.33", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+strip = true

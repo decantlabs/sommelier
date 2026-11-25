@@ -1,0 +1,82 @@
+{
+  "name": "10_resume_boost_and_pool_exclusion",
+  "description": "Requeued attempt 2 task gets +25 resume boost, is excluded from agy.window until reset, and lands on codex.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "gemini_build",
+        "mode": "auto",
+        "useful_parallel": 1,
+        "accepts": ["fix"],
+        "pools": ["agy.window"]
+      },
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 1,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t-fresh",
+        "title": "Fresh normal",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/fresh/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "attempt": 1,
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t-resumed",
+        "title": "Resumed after quota hit",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/resumed/*",
+        "accepts": ["gemini_build", "codex"],
+        "done_when": "ok",
+        "attempt": 2,
+        "exclude_pools_until": {
+          "agy.window": 1795603600
+        },
+        "ready_at": 1795600000
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "lease",
+      "task_id": "t-resumed",
+      "attempt": 2,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "codex",
+      "slot_key": "hub-owner/box1/codex/1",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    }
+  ],
+  "expected_wait_reasons": {
+    "t-fresh": "task does not accept class gemini_build"
+  }
+}

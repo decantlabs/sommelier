@@ -1,0 +1,95 @@
+{
+  "name": "03_emptiest_owner",
+  "description": "Among two owners with equal cost_rank class, scheduler picks the owner with lower utilisation.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "alpha", "trust": "owner", "online": true },
+      { "name": "beta", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "alpha",
+        "machine": "m1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"]
+      },
+      {
+        "owner": "beta",
+        "machine": "m2",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t0",
+        "title": "Running job",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "running",
+        "scope": "src/alpha/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795599000
+      },
+      {
+        "id": "t1",
+        "title": "New job",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/new/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      }
+    ],
+    "leases": [
+      {
+        "task_id": "t0",
+        "attempt": 1,
+        "owner": "alpha",
+        "worker": "alpha/m1/codex/1",
+        "machine": "m1",
+        "class": "codex",
+        "pools": ["codex.5h"],
+        "granted_at": 1795599950,
+        "heartbeat_at": 1795599990,
+        "expires_at": 1795602650,
+        "est_minutes_p90": 30.0,
+        "est_cost": 100000.0,
+        "est_end_at": 1795601750,
+        "state": "active",
+        "supervised": true
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "lease",
+      "task_id": "t1",
+      "attempt": 1,
+      "owner": "beta",
+      "machine": "m2",
+      "class": "codex",
+      "slot_key": "beta/m2/codex/1",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    }
+  ],
+  "expected_wait_reasons": {}
+}

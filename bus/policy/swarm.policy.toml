@@ -1,0 +1,54 @@
+version = 1
+min_client = "0.1.0"
+grace_min = 15
+mode = "off"
+
+[timers]
+lease_min = 45
+poll_min = 15
+gone_min = 45
+offer_min = 5
+status_fresh_min = 20
+
+[class.claude_top]
+cap_per_owner = 1
+spawn = false
+
+[class.claude_strong]
+cap_per_owner = 2
+effort = "medium"
+budget = { meter = "claude_week", stop_at = 80 }
+
+[class.claude_cheap]
+
+[class.codex]
+cap_per_owner = 0
+
+[class.gemini]
+cap_per_owner = 4
+cap_per_family = 2
+quota_pause_min = 30
+
+[class.game_run]
+cap_per_machine = 1
+lock = "game"
+priority = "normal"
+
+[class.local_build]
+cap_per_machine = 3
+priority = "below_normal"
+
+[trust.guest]
+may_claim = ["fix", "review", "run", "scout"]
+hold_paths = ["**/CLAUDE.md", "**/AGENTS.md", ".claude/**", "swarm/**", "**/build.rs", "Cargo.lock"]
+
+[kind.fix]
+required = ["scope", "branch", "done_when"]
+branch = "{class}/{task}"
+min_tier = "middle"
+checks = ["scope_touched", "full_tests", "pii_scan"]
+
+[priority]
+levels = { blocker = 100, high = 60, normal = 30, filler = 5 }
+aging_per_10min = 2
+aging_cap = 40

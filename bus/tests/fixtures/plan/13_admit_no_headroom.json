@@ -1,0 +1,81 @@
+{
+  "name": "13_admit_no_headroom",
+  "description": "Open codex.5h has 15% headroom left (used 75, line 90) but task needs 18% (1.5M * 0.00001 * 1.2); denied with no headroom.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 1,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "title": "Big codex task",
+        "kind": "fix",
+        "priority": "high",
+        "state": "ready",
+        "scope": "src/a/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "checkpointable": false,
+        "ready_at": 1795600000
+      }
+    ],
+    "meters": [
+      {
+        "owner": "hub-owner",
+        "vendor": "codex",
+        "pool": "codex.5h",
+        "window": "5h",
+        "policy": {
+          "vendor": "codex",
+          "window": "5h",
+          "stop_at": 90.0,
+          "reserve_pct": 10.0,
+          "pace": false,
+          "drain_min": 30,
+          "drain_band_pct": 5.0,
+          "fresh_min": 5,
+          "burn_window_min": 30,
+          "window_duration_sec": 18000
+        },
+        "series": [],
+        "latest": {
+          "owner": "hub-owner",
+          "vendor": "codex",
+          "pool": "codex.5h",
+          "window": "5h",
+          "observed_at": 1795599990,
+          "used_pct": 75.0,
+          "resets_at": 1795614000,
+          "source": "api",
+          "confidence": 0.9
+        },
+        "resets_at": 1795614000,
+        "unit": "weighted_tokens",
+        "pct_per_unit": 0.00001,
+        "n_calibration": 5,
+        "capacity_units": 10000000.0,
+        "probe_enabled": true
+      }
+    ]
+  },
+  "expected_actions": [],
+  "expected_wait_reasons": {
+    "t1": "no headroom on codex.5h"
+  }
+}

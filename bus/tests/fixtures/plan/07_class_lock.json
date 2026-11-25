@@ -1,0 +1,81 @@
+{
+  "name": "07_class_lock",
+  "description": "An active game_run lease holds lock 'game', blocking a second game_run task on another slot.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "game_run",
+        "mode": "auto",
+        "useful_parallel": 1,
+        "accepts": ["run"],
+        "pools": []
+      },
+      {
+        "owner": "hub-owner",
+        "machine": "box2",
+        "class": "game_run",
+        "mode": "auto",
+        "useful_parallel": 1,
+        "accepts": ["run"],
+        "pools": []
+      }
+    ],
+    "tasks": [
+      {
+        "id": "r1",
+        "title": "Active run",
+        "kind": "run",
+        "priority": "high",
+        "state": "running",
+        "scope": "run/1",
+        "accepts": ["game_run"],
+        "done_when": "run done",
+        "ready_at": 1795599000
+      },
+      {
+        "id": "r2",
+        "title": "Waiting run",
+        "kind": "run",
+        "priority": "high",
+        "state": "ready",
+        "scope": "run/2",
+        "accepts": ["game_run"],
+        "done_when": "run done",
+        "ready_at": 1795600000
+      }
+    ],
+    "leases": [
+      {
+        "task_id": "r1",
+        "attempt": 1,
+        "owner": "hub-owner",
+        "worker": "hub-owner/box1/game_run/1",
+        "machine": "box1",
+        "class": "game_run",
+        "pools": [],
+        "granted_at": 1795599900,
+        "heartbeat_at": 1795599990,
+        "expires_at": 1795602600,
+        "est_minutes_p90": 10.0,
+        "est_cost": 0.0,
+        "est_end_at": 1795600500,
+        "state": "active",
+        "supervised": true
+      }
+    ]
+  },
+  "expected_actions": [],
+  "expected_wait_reasons": {
+    "r2": "lock game is already held"
+  }
+}

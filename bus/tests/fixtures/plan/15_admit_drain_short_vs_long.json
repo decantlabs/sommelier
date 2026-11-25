@@ -1,0 +1,137 @@
+{
+  "name": "15_admit_drain_short_vs_long",
+  "description": "In drain mode (used 86, line 90, drain_band 5), short (<=10m) and checkpointable tasks are admitted; long non-checkpointable task is denied.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix", "review"],
+        "pools": ["codex.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t-check",
+        "title": "Checkpointable task",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/check/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "size": 0.5,
+        "checkpointable": true,
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t-long",
+        "title": "Long non-checkpointable task",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/long/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "size": 1.0,
+        "checkpointable": false,
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t-short",
+        "title": "Short review task",
+        "kind": "review",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/short/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "size": 0.1,
+        "checkpointable": false,
+        "ready_at": 1795600000
+      }
+    ],
+    "meters": [
+      {
+        "owner": "hub-owner",
+        "vendor": "codex",
+        "pool": "codex.5h",
+        "window": "5h",
+        "policy": {
+          "vendor": "codex",
+          "window": "5h",
+          "stop_at": 90.0,
+          "reserve_pct": 10.0,
+          "pace": false,
+          "drain_min": 30,
+          "drain_band_pct": 5.0,
+          "fresh_min": 5,
+          "burn_window_min": 30,
+          "window_duration_sec": 18000
+        },
+        "series": [],
+        "latest": {
+          "owner": "hub-owner",
+          "vendor": "codex",
+          "pool": "codex.5h",
+          "window": "5h",
+          "observed_at": 1795599990,
+          "used_pct": 86.0,
+          "resets_at": 1795614000,
+          "source": "api",
+          "confidence": 0.9
+        },
+        "resets_at": 1795614000,
+        "unit": "weighted_tokens",
+        "pct_per_unit": 0.000001,
+        "n_calibration": 5,
+        "capacity_units": 100000000.0,
+        "probe_enabled": true
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "lease",
+      "task_id": "t-check",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "codex",
+      "slot_key": "hub-owner/box1/codex/1",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 37.5,
+      "est_cost": 750000.0,
+      "est_end_at": 1795602250,
+      "expires_at": 1795602700
+    },
+    {
+      "action": "lease",
+      "task_id": "t-short",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "codex",
+      "slot_key": "hub-owner/box1/codex/2",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 7.5,
+      "est_cost": 150000.0,
+      "est_end_at": 1795600450,
+      "expires_at": 1795602700
+    }
+  ],
+  "expected_wait_reasons": {
+    "t-long": "drain on codex.5h"
+  }
+}

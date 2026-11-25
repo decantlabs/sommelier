@@ -1,0 +1,1 @@
+{"total_cost_usd":0.42,"usage":{"input_tokens":12000,"cache_read_input_tokens":8000,"output_tokens":500},"modelUsage":{"claude-sonnet":{"inputTokens":12000,"cacheReadInputTokens":8000,"outputTokens":500}}}

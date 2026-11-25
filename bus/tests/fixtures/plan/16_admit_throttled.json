@@ -1,0 +1,144 @@
+{
+  "name": "16_admit_throttled",
+  "description": "Paced weekly pool burning faster than allowed_rate * throttle_slack enters throttled state and caps parallelism.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix"],
+        "pools": ["codex.week"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t0",
+        "title": "Running codex job",
+        "kind": "fix",
+        "priority": "high",
+        "state": "running",
+        "scope": "src/run/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795599000
+      },
+      {
+        "id": "t1",
+        "title": "Second codex job",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/next/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      }
+    ],
+    "leases": [
+      {
+        "task_id": "t0",
+        "attempt": 1,
+        "owner": "hub-owner",
+        "worker": "hub-owner/box1/codex/1",
+        "machine": "box1",
+        "class": "codex",
+        "pools": ["codex.week"],
+        "granted_at": 1795599900,
+        "heartbeat_at": 1795599990,
+        "expires_at": 1795602600,
+        "est_minutes_p90": 30.0,
+        "est_cost": 100000.0,
+        "est_end_at": 1795601700,
+        "state": "active",
+        "supervised": true
+      }
+    ],
+    "meters": [
+      {
+        "owner": "hub-owner",
+        "vendor": "codex",
+        "pool": "codex.week",
+        "window": "week",
+        "policy": {
+          "vendor": "codex",
+          "window": "week",
+          "stop_at": 80.0,
+          "reserve_pct": 20.0,
+          "pace": true,
+          "drain_min": 60,
+          "drain_band_pct": 3.0,
+          "fresh_min": 30,
+          "burn_window_min": 120,
+          "window_duration_sec": 604800
+        },
+        "series": [
+          {
+            "owner": "hub-owner",
+            "vendor": "codex",
+            "pool": "codex.week",
+            "window": "week",
+            "observed_at": 1795599400,
+            "used_pct": 39.8,
+            "resets_at": 1795960000,
+            "source": "api",
+            "confidence": 0.9
+          },
+          {
+            "owner": "hub-owner",
+            "vendor": "codex",
+            "pool": "codex.week",
+            "window": "week",
+            "observed_at": 1795599700,
+            "used_pct": 39.9,
+            "resets_at": 1795960000,
+            "source": "api",
+            "confidence": 0.9
+          },
+          {
+            "owner": "hub-owner",
+            "vendor": "codex",
+            "pool": "codex.week",
+            "window": "week",
+            "observed_at": 1795600000,
+            "used_pct": 40.0,
+            "resets_at": 1795960000,
+            "source": "api",
+            "confidence": 0.9
+          }
+        ],
+        "latest": {
+          "owner": "hub-owner",
+          "vendor": "codex",
+          "pool": "codex.week",
+          "window": "week",
+          "observed_at": 1795600000,
+          "used_pct": 40.0,
+          "resets_at": 1795960000,
+          "source": "api",
+          "confidence": 0.9
+        },
+        "resets_at": 1795960000,
+        "unit": "weighted_tokens",
+        "pct_per_unit": 0.000001,
+        "n_calibration": 5,
+        "capacity_units": 100000000.0,
+        "probe_enabled": true
+      }
+    ]
+  },
+  "expected_actions": [],
+  "expected_wait_reasons": {
+    "t1": "throttled on codex.week"
+  }
+}

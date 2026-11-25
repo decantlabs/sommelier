@@ -1,0 +1,85 @@
+{
+  "name": "11_admit_paused_pool",
+  "description": "Pool with active limit state_event is Paused and denies admission until resets_at.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "gemini_build",
+        "mode": "auto",
+        "useful_parallel": 1,
+        "accepts": ["fix"],
+        "pools": ["agy.window"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "title": "Blocked by pause",
+        "kind": "fix",
+        "priority": "high",
+        "state": "ready",
+        "scope": "src/a/*",
+        "accepts": ["gemini_build"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      }
+    ],
+    "meters": [
+      {
+        "owner": "hub-owner",
+        "vendor": "gemini",
+        "pool": "agy.window",
+        "window": "5h",
+        "policy": {
+          "vendor": "gemini",
+          "window": "5h",
+          "stop_at": 90.0,
+          "reserve_pct": 10.0,
+          "pace": false,
+          "drain_min": 30,
+          "drain_band_pct": 5.0,
+          "fresh_min": 5,
+          "burn_window_min": 30,
+          "window_duration_sec": 18000
+        },
+        "series": [],
+        "latest": {
+          "owner": "hub-owner",
+          "vendor": "gemini",
+          "pool": "agy.window",
+          "window": "5h",
+          "observed_at": 1795599950,
+          "used_pct": 40.0,
+          "resets_at": 1795607200,
+          "source": "api",
+          "confidence": 0.9
+        },
+        "resets_at": 1795607200,
+        "state_event": {
+          "resets_at": 1795607200,
+          "observed_at": 1795599950,
+          "message": "RESOURCE_EXHAUSTED Resets in 2h"
+        },
+        "unit": "worker_minutes",
+        "pct_per_unit": 0.0333333333,
+        "n_calibration": 3,
+        "capacity_units": 3000.0,
+        "probe_enabled": true
+      }
+    ]
+  },
+  "expected_actions": [],
+  "expected_wait_reasons": {
+    "t1": "paused until 1795607200"
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "name": "08_priority_and_aging",
+  "description": "A normal task (30) that waited 200 minutes ages by +40 (cap) to 70, beating a fresh high task (60).",
+  "now": 1795612000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 1,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t-fresh-high",
+        "title": "Fresh high",
+        "kind": "fix",
+        "priority": "high",
+        "state": "ready",
+        "scope": "src/fresh/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795612000
+      },
+      {
+        "id": "t-aged-normal",
+        "title": "Aged normal",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/aged/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "lease",
+      "task_id": "t-aged-normal",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "codex",
+      "slot_key": "hub-owner/box1/codex/1",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 1500000.0,
+      "est_end_at": 1795616500,
+      "expires_at": 1795614700
+    }
+  ],
+  "expected_wait_reasons": {
+    "t-fresh-high": "no free slots"
+  }
+}

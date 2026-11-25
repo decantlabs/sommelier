@@ -1,0 +1,94 @@
+{
+  "name": "05_cap_per_family_and_machine",
+  "description": "cap_per_family = 2 stops a third gemini_build task even when useful_parallel = 4.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "gemini_build",
+        "mode": "auto",
+        "useful_parallel": 4,
+        "accepts": ["fix"],
+        "pools": ["agy.window"],
+        "family": "agy.family"
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "title": "Job 1",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/a/*",
+        "accepts": ["gemini_build"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t2",
+        "title": "Job 2",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/b/*",
+        "accepts": ["gemini_build"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t3",
+        "title": "Job 3",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/c/*",
+        "accepts": ["gemini_build"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "lease",
+      "task_id": "t1",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "gemini_build",
+      "slot_key": "hub-owner/box1/gemini_build/1",
+      "pools": ["agy.window", "agy.family"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 150.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    },
+    {
+      "action": "lease",
+      "task_id": "t2",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "gemini_build",
+      "slot_key": "hub-owner/box1/gemini_build/2",
+      "pools": ["agy.window", "agy.family"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 150.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    }
+  ],
+  "expected_wait_reasons": {
+    "t3": "cap_per_family (2) reached for agy.family on hub-owner"
+  }
+}

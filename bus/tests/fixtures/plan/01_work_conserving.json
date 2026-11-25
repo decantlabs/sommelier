@@ -1,0 +1,80 @@
+{
+  "name": "01_work_conserving",
+  "description": "Two ready tasks and two free auto slots fill both slots with deterministic id tie break.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 3
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix", "review"],
+        "pools": ["codex.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t2",
+        "title": "Fix parser",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/parser/*",
+        "accepts": ["codex"],
+        "done_when": "tests pass",
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t1",
+        "title": "Fix lexer",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/lexer/*",
+        "accepts": ["codex"],
+        "done_when": "tests pass",
+        "ready_at": 1795600000
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "lease",
+      "task_id": "t1",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "codex",
+      "slot_key": "hub-owner/box1/codex/1",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    },
+    {
+      "action": "lease",
+      "task_id": "t2",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "codex",
+      "slot_key": "hub-owner/box1/codex/2",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    }
+  ],
+  "expected_wait_reasons": {}
+}

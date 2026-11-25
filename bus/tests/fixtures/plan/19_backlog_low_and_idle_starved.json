@@ -1,0 +1,141 @@
+{
+  "name": "19_backlog_low_and_idle_starved",
+  "description": "Free admissible slots with fewer than min_ready tasks emit BACKLOG_LOW to brain; long-free slots emit IDLE or STARVED to coordinator.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 3
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 1,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"],
+        "free_since": 1795599100
+      },
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "gemini_build",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix"],
+        "pools": ["agy.window"],
+        "free_since": 1795599100
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t0",
+        "title": "Running gemini task",
+        "kind": "fix",
+        "priority": "high",
+        "state": "running",
+        "scope": "src/shared/*",
+        "accepts": ["gemini_build"],
+        "done_when": "ok",
+        "ready_at": 1795599000
+      },
+      {
+        "id": "t-wait",
+        "title": "Overlapping gemini task",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/shared/file.rs",
+        "accepts": ["gemini_build"],
+        "done_when": "ok",
+        "ready_at": 1795599200
+      }
+    ],
+    "leases": [
+      {
+        "task_id": "t0",
+        "attempt": 1,
+        "owner": "hub-owner",
+        "worker": "hub-owner/box1/gemini_build/1",
+        "machine": "box1",
+        "class": "gemini_build",
+        "pools": ["agy.window"],
+        "granted_at": 1795599900,
+        "heartbeat_at": 1795599990,
+        "expires_at": 1795602600,
+        "est_minutes_p90": 30.0,
+        "est_cost": 50.0,
+        "est_end_at": 1795601700,
+        "state": "active",
+        "supervised": true
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "alert",
+      "code": "BACKLOG_LOW",
+      "key": "codex",
+      "severity": "info",
+      "to": "brain",
+      "text": "class codex has free admissible slots with only 0 ready tasks (min_ready 3)",
+      "data": {
+        "class": "codex",
+        "min_ready": 3,
+        "ready_tasks": 0
+      }
+    },
+    {
+      "action": "alert",
+      "code": "BACKLOG_LOW",
+      "key": "gemini_build",
+      "severity": "info",
+      "to": "brain",
+      "text": "class gemini_build has free admissible slots with only 1 ready tasks (min_ready 3)",
+      "data": {
+        "class": "gemini_build",
+        "min_ready": 3,
+        "ready_tasks": 1
+      }
+    },
+    {
+      "action": "alert",
+      "code": "IDLE",
+      "key": "hub-owner/box1/codex/1",
+      "severity": "warn",
+      "to": "coordinator",
+      "text": "slot hub-owner/box1/codex/1 (codex) idle for 900 s with no ready tasks",
+      "data": {
+        "class": "codex",
+        "idle_secs": 900,
+        "owner": "hub-owner",
+        "reason": "no ready tasks",
+        "slot": "hub-owner/box1/codex/1"
+      }
+    },
+    {
+      "action": "alert",
+      "code": "STARVED",
+      "key": "hub-owner/box1/gemini_build/2",
+      "severity": "warn",
+      "to": "coordinator",
+      "text": "slot hub-owner/box1/gemini_build/2 (gemini_build) starved for 900 s: scope overlaps active task t0",
+      "data": {
+        "class": "gemini_build",
+        "idle_secs": 900,
+        "owner": "hub-owner",
+        "reason": "scope overlaps active task t0",
+        "slot": "hub-owner/box1/gemini_build/2",
+        "task_id": "t-wait"
+      }
+    }
+  ],
+  "expected_wait_reasons": {
+    "t-wait": "scope overlaps active task t0"
+  }
+}

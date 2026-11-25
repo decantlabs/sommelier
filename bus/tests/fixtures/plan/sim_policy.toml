@@ -1,0 +1,38 @@
+version = 2
+mode = "enforce"
+
+[switch]
+scheduler = "enforce"
+admission = "enforce"
+probe_codex = "on"
+probe_claude = "on"
+probe_gemini = "on"
+
+[timers]
+tick_sec = 15
+suspect_sec = 120
+dead_supervised_sec = 180
+lease_min = 45
+offer_min = 5
+restart_grace_sec = 180
+idle_alert_min = 10
+safe_mode_stall_min = 10
+
+[class.gemini_build]
+tier = "middle"
+cost_rank = 1
+pools = ["agy.window"]
+family_pool = "agy.family"
+cap_per_owner = 4
+cap_per_family = 2
+spawn = true
+
+[class.codex]
+tier = "middle"
+cost_rank = 2
+pools = ["codex.5h"]
+cap_per_owner = 6
+spawn = true
+
+[backlog]
+min_ready = 0

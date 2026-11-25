@@ -1,0 +1,178 @@
+{
+  "name": "20_pause_and_lease_reaper",
+  "description": "Class pause blocks codex while gemini_build leases normally; silent supervised leases become suspect or released/requeued.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "hub_started_at": 1795599500,
+    "pauses": [
+      { "kind": "class", "target": "codex" }
+    ],
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"]
+      },
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "gemini_build",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix"],
+        "pools": ["agy.window"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t-dead",
+        "title": "Dead supervised task",
+        "kind": "fix",
+        "priority": "high",
+        "state": "running",
+        "scope": "src/dead/*",
+        "accepts": ["gemini_build"],
+        "done_when": "ok",
+        "attempt": 1,
+        "ready_at": 1795599000
+      },
+      {
+        "id": "t-suspect",
+        "title": "Suspect task",
+        "kind": "fix",
+        "priority": "high",
+        "state": "running",
+        "scope": "src/suspect/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "attempt": 1,
+        "ready_at": 1795599000
+      },
+      {
+        "id": "t-codex",
+        "title": "Paused codex task",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/codex/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t-gem",
+        "title": "Ready gemini task",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/gem/*",
+        "accepts": ["gemini_build"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      }
+    ],
+    "leases": [
+      {
+        "task_id": "t-dead",
+        "attempt": 1,
+        "owner": "hub-owner",
+        "worker": "hub-owner/box1/gemini_build/1",
+        "machine": "box1",
+        "class": "gemini_build",
+        "pools": ["agy.window"],
+        "granted_at": 1795599700,
+        "heartbeat_at": 1795599800,
+        "expires_at": 1795602400,
+        "est_minutes_p90": 30.0,
+        "est_cost": 50.0,
+        "est_end_at": 1795601500,
+        "state": "active",
+        "supervised": true
+      },
+      {
+        "task_id": "t-suspect",
+        "attempt": 1,
+        "owner": "hub-owner",
+        "worker": "hub-owner/box1/codex/1",
+        "machine": "box1",
+        "class": "codex",
+        "pools": ["codex.5h"],
+        "granted_at": 1795599700,
+        "heartbeat_at": 1795599850,
+        "expires_at": 1795602400,
+        "est_minutes_p90": 30.0,
+        "est_cost": 100000.0,
+        "est_end_at": 1795601500,
+        "state": "active",
+        "supervised": true
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "release_lease",
+      "task_id": "t-dead",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "worker": "hub-owner/box1/gemini_build/1",
+      "reason": "gone"
+    },
+    {
+      "action": "requeue_task",
+      "task_id": "t-dead",
+      "next_attempt": 2,
+      "reason": "gone"
+    },
+    {
+      "action": "alert",
+      "code": "LEASE_LOST",
+      "key": "t-dead",
+      "severity": "warn",
+      "to": "coordinator",
+      "text": "lease lost for t-dead (owner hub-owner, worker hub-owner/box1/gemini_build/1, silent 200 s)",
+      "data": {
+        "attempt": 1,
+        "owner": "hub-owner",
+        "silent_secs": 200,
+        "task_id": "t-dead",
+        "worker": "hub-owner/box1/gemini_build/1"
+      }
+    },
+    {
+      "action": "suspect_lease",
+      "task_id": "t-suspect",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "worker": "hub-owner/box1/codex/1",
+      "silent_secs": 150
+    },
+    {
+      "action": "lease",
+      "task_id": "t-gem",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "gemini_build",
+      "slot_key": "hub-owner/box1/gemini_build/1",
+      "pools": ["agy.window", "agy.family"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 150.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    }
+  ],
+  "expected_wait_reasons": {
+    "t-codex": "paused: class codex"
+  }
+}

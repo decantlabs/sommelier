@@ -1,0 +1,101 @@
+{
+  "name": "09_track_share",
+  "description": "Running game task gives game share 1.0 (target 0.6, bonus -8) vs shaders share 0.0 (target 0.3, bonus +6), so shaders wins.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t0",
+        "title": "Running game task",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "running",
+        "track": "game",
+        "scope": "src/game0/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795599000
+      },
+      {
+        "id": "t-game",
+        "title": "Next game task",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "track": "game",
+        "scope": "src/game1/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t-shader",
+        "title": "Next shader task",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "track": "shaders",
+        "scope": "src/shaders/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      }
+    ],
+    "leases": [
+      {
+        "task_id": "t0",
+        "attempt": 1,
+        "owner": "hub-owner",
+        "worker": "hub-owner/box1/codex/1",
+        "machine": "box1",
+        "class": "codex",
+        "pools": ["codex.5h"],
+        "granted_at": 1795599900,
+        "heartbeat_at": 1795599990,
+        "expires_at": 1795602600,
+        "est_minutes_p90": 30.0,
+        "est_cost": 100000.0,
+        "est_end_at": 1795601700,
+        "state": "active",
+        "supervised": true
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "lease",
+      "task_id": "t-shader",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "codex",
+      "slot_key": "hub-owner/box1/codex/2",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    }
+  ],
+  "expected_wait_reasons": {
+    "t-game": "no free slots"
+  }
+}

@@ -1,0 +1,1 @@
+{"id":2,"result":{"rateLimits":{"accountId":"acct_synthetic_0000","limitId":"codex","primary":{"usedPercent":82,"windowDurationMins":300,"resetsAt":1795608947},"secondary":{"usedPercent":43,"windowDurationMins":10080,"resetsAt":1796158238},"planType":"plus","credits":{"hasCredits":false,"unlimited":false,"balance":"0"}}}}

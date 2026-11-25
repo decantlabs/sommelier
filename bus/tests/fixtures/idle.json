@@ -1,0 +1,64 @@
+{
+  "counts": {
+    "idle": 1,
+    "running": 1,
+    "starved": 1
+  },
+  "idle": [
+    {
+      "age_secs": 0,
+      "class": "codex",
+      "idle_secs": 0,
+      "key": "alice/codex/2",
+      "mode": "auto",
+      "owner": "alice",
+      "slot": 2,
+      "state": "idle"
+    },
+    {
+      "age_secs": 0,
+      "class": "gemini",
+      "idle_secs": 0,
+      "key": "bob/gemini/1",
+      "mode": "auto",
+      "owner": "bob",
+      "reason": "accepts [\"review\"], task needs fix",
+      "slot": 1,
+      "state": "starved"
+    }
+  ],
+  "slots": [
+    {
+      "age_secs": 0,
+      "class": "codex",
+      "idle_secs": 0,
+      "key": "alice/codex/1",
+      "mode": "auto",
+      "owner": "alice",
+      "slot": 1,
+      "state": "running",
+      "worker": "w1"
+    },
+    {
+      "age_secs": 0,
+      "class": "codex",
+      "idle_secs": 0,
+      "key": "alice/codex/2",
+      "mode": "auto",
+      "owner": "alice",
+      "slot": 2,
+      "state": "idle"
+    },
+    {
+      "age_secs": 0,
+      "class": "gemini",
+      "idle_secs": 0,
+      "key": "bob/gemini/1",
+      "mode": "auto",
+      "owner": "bob",
+      "reason": "accepts [\"review\"], task needs fix",
+      "slot": 1,
+      "state": "starved"
+    }
+  ]
+}

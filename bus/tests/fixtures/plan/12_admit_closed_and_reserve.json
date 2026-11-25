@@ -1,0 +1,80 @@
+{
+  "name": "12_admit_closed_and_reserve",
+  "description": "Claude week at 80% with 20% reserve reaches worker line min(stop_at, 100 - reserve_pct) = 80 and is closed to workers.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "claude_strong",
+        "mode": "auto",
+        "useful_parallel": 1,
+        "accepts": ["fix"],
+        "pools": ["claude.week"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "title": "Needs claude",
+        "kind": "fix",
+        "priority": "blocker",
+        "state": "ready",
+        "scope": "src/a/*",
+        "accepts": ["claude_strong"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      }
+    ],
+    "meters": [
+      {
+        "owner": "hub-owner",
+        "vendor": "claude",
+        "pool": "claude.week",
+        "window": "week",
+        "policy": {
+          "vendor": "claude",
+          "window": "week",
+          "stop_at": 90.0,
+          "reserve_pct": 20.0,
+          "pace": true,
+          "drain_min": 120,
+          "drain_band_pct": 3.0,
+          "fresh_min": 30,
+          "burn_window_min": 120,
+          "window_duration_sec": 604800
+        },
+        "series": [],
+        "latest": {
+          "owner": "hub-owner",
+          "vendor": "claude",
+          "pool": "claude.week",
+          "window": "week",
+          "observed_at": 1795599900,
+          "used_pct": 80.0,
+          "resets_at": 1795900000,
+          "source": "api",
+          "confidence": 0.9
+        },
+        "resets_at": 1795900000,
+        "unit": "weighted_tokens",
+        "pct_per_unit": 0.00001,
+        "n_calibration": 5,
+        "capacity_units": 10000000.0,
+        "probe_enabled": true
+      }
+    ]
+  },
+  "expected_actions": [],
+  "expected_wait_reasons": {
+    "t1": "closed at the worker line"
+  }
+}

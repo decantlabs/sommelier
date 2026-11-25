@@ -1,0 +1,86 @@
+{
+  "name": "18_own_mode_offer_and_expiry",
+  "description": "Expired open offer returns task to ready and produces a fresh offer for own-mode guest; guest trust blocks translator kind.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "guest-a", "trust": "guest", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "guest-a",
+        "machine": "linux1",
+        "class": "codex",
+        "mode": "own",
+        "useful_parallel": 2,
+        "accepts": ["fix", "review", "translator"],
+        "pools": ["codex.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "title": "Fix offered task",
+        "kind": "fix",
+        "priority": "high",
+        "state": "offered",
+        "scope": "src/a/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795599000
+      },
+      {
+        "id": "t2",
+        "title": "Restricted translator task",
+        "kind": "translator",
+        "priority": "high",
+        "state": "ready",
+        "scope": "src/b/*",
+        "accepts": ["codex"],
+        "min_tier": "middle",
+        "done_when": "ok",
+        "ready_at": 1795599000
+      }
+    ],
+    "offers": [
+      {
+        "id": "offer-t1-old",
+        "task_id": "t1",
+        "to_owner": "guest-a",
+        "class": "codex",
+        "sent_at": 1795599600,
+        "expires_at": 1795599900,
+        "state": "open"
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "expire_offer",
+      "offer_id": "offer-t1-old",
+      "task_id": "t1",
+      "to_owner": "guest-a",
+      "class": "codex"
+    },
+    {
+      "action": "offer",
+      "offer_id": "offer-t1-1795600000",
+      "task_id": "t1",
+      "to_owner": "guest-a",
+      "machine": "linux1",
+      "class": "codex",
+      "slot_key": "guest-a/linux1/codex/1",
+      "kind": "fix",
+      "scope": "src/a/*",
+      "est_minutes_p90": 75.0,
+      "expires_at": 1795600300
+    }
+  ],
+  "expected_wait_reasons": {
+    "t2": "owner guest-a (trust guest) may not claim kind translator"
+  }
+}

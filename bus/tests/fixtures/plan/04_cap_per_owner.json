@@ -1,0 +1,93 @@
+{
+  "name": "04_cap_per_owner",
+  "description": "cap_per_owner = 1 limits claude_strong to one lease; cap_per_owner = 0 forbids codex completely.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0,
+    "classes": {
+      "codex": {
+        "tier": "middle",
+        "cost_rank": 1,
+        "pools": ["codex.5h"],
+        "cap_per_owner": 0,
+        "spawn": true
+      },
+      "claude_strong": {
+        "tier": "strong",
+        "cost_rank": 2,
+        "pools": ["claude.5h"],
+        "cap_per_owner": 1,
+        "spawn": true
+      }
+    }
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"]
+      },
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "claude_strong",
+        "mode": "auto",
+        "useful_parallel": 2,
+        "accepts": ["fix"],
+        "pools": ["claude.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "title": "First fix",
+        "kind": "fix",
+        "priority": "high",
+        "state": "ready",
+        "scope": "src/a/*",
+        "accepts": ["codex", "claude_strong"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t2",
+        "title": "Second fix",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/b/*",
+        "accepts": ["codex", "claude_strong"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "lease",
+      "task_id": "t1",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "claude_strong",
+      "slot_key": "hub-owner/box1/claude_strong/1",
+      "pools": ["claude.5h"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    }
+  ],
+  "expected_wait_reasons": {
+    "t2": "cap_per_owner (1) reached for claude_strong on hub-owner"
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "name": "06_scope_lock",
+  "description": "Tasks with overlapping prefix scopes cannot run at once; a disjoint task still gets leased.",
+  "now": 1795600000,
+  "policy": {
+    "mode": "enforce",
+    "backlog_min_ready": 0
+  },
+  "state": {
+    "members": [
+      { "name": "hub-owner", "trust": "owner", "online": true }
+    ],
+    "capacities": [
+      {
+        "owner": "hub-owner",
+        "machine": "box1",
+        "class": "codex",
+        "mode": "auto",
+        "useful_parallel": 3,
+        "accepts": ["fix"],
+        "pools": ["codex.5h"]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "title": "API root refactor",
+        "kind": "fix",
+        "priority": "high",
+        "state": "ready",
+        "scope": "src/api/*",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t2",
+        "title": "API lib tweak",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "src/api/lib.rs",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      },
+      {
+        "id": "t3",
+        "title": "UI tweak",
+        "kind": "fix",
+        "priority": "normal",
+        "state": "ready",
+        "scope": "ui/panel.js",
+        "accepts": ["codex"],
+        "done_when": "ok",
+        "ready_at": 1795600000
+      }
+    ]
+  },
+  "expected_actions": [
+    {
+      "action": "lease",
+      "task_id": "t1",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "codex",
+      "slot_key": "hub-owner/box1/codex/1",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    },
+    {
+      "action": "lease",
+      "task_id": "t3",
+      "attempt": 1,
+      "owner": "hub-owner",
+      "machine": "box1",
+      "class": "codex",
+      "slot_key": "hub-owner/box1/codex/2",
+      "pools": ["codex.5h"],
+      "est_minutes_p90": 75.0,
+      "est_cost": 1500000.0,
+      "est_end_at": 1795604500,
+      "expires_at": 1795602700
+    }
+  ],
+  "expected_wait_reasons": {
+    "t2": "scope overlaps active task t1"
+  }
+}
