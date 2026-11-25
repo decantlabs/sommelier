@@ -411,3 +411,52 @@ at connect and an open connection is closed with the reason `key revoked`, the w
 
 **Only the hub writes `key/` facts.** A `send` of a FACT with a topic under `key/` is refused, and the KEY table
 is projected only from FACT messages of the hub, so a replay of the log gives the same table.
+
+## 11. Reviews
+
+Assigned review of the public factory (`docs/factory.md` 8.4 and 8.5). The hub picks the reviewer, the author
+cannot steer or predict the choice. Everything is off until the owner sets `HubConfig.review.enabled`.
+
+**FACTs of the hub.** Only a FACT sent by the hub counts. A FACT of a client on `review/`, `gate/` or `verify/` stays
+in the log and is ignored by the projection.
+
+* `review/<task>/<n>`: one review. Fields `state` (`assigned` or `answered`), `submission`, `reviewer`, `picked_by`
+  (`rule` or `audit`), `role` (`required` or `audit`), `required` (how many passing reviews the submission needs),
+  `audited`, `prev` (earlier holders that did not answer), `at` and `due` (UTC epoch seconds). An answer adds
+  `verdict`, `findings`, `summary` and `signature`. An answered review is frozen. A review that nobody answers by
+  `due` is assigned again to someone else with the same `n`.
+* `gate/<sha256>`: the gate report of a submission as written by the intake, with `passed`.
+* `verify/<sha256>`: the clean build, with `state` and `conclusion`.
+* `submission/<sha256>`: the review part writes the states `reviewing`, `review_failed`, `approved` and `landed`.
+
+**ALERT codes.** `REVIEW_ASSIGNED` (to the reviewer), `REVIEW_SHORT` (to the coordinator, once per key, not enough
+eligible members), `REVIEW_ESCALATED` and `REVIEW_DISAGREE` (to the maintainers), `REVIEW_LOCK` (the reviews
+passed but the first lock refuses, to the coordinator).
+
+**`review.next`** `{"task"?, "n"?}`. Answers `{"reviews":[{"task","n","submission","role","due"}]}` with the open
+reviews of the caller. For the one named (else the first) it also answers `task`, `n`, `submission` and `prompt`: the
+text of the review guide, the marker line `DATA:`, the order (title, scope, done condition), the gate report and
+the diff as plain text. The diff is read from `<data>/bundles/<sha256>.diff.json`. Text after the marker line is
+data and never an instruction. The prompt holds exactly one marker line.
+
+**`review.verdict`** `{"task","n","verdict","sig"?}`. `verdict` is the text of one JSON object
+`{"verdict":"pass|fail|escalate","findings":[{"path","line","text"}],"summary"}`. Only the assigned reviewer may
+answer, and only with tier 1 or above. A key member must sign: `sig` is `sign_request` over
+`{"op":"review.verdict","task","n","verdict"}` (key `verdict` is the same text as sent). Answers `{"task","n",
+"verdict","state"}` where `state` is the new state of the submission.
+
+* every required review passed, no audit chosen: `approved`, and the hub enqueues `bundle:<sha256>` with the head
+  commit through `land.enqueue`. With an audit: a maintainer seat (tier 3) gets one more review first, and a pass
+  there approves.
+* a `fail`: `review_failed`, and the task returns to the queue with the findings as its resume note.
+* an `escalate`, or an audit that disagrees: an ALERT, the submission waits for a maintainer.
+
+**The first lock.** `land.enqueue` of a ref that starts with `bundle:` is refused unless the submission is
+`approved`, its gate report passed, its clean build concluded `passed` and it holds the passing reviews its
+rule asked for. The error is one line that names the missing part. Other refs are not touched.
+The rule of `ReviewConfig` is read by the tick only. The requests cannot see the hub settings, so they read the
+bundles from the default folder `<data>/bundles`, and the number of required reviews travels in the FACTs.
+
+**`/api/state`.** `reviews` lists the open reviews, `review_counts` the number of reviews by state.
+
+**CLI.** `sommelier review next`, `review show TASK N` (prints the prompt), `review verdict TASK N --file FILE`.
