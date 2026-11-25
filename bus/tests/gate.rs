@@ -13,6 +13,7 @@ fn commit(sha: &str, parent: &str) -> CommitInfo {
         author_name: "Test Author".into(),
         author_email: "author@example.com".into(),
         message: "change".into(),
+        ..CommitInfo::default()
     }
 }
 
@@ -37,6 +38,8 @@ fn file(path: &str, added: &[&str]) -> FileChange {
         size_after: 100,
         added: lines(added),
         removed: Vec::new(),
+        old_mode: None,
+        content: Vec::new(),
     }
 }
 
@@ -51,6 +54,7 @@ fn clean_diff() -> ParsedDiff {
         )],
         bundle_sha256: "0".repeat(64),
         bundle_bytes: 2000,
+        base_paths: Vec::new(),
     }
 }
 
@@ -590,6 +594,7 @@ fn hostile_strings_do_not_panic() {
         author_name: String::new(),
         author_email: String::new(),
         message: long.clone(),
+        ..CommitInfo::default()
     });
     for risk in [Risk::Low, Risk::Normal, Risk::Guarded] {
         for tier in [0u8, 1, 2, 3, 200] {

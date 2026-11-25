@@ -30,6 +30,10 @@ fn strings(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
+fn default_max_message_chars() -> usize {
+    10_000
+}
+
 /// Everything the gates read besides the diff and the order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateRules {
@@ -42,6 +46,13 @@ pub struct GateRules {
     /// Longest accepted author name and email, in characters.
     pub max_name_chars: usize,
     pub max_email_chars: usize,
+    /// Longest accepted commit message, in characters.
+    #[serde(default = "default_max_message_chars")]
+    pub max_message_chars: usize,
+    /// Characters allowed in a new path besides `A-Z a-z 0-9 . _ / -` and the space. Empty by default,
+    /// which keeps out `~` (8.3 short names) and every character a file system may fold.
+    #[serde(default)]
+    pub extra_path_chars: String,
     /// Capability patterns for added lines.
     pub capabilities: Vec<NamedPattern>,
     /// Patterns for removed lines that count as a test or an assertion.
@@ -69,7 +80,7 @@ impl Default for GateRules {
             hold_paths: strings(&[
                 "**/CLAUDE.md",
                 "**/AGENTS.md",
-                ".claude/**",
+                "**/.claude/**",
                 "swarm/**",
                 "bus/**",
                 "**/build.rs",
@@ -77,6 +88,18 @@ impl Default for GateRules {
                 "**/*.sh",
                 "**/*.ps1",
                 ".github/**",
+                // Files that a tool, a shell or an interpreter runs or reads as instructions.
+                "**/.cargo/**",
+                "**/rust-toolchain",
+                "**/rust-toolchain.toml",
+                "**/GEMINI.md",
+                "**/.gemini/**",
+                "**/.codex/**",
+                "**/.mcp.json",
+                "**/.vscode/**",
+                "**/*.bat",
+                "**/*.cmd",
+                "**/*.py",
             ]),
             manifests: strings(&["**/Cargo.toml", "Cargo.lock"]),
             caps: vec![
@@ -107,6 +130,8 @@ impl Default for GateRules {
             ],
             max_name_chars: 100,
             max_email_chars: 254,
+            max_message_chars: default_max_message_chars(),
+            extra_path_chars: String::new(),
             capabilities: vec![
                 np(
                     "process_start",
@@ -118,8 +143,23 @@ impl Default for GateRules {
                 ),
                 np(
                     "file_write",
-                    r"\b(fs::write|fs::remove_file|fs::remove_dir_all|fs::remove_dir|fs::rename|fs::copy|fs::create_dir|fs::create_dir_all|File::create|File::create_new|OpenOptions)\b",
+                    r"\b(fs::write|fs::remove_file|fs::remove_dir_all|fs::remove_dir|fs::rename|fs::copy|fs::create_dir|fs::create_dir_all|File::create|File::create_new|File::options|OpenOptions)\b",
                 ),
+                np(
+                    "file_link",
+                    r"\b(fs::hard_link|fs::soft_link|hard_link|soft_link|symlink|symlink_file|symlink_dir|os::unix::fs|os::windows::fs)\b",
+                ),
+                np(
+                    "file_permissions",
+                    r"\b(set_permissions|set_readonly|set_mode|PermissionsExt|fchmod|chmod)\b",
+                ),
+                np(
+                    "file_read",
+                    r"\b(File::open|fs::read|fs::read_to_string|fs::read_dir|fs::read_link|fs::canonicalize|fs::metadata)\b",
+                ),
+                np("inline_asm", r"\b(global_asm|naked_asm|asm)!"),
+                // A manifest that points to a build script under any name.
+                np("build_script", r#"^\s*build\s*=\s*["']"#),
                 np("unsafe", r"\bunsafe\b"),
                 np("extern_block", r#"\bextern\s*("[^"]*"\s*)?\{"#),
                 np("link_attribute", r"#!?\[\s*link\b"),

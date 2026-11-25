@@ -8,16 +8,38 @@ use super::diff::{ChangeKind, FileChange, FileMode, ParsedDiff};
 use super::glob::any_match;
 use super::{DeltaEntry, Finding, GateRules, NamedPattern, OrderView, Risk, Severity};
 use regex::Regex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SHOWN_CHARS: usize = 120;
 
-/// Shortens a hostile string for a finding and replaces control characters.
-fn clip(s: &str) -> String {
+/// True for the Unicode format characters that draw nothing and so hide text: zero width characters,
+/// bidirectional controls, line and paragraph separators, the soft hyphen, the byte order mark and
+/// the tag characters. `char::is_control` does not know them.
+pub fn is_invisible(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x08E2 | 0x180E
+        | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0xFEFF
+        | 0xFFF9..=0xFFFB | 0x110BD | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A
+        | 0xE0001 | 0xE0020..=0xE007F)
+}
+
+/// True for a control or an invisible character.
+fn unprintable(c: char) -> bool {
+    c.is_control() || is_invisible(c)
+}
+
+/// Shortens a hostile string for a finding and replaces control and invisible characters.
+pub fn clip(s: &str) -> String {
     s.chars()
         .take(SHOWN_CHARS)
-        .map(|c| if c.is_control() { '?' } else { c })
+        .map(|c| if unprintable(c) { '?' } else { c })
         .collect()
+}
+
+/// Folds a path the way a case insensitive file system may: upper case, then lower case, so that
+/// `ſ` and `ı` meet `s` and `i`.
+pub fn fold_path(p: &str) -> String {
+    p.to_uppercase().to_lowercase()
 }
 
 fn finding(
@@ -40,14 +62,26 @@ fn block(gate: &str, path: Option<&str>, text: String) -> Finding {
     finding(gate, Severity::Block, path, None, text)
 }
 
-/// Cuts one gate's findings to `max` and adds a note that says how many were left out.
-pub fn limit(mut list: Vec<Finding>, max: usize) -> Vec<Finding> {
+/// Cuts one gate's findings to `max` and adds a note that says how many were left out. For the gates
+/// that only list (`capability`, `tests`) the first entries of every kind survive the cut, so padding
+/// with one kind cannot hide another.
+pub fn limit(list: Vec<Finding>, max: usize) -> Vec<Finding> {
     if list.len() <= max {
         return list;
     }
     let gate = list[0].gate.clone();
-    let more = list.len() - max;
-    list.truncate(max);
+    let by_kind = gate == "capability" || gate == "tests";
+    let total = list.len();
+    let mut list: Vec<Finding> = if by_kind {
+        let keep = super::keep_flags(&list, max, |f| f.text.clone());
+        list.into_iter()
+            .zip(keep)
+            .filter_map(|(f, k)| k.then_some(f))
+            .collect()
+    } else {
+        list.into_iter().take(max).collect()
+    };
+    let more = total - list.len();
     list.push(finding(
         &gate,
         Severity::Note,
@@ -169,8 +203,8 @@ fn plain(s: &str, max: usize) -> Result<(), &'static str> {
     if s.chars().count() > max {
         return Err("is too long");
     }
-    if s.chars().any(|c| c.is_control()) {
-        return Err("has a control character");
+    if s.chars().any(unprintable) {
+        return Err("has a control or invisible character");
     }
     if s.chars().any(|c| c == '<' || c == '>') {
         return Err("has an angle bracket");
@@ -178,33 +212,58 @@ fn plain(s: &str, max: usize) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Gate 3: author name and email are plain.
+fn email_problem(email: &str, max: usize) -> Option<&'static str> {
+    let mut problem = plain(email, max).err();
+    if problem.is_none() {
+        let parts: Vec<&str> = email.split('@').collect();
+        if email.chars().any(char::is_whitespace) {
+            problem = Some("has a space");
+        } else if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+            problem = Some("is not of the form name@host");
+        }
+    }
+    problem
+}
+
+/// A commit message may hold line breaks and tabs, nothing else that is unprintable.
+fn message_problem(s: &str, max: usize) -> Option<&'static str> {
+    if s.chars().count() > max {
+        return Some("is too long");
+    }
+    s.chars()
+        .any(|c| unprintable(c) && !matches!(c, '\n' | '\r' | '\t'))
+        .then_some("has a control or invisible character")
+}
+
+/// Gate 3: author and committer name and email are plain, the message holds no hidden characters.
+/// Committer fields that are both empty belong to a record from before they were read and pass.
 pub fn authors(diff: &ParsedDiff, rules: &GateRules) -> Vec<Finding> {
     let mut out = Vec::new();
     for (i, c) in diff.commits.iter().enumerate() {
-        if let Err(why) = plain(&c.author_name, rules.max_name_chars) {
+        let n = i + 1;
+        let mut bad = |what: &str, why: &str| {
             out.push(block(
                 "authors",
                 None,
-                format!("the author name of commit {} {why}", i + 1),
+                format!("the {what} of commit {n} {why}"),
             ));
+        };
+        if let Err(why) = plain(&c.author_name, rules.max_name_chars) {
+            bad("author name", why);
         }
-        let email = c.author_email.as_str();
-        let mut problem = plain(email, rules.max_email_chars).err();
-        if problem.is_none() {
-            let parts: Vec<&str> = email.split('@').collect();
-            if email.chars().any(char::is_whitespace) {
-                problem = Some("has a space");
-            } else if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-                problem = Some("is not of the form name@host");
+        if let Some(why) = email_problem(&c.author_email, rules.max_email_chars) {
+            bad("author email", why);
+        }
+        if !(c.committer_name.is_empty() && c.committer_email.is_empty()) {
+            if let Err(why) = plain(&c.committer_name, rules.max_name_chars) {
+                bad("committer name", why);
+            }
+            if let Some(why) = email_problem(&c.committer_email, rules.max_email_chars) {
+                bad("committer email", why);
             }
         }
-        if let Some(why) = problem {
-            out.push(block(
-                "authors",
-                None,
-                format!("the author email of commit {} {why}", i + 1),
-            ));
+        if let Some(why) = message_problem(&c.message, rules.max_message_chars) {
+            bad("message", why);
         }
     }
     out
@@ -230,8 +289,8 @@ pub fn path_problem(p: &str) -> Option<&'static str> {
     if p.contains('\\') {
         return Some("has a backslash");
     }
-    if p.chars().any(|c| c.is_control()) {
-        return Some("has a control character");
+    if p.chars().any(unprintable) {
+        return Some("has a control or invisible character");
     }
     for comp in p.split('/') {
         if comp.is_empty() {
@@ -263,20 +322,111 @@ pub fn path_problem(p: &str) -> Option<&'static str> {
     None
 }
 
-/// Gate 4: paths are safe on every platform.
-pub fn paths(diff: &ParsedDiff) -> Vec<Finding> {
+/// The characters a new path may hold: `A-Z a-z 0-9 . _ / -` and the space, plus the extra ones of the
+/// rules. This keeps out `~` (the 8.3 short names of Windows such as `CARGO~1.TOM`) and every character
+/// that a file system may fold into another.
+fn charset_problem(p: &str, rules: &GateRules) -> bool {
+    p.chars().any(|c| {
+        !(c.is_ascii_alphanumeric()
+            || matches!(c, '.' | '_' | '/' | '-' | ' ')
+            || rules.extra_path_chars.contains(c))
+    })
+}
+
+/// The paths that commits before the head touch and the end diff does not list, each once with the
+/// number of the first commit that touches it.
+fn commit_only_paths(diff: &ParsedDiff) -> Vec<(usize, &str)> {
+    let end: BTreeSet<&str> = diff.files.iter().flat_map(paths_of).collect();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut out = Vec::new();
-    let mut folded: BTreeMap<String, &str> = BTreeMap::new();
+    for (i, c) in diff.commits.iter().enumerate() {
+        for p in &c.paths {
+            if !end.contains(p.as_str()) && seen.insert(p.as_str()) {
+                out.push((i + 1, p.as_str()));
+            }
+        }
+    }
+    out
+}
+
+/// Gate 4: paths are safe on every platform. Same as [`paths_with`] with the default rules.
+pub fn paths(diff: &ParsedDiff) -> Vec<Finding> {
+    paths_with(diff, &GateRules::default())
+}
+
+/// Gate 4: paths are safe on every platform, also the paths of the middle commits. A new path uses
+/// the safe character set only, and it must not differ only in case from another changed path or from
+/// a path of the base tree.
+pub fn paths_with(diff: &ParsedDiff, rules: &GateRules) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let base: BTreeSet<&str> = diff.base_paths.iter().map(String::as_str).collect();
     for f in &diff.files {
         for p in paths_of(f) {
             if let Some(why) = path_problem(p) {
                 out.push(block("paths", Some(p), format!("the path {why}")));
             }
         }
+        if matches!(f.change, ChangeKind::Added | ChangeKind::Renamed)
+            && charset_problem(&f.path, rules)
+        {
+            out.push(block(
+                "paths",
+                Some(&f.path),
+                "a new path may hold letters, digits, space and . _ - / only".into(),
+            ));
+        }
+    }
+    for (n, p) in commit_only_paths(diff) {
+        if let Some(why) = path_problem(p) {
+            out.push(block(
+                "paths",
+                Some(p),
+                format!("the path in commit {n} {why}"),
+            ));
+        } else if !base.contains(p) && charset_problem(p, rules) {
+            out.push(block(
+                "paths",
+                Some(p),
+                format!(
+                    "a new path in commit {n} may hold letters, digits, space and . _ - / only"
+                ),
+            ));
+        }
+    }
+    out.extend(case_collisions(diff));
+    out
+}
+
+/// New paths that differ only in case from another changed path or from a path of the base tree.
+fn case_collisions(diff: &ParsedDiff) -> Vec<Finding> {
+    let mut out = Vec::new();
+    // Paths of the base tree that this diff removes may be reused in another case.
+    let gone: BTreeSet<&str> = diff
+        .files
+        .iter()
+        .filter(|f| matches!(f.change, ChangeKind::Deleted | ChangeKind::Renamed))
+        .flat_map(|f| {
+            let own = (f.change == ChangeKind::Deleted).then_some(f.path.as_str());
+            own.into_iter().chain(f.old_path.as_deref())
+        })
+        .collect();
+    // Every folded base path and every folded folder of it, with the spelling of the base.
+    let mut base: BTreeMap<String, &str> = BTreeMap::new();
+    for b in diff
+        .base_paths
+        .iter()
+        .filter(|b| !gone.contains(b.as_str()))
+    {
+        for prefix in prefixes(b) {
+            base.entry(fold_path(prefix)).or_insert(prefix);
+        }
+    }
+    let mut folded: BTreeMap<String, &str> = BTreeMap::new();
+    for f in &diff.files {
         if f.change == ChangeKind::Deleted {
             continue;
         }
-        let key = f.path.to_lowercase();
+        let key = fold_path(&f.path);
         match folded.get(&key) {
             Some(first) if *first != f.path => out.push(block(
                 "paths",
@@ -288,8 +438,25 @@ pub fn paths(diff: &ParsedDiff) -> Vec<Finding> {
                 folded.insert(key, f.path.as_str());
             }
         }
+        if !matches!(f.change, ChangeKind::Added | ChangeKind::Renamed) {
+            continue;
+        }
+        if prefixes(&f.path).any(|p| base.get(&fold_path(p)).is_some_and(|b| *b != p)) {
+            out.push(block(
+                "paths",
+                Some(&f.path),
+                "the path differs only in case from a path of the base tree".into(),
+            ));
+        }
     }
     out
+}
+
+/// The path and each of its folders: `a/b/c` gives `a`, `a/b` and `a/b/c`.
+fn prefixes(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/')
+        .map(|(i, _)| &path[..i])
+        .chain(std::iter::once(path))
 }
 
 /// Gate 5: every changed path, old and new, matches a scope glob.
@@ -304,6 +471,15 @@ pub fn scope(diff: &ParsedDiff, order: &OrderView) -> Vec<Finding> {
                     "the path is outside the scope of the order".into(),
                 ));
             }
+        }
+    }
+    for (n, p) in commit_only_paths(diff) {
+        if !any_match(&order.scope, p, false) {
+            out.push(block(
+                "scope",
+                Some(p),
+                format!("commit {n} touches a path outside the scope of the order"),
+            ));
         }
     }
     out
@@ -324,6 +500,15 @@ pub fn hold_paths(diff: &ParsedDiff, order: &OrderView, rules: &GateRules) -> Ve
                     "the path is a hold path, it needs a guarded order".into(),
                 ));
             }
+        }
+    }
+    for (n, p) in commit_only_paths(diff) {
+        if any_match(&rules.hold_paths, p, true) {
+            out.push(block(
+                "hold_paths",
+                Some(p),
+                format!("commit {n} touches a hold path, it needs a guarded order"),
+            ));
         }
     }
     out
@@ -357,6 +542,15 @@ pub fn entry_kinds(diff: &ParsedDiff) -> Vec<Finding> {
                 "entry_kinds",
                 p,
                 "a change of .gitattributes is not accepted".into(),
+            ));
+        }
+    }
+    for (n, q) in commit_only_paths(diff) {
+        if file_name(q).eq_ignore_ascii_case(".gitattributes") {
+            out.push(block(
+                "entry_kinds",
+                Some(q),
+                format!("commit {n} changes .gitattributes, which is not accepted"),
             ));
         }
     }
@@ -441,8 +635,27 @@ pub fn capability_hits(diff: &ParsedDiff, rules: &GateRules) -> Vec<DeltaEntry> 
             });
         }
     }
+    for f in &diff.files {
+        // A file that becomes executable runs without a build. The mode before the change is the proof.
+        if f.mode == FileMode::Executable
+            && f.old_mode != Some(FileMode::Executable)
+            && f.change != ChangeKind::Deleted
+        {
+            out.push(DeltaEntry {
+                kind: "executable_bit".into(),
+                path: clip(&f.path),
+                line: 0,
+            });
+        }
+    }
     for f in text_files(diff) {
-        for l in &f.added {
+        // A pure rename has no added lines. For this gate the whole new content counts as added.
+        let lines = if f.change == ChangeKind::Renamed && !f.content.is_empty() {
+            &f.content
+        } else {
+            &f.added
+        };
+        for l in lines {
             for (name, re) in &pats {
                 if re.is_match(&l.text) {
                     out.push(DeltaEntry {
@@ -457,7 +670,8 @@ pub fn capability_hits(diff: &ParsedDiff, rules: &GateRules) -> Vec<DeltaEntry> 
     out
 }
 
-/// Gate 10: every capability hit raises the risk one step.
+/// Gate 10: capability hits raise the risk. One hit or a hundred raise it ONE step in total, the
+/// order's risk goes up once (`Low` to `Normal`, `Normal` to `Guarded`). Every hit stays listed.
 pub fn capability(hits: &[DeltaEntry]) -> Vec<Finding> {
     hits.iter()
         .map(|h| {
@@ -607,6 +821,29 @@ pub fn secrets(diff: &ParsedDiff, rules: &GateRules) -> Vec<Finding> {
                         Some(&f.path),
                         Some(l.no),
                         format!("added line holds {name}, remove it"),
+                    ));
+                }
+            }
+        }
+    }
+    // Names, emails and messages of the commits. Email addresses are expected there.
+    for (i, c) in diff.commits.iter().enumerate() {
+        let parts = [
+            ("author name", &c.author_name),
+            ("author email", &c.author_email),
+            ("committer name", &c.committer_name),
+            ("committer email", &c.committer_email),
+            ("message", &c.message),
+        ];
+        for (what, text) in parts {
+            for (name, re) in pats.iter().filter(|(n, _)| n != "email_address") {
+                if re.is_match(text) {
+                    out.push(finding(
+                        "secrets",
+                        Severity::Block,
+                        None,
+                        None,
+                        format!("the {what} of commit {} holds {name}, remove it", i + 1),
                     ));
                 }
             }

@@ -4,6 +4,17 @@
 //! parsed diff and an order. They take no clock, no random and no file access. Every string of the
 //! diff is treated as hostile, so no gate indexes, unwraps or recurses on input.
 //!
+//! What the gates see. The gates read the diff of the two end trees and, for the gates of paths, scope,
+//! hold paths and entry kinds, the path list of every commit between base and head. They do not diff
+//! the middle commits line by line. That is safe only because a submission lands as ONE squashed commit
+//! made from the gated end tree, so no middle commit ever reaches main. The lander does the squash.
+//! A submission whose middle commits were pushed as they are would carry content the gates never read.
+//!
+//! What a line pattern cannot see, and this module does not claim to: a call split over two lines, an
+//! alias such as `use ... as C`, a macro of an existing crate that expands to a capability, and secrets
+//! that are encoded. The stages that must catch these are the clean build without secrets (S2) and the
+//! assigned review (S3).
+//!
 //! The entry point is [`check`]. Each gate is its own function in [`gates`], so a caller or a test can
 //! run one alone. A finding never repeats a secret it found, it names the pattern only.
 
@@ -14,6 +25,7 @@ pub mod rules;
 
 use diff::ParsedDiff;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub use rules::{GateRules, NamedPattern, TierCaps};
 
@@ -87,8 +99,14 @@ pub struct GateReport {
     pub passed: bool,
     pub risk_after: Risk,
     pub findings: Vec<Finding>,
+    /// The first hits, cut so that every kind keeps its first entries. See `capability_counts`.
     pub capability_delta: Vec<DeltaEntry>,
     pub test_delta: Vec<DeltaEntry>,
+    /// How many hits there were per kind before the cut.
+    #[serde(default)]
+    pub capability_counts: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub test_counts: BTreeMap<String, u64>,
 }
 
 /// Runs all thirteen gates in the order of the design and sums them up.
@@ -100,7 +118,7 @@ pub fn check(diff: &ParsedDiff, order: &OrderView, rules: &GateRules) -> GateRep
         gates::base(diff, order),
         gates::history(diff),
         gates::authors(diff, rules),
-        gates::paths(diff),
+        gates::paths_with(diff, rules),
         gates::scope(diff, order),
         gates::hold_paths(diff, order, rules),
         gates::entry_kinds(diff),
@@ -127,16 +145,66 @@ pub fn check(diff: &ParsedDiff, order: &OrderView, rules: &GateRules) -> GateRep
     for run in runs {
         findings.extend(gates::limit(run, rules.max_findings_per_gate));
     }
+    let max = rules.max_findings_per_gate;
+    let (capability_counts, test_counts) =
+        (kind_counts(&capability_delta), kind_counts(&test_delta));
     GateReport {
         passed,
         risk_after,
         findings,
-        capability_delta: cap_list(capability_delta, rules.max_findings_per_gate),
-        test_delta: cap_list(test_delta, rules.max_findings_per_gate),
+        capability_delta: cut_delta(capability_delta, max),
+        test_delta: cut_delta(test_delta, max),
+        capability_counts,
+        test_counts,
     }
 }
 
-fn cap_list(mut list: Vec<DeltaEntry>, max: usize) -> Vec<DeltaEntry> {
-    list.truncate(max);
-    list
+/// How many entries each kind has.
+fn kind_counts(list: &[DeltaEntry]) -> BTreeMap<String, u64> {
+    let mut m = BTreeMap::new();
+    for e in list {
+        *m.entry(e.kind.clone()).or_insert(0u64) += 1;
+    }
+    m
+}
+
+/// The first entries of every kind that always survive a cut.
+const KEEP_PER_KIND: usize = 3;
+
+/// Which items a cut to `max` keeps: the first [`KEEP_PER_KIND`] of every kind, then the rest in order
+/// until `max` is reached. Padding with one kind cannot push another kind out. The list may be longer
+/// than `max` by the number of kinds, never by more.
+pub(crate) fn keep_flags<T>(list: &[T], max: usize, kind: impl Fn(&T) -> String) -> Vec<bool> {
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut keep = vec![false; list.len()];
+    let mut kept = 0usize;
+    for (i, item) in list.iter().enumerate() {
+        let n = seen.entry(kind(item)).or_insert(0);
+        if *n < KEEP_PER_KIND {
+            keep[i] = true;
+            kept += 1;
+        }
+        *n += 1;
+    }
+    for flag in keep.iter_mut() {
+        if kept >= max {
+            break;
+        }
+        if !*flag {
+            *flag = true;
+            kept += 1;
+        }
+    }
+    keep
+}
+
+fn cut_delta(list: Vec<DeltaEntry>, max: usize) -> Vec<DeltaEntry> {
+    if list.len() <= max {
+        return list;
+    }
+    let keep = keep_flags(&list, max, |e| e.kind.clone());
+    list.into_iter()
+        .zip(keep)
+        .filter_map(|(e, k)| k.then_some(e))
+        .collect()
 }
