@@ -68,6 +68,11 @@ impl Policy {
         }
     }
 
+    /// True when the file carries a `[switch]` table. Without one no switch can veto a part of the factory.
+    pub fn has_switch_table(&self) -> bool {
+        self.switch.is_some()
+    }
+
     fn validate(&self) -> io::Result<()> {
         let share = |field: &str, value: f64| {
             if (0.0..=1.0).contains(&value) {
@@ -111,6 +116,9 @@ impl Policy {
             return Err(invalid(
                 "policy review needs a rule named default when any review rule is given",
             ));
+        }
+        if let Some(switch) = &self.switch {
+            switch.validate()?;
         }
         if let Some(test) = &self.test {
             if test.quorum < 1 {
@@ -488,13 +496,24 @@ impl Default for TestRules {
     }
 }
 
-/// The kill switches of the factory (`[switch]`), each off, shadow or enforce.
+/// The `[switch]` table: the three kill switches of the factory, each off, shadow or enforce, and the keys
+/// of the scheduler (CP 5.3) that `plan` reads: `scheduler`, `admission` and `probe_<vendor>`. One file holds
+/// both kinds. A key that is neither is refused.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Switches {
     pub intake: Mode,
     pub tier0_coding: Mode,
     pub candidate_builds: Mode,
+    /// The scheduler switch. `None` leaves it to the scheduler's own default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<Mode>,
+    /// The admission switch. `None` leaves it to the scheduler's own default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission: Option<Mode>,
+    /// `probe_<vendor>` keys, each `on` or `off`. Read by the scheduler, kept here so the file loads.
+    #[serde(flatten)]
+    pub probes: BTreeMap<String, String>,
 }
 
 impl Default for Switches {
@@ -503,7 +522,28 @@ impl Default for Switches {
             intake: Mode::Off,
             tier0_coding: Mode::Off,
             candidate_builds: Mode::Off,
+            scheduler: None,
+            admission: None,
+            probes: BTreeMap::new(),
         }
+    }
+}
+
+impl Switches {
+    fn validate(&self) -> io::Result<()> {
+        for (key, value) in &self.probes {
+            if !key.starts_with("probe_") {
+                return Err(invalid(format!(
+                    "policy switch.{key} is unknown (intake, tier0_coding, candidate_builds, scheduler, admission, probe_<vendor>)"
+                )));
+            }
+            if !matches!(value.to_ascii_lowercase().as_str(), "on" | "off") {
+                return Err(invalid(format!(
+                    "policy switch.{key} must be \"on\" or \"off\""
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

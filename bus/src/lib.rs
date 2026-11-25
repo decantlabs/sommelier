@@ -23,6 +23,7 @@ pub mod client;
 pub mod derive;
 pub mod door;
 pub mod exit;
+pub mod factory;
 pub mod gate;
 pub mod guide;
 pub mod ha;

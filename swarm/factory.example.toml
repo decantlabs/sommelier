@@ -1,0 +1,89 @@
+# Local settings of the public factory on one hub. Use it with
+#   sommelier serve --factory FILE
+# The file is local to the hub. It holds paths and addresses and is never published. Every table is
+# optional and every part is OFF until its `enabled` is true. A key that is not listed here is refused.
+#
+# The numbers that are policy come from the published policy of the hub (sommelier policy publish):
+# tier rules, the review rule and audit share, verify limits, the quorum and the proof of work bits.
+# They are read when the hub starts. A policy `[switch]` that says "off" vetoes a part even when this
+# file enables it: `intake` vetoes [intake], `tier0_coding` vetoes tier0_coding below.
+
+[join]
+# Let people without a token join with a key. The proof of work bits come from the policy
+# (`--join-pow-bits` still wins when given).
+enabled = false
+
+[intake]
+# Accept bundles over PUT /api/submit/ and run the static gates.
+enabled = false
+# A local mirror of the project repository. The gates read the base commit from it.
+# Without it a submission stays `received`.
+reference_repo = "/srv/project-mirror"
+# Where bundles and diffs are kept. The default is the folder `bundles` in the hub data folder.
+bundle_store = "/srv/factory/bundles"
+
+[verify]
+# The clean build on GitHub Actions for every gated submission.
+enabled = false
+# The GitHub repository of the project, owner/name. Needed when enabled.
+repository = "owner/project"
+# The workflow file. The default is the name in the policy [verify] table.
+workflow = "factory-verify.yml"
+# The git ref the workflow runs from. The workflow file comes from there, so use main.
+git_ref = "main"
+# A file that holds the GitHub token. Read when the first run starts, never logged.
+token_file = "/srv/factory/github.token"
+# The public address of the hub, https://..., which the runner fetches the bundle from. Needed when enabled.
+public_address = "https://hub.example.org"
+
+[review]
+# Assigned review by trusted members.
+enabled = false
+# Seconds a reviewer has before the review goes to someone else. Default 86400.
+answer_secs = 86400
+# A member counts as online when it spoke within this many seconds. Default 900.
+online_secs = 900
+
+[stamp]
+# Standing: stamps, tiers and the grants of maintainers. Off: every key member stays at tier 0.
+enabled = false
+# Maintainers: names of tokens or member ids of key members.
+maintainers = ["owner"]
+# Days after which a landed review counts as confirmed. Default 14.
+confirm_days = 14
+# Whether a tier 0 member may take and deliver orders. The policy switch tier0_coding can still veto it.
+tier0_coding = false
+
+[test]
+# The test network: run orders and reports.
+enabled = false
+# Open orders a member may hold at once. Default 2.
+max_handed_per_member = 2
+# Seconds a handed order counts against that limit. Default 3600.
+hand_hold_secs = 3600
+# Seconds an order stays open. Default 604800.
+order_ttl_secs = 604800
+# Most open orders at one time. Default 200.
+max_open_orders = 200
+
+[door]
+# The front door. There is no `enabled`: a key left out keeps the default of the door.
+# A header that carries the client address behind a tunnel. Honoured only for a loopback peer.
+trust_header = "CF-Connecting-IP"
+# Joins one address block may try per hour. 0 is no limit. Default: the policy join.per_block_per_hour.
+joins_per_block_per_hour = 5
+# Connections one member may hold at once. 0 is no limit.
+conns_per_member = 0
+# Connections the hub holds at most. 0 is no limit.
+max_conns = 0
+# The share of max_conns that tier 0 and anonymous readers can never fill, from 0 to 1.
+reserved_share = 0.25
+# Whether a WebSocket or /api/state without credentials reads as an anonymous observer.
+public_read = false
+# Connections and state reads per address block and minute for the public reader. 0 is no limit.
+public_reads_per_block_per_min = 60
+# Days an address block stays in door.db. 0 records no block at all.
+keep_days = 14
+# Refused joins within the window below that raise the alert JOIN_FLOOD. 0 is no alert.
+join_flood_refusals = 20
+join_flood_window_secs = 600

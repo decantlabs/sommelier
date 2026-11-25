@@ -261,6 +261,20 @@
         },
         "candidate_builds": {
           "$ref": "#/$defs/mode"
+        },
+        "scheduler": {
+          "$ref": "#/$defs/mode"
+        },
+        "admission": {
+          "$ref": "#/$defs/mode"
+        }
+      },
+      "patternProperties": {
+        "^probe_[a-z0-9_]+$": {
+          "enum": [
+            "on",
+            "off"
+          ]
         }
       },
       "additionalProperties": false

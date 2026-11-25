@@ -744,8 +744,13 @@ section differs, this section holds, and the earlier section was corrected where
 
 * `[trust.tier0]`, `[trust.tier1]` and `[trust.tier2]` are tier tables. Every other name under `[trust]` keeps the
   old shape, so a file without factory sections keeps its hash.
-* The `[switch]` table of the factory (`intake`, `tier0_coding`, `candidate_builds`) and the `[switch]` keys of the
-  scheduler (CP 5.3) are read by two loaders and cannot be in one file yet. Merging them is open.
+* The `[switch]` table holds the three switches of the factory (`intake`, `tier0_coding`, `candidate_builds`) and the
+  keys of the scheduler (CP 5.3: `scheduler`, `admission`, `probe_<vendor>`) in one file. Both loaders read it.
+* A real hub is switched on with `sommelier serve --factory FILE`, a local TOML file (`swarm/factory.example.toml`)
+  with one table per part. It holds paths, the repository and the public address, and is never published. The
+  numbers that are policy come from the published policy at start. A policy switch that says `off` vetoes a part
+  that the file enables. Without a `[switch]` table in the policy nothing vetoes. `candidate_builds` reaches no part
+  yet. The policy review rule `require` is read as `prefer`, because the picker knows only those two.
 * Defaults that the outline of section 12 did not give were guessed. Tier 1 gets 20 submissions a day, 1024 KiB, the
   kinds run, fix, port, review and scout, and free text on. Tier 2 gets 5 leases, 50 submissions and 4096 KiB.
   `other_family` accepts ignore, prefer and require.

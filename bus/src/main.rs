@@ -4,7 +4,7 @@ mod dispatch;
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ details for one command: sommelier help <command>  or  sommelier <command> --hel
 HUB OWNER
   sommelier serve [--listen 127.0.0.1:7300] [--data DIR] [--rate 2] [--burst 30]
                [--policy PATH] [--claim-ttl MINUTES] [--max-body BYTES] [--kind-limit KIND=CHARS] [--quiet]
-               [--join on|off] [--join-pow-bits N]
+               [--join on|off] [--join-pow-bits N] [--factory FILE]
   sommelier token add NAME [--role member|orchestrator|observer] [--data DIR]
   sommelier token rotate NAME [--data DIR]
   sommelier token revoke NAME [--data DIR]
@@ -272,6 +272,7 @@ async fn cmd_serve(raw: &[String]) -> Result<(), String> {
             "ui",
             "join",
             "join-pow-bits",
+            "factory",
         ],
         &["quiet", "no-ui"],
     )?;
@@ -298,8 +299,18 @@ async fn cmd_serve(raw: &[String]) -> Result<(), String> {
             cfg.limits.kind_chars.insert(kind, n);
         }
     }
+    let mut factory_line = None;
+    if let Some(path) = a.get("factory") {
+        let file = sommelier::factory::load(Path::new(path))?;
+        let (rules, switch_table) =
+            sommelier::factory::policy_rules(&cfg.data_dir, cfg.policy_path.as_deref())?;
+        let applied = sommelier::factory::apply(&mut cfg, &file, &rules, switch_table)
+            .map_err(|e| format!("--factory {path}: {e}"))?;
+        factory_line = Some(applied.line());
+    }
     match a.get("join") {
-        None | Some("off") => {}
+        None => {}
+        Some("off") => cfg.join.enabled = false,
         Some("on") => cfg.join.enabled = true,
         Some(other) => return Err(format!("--join needs `on` or `off`, got `{other}`")),
     }
@@ -355,6 +366,9 @@ async fn cmd_serve(raw: &[String]) -> Result<(), String> {
             "joining with a key is ON ({} bit proof of work)",
             cfg_join.proof_of_work_bits
         );
+    }
+    if let Some(line) = factory_line {
+        eprintln!("{line}");
     }
     if members == 0 {
         eprintln!("no tokens yet: sommelier token add <name> --role orchestrator");
@@ -1014,6 +1028,7 @@ fn sub_help(cmd: &str) -> Option<String> {
                       READY FIX STUCK RUN_RESULT FINDING LANDED 1200. STATUS has none
   --join on|off       let people without a token join with a key (`sommelier join`), default off
   --join-pow-bits N   proof of work a join must solve, default 20 (seconds of CPU), at most 40
+  --factory FILE      local settings of the public factory (swarm/factory.example.toml), default: all parts off
   --quiet             do not print connects and disconnects
   --ui DIR            dashboard files served over plain HTTP on the same port, default:
                       a ui folder next to the executable or two levels up from it

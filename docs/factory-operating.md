@@ -100,8 +100,9 @@ From the narrowest to the widest.
 * **Policy switches:** the `[switch]` table has `intake`, `tier0_coding` and `candidate_builds`, each `off`,
   `shadow` or `enforce`, and all are `off` by default. With `intake = "off"` nothing new comes in and members keep
   what they hold. Publish a changed policy with `sommelier policy publish FILE` and go back with
-  `sommelier policy rollback VERSION`. The factory `[switch]` table and the scheduler's `[switch]` keys cannot be in
-  one file yet, because two loaders read them.
+  `sommelier policy rollback VERSION`. The factory switches and the scheduler's keys (`scheduler`, `admission`,
+  `probe_<vendor>`) live in the one `[switch]` table of one policy file. A switch that says `off` vetoes the part even
+  when the local factory file enables it. The hub reads the policy numbers when it starts.
 * **Revoke a token:** `sommelier token revoke NAME`. A running hub picks it up within seconds.
 * **Disable a workflow** in the repository settings. Owner's hands. Disabling `factory-batch` makes landing stop
   at the second lock, which is the safe direction.
