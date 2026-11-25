@@ -270,7 +270,23 @@ struct Plan {
 
 enum Call {
     Dispatch(DispatchInputs),
-    Poll { sha: String, run_id: Option<u64> },
+    Poll {
+        sha: String,
+        run_id: Option<u64>,
+        /// The run name the dispatch gave, for the search when no run id is known yet.
+        name: String,
+    },
+}
+
+/// The run name of the latest dispatch of a slot: the submission, the attempt of the order, the dispatch
+/// count and the start of the round.
+fn expected_run_name(slot: &Slot) -> String {
+    super::request::run_name(
+        &slot.st.submission,
+        slot.row.attempt,
+        u32::from(slot.st.dispatches),
+        slot.st.started_at.unwrap_or(0),
+    )
 }
 
 /// Applies one event to a slot and turns the actions into facts and calls.
@@ -290,6 +306,7 @@ fn drive(slot: &mut Slot, now: u64, event: Event, plan: &mut Plan, announce: boo
             Action::Poll { submission, run_id } => plan.jobs.push(Call::Poll {
                 sha: submission,
                 run_id,
+                name: expected_run_name(slot),
             }),
         }
     }
@@ -303,6 +320,9 @@ fn drive(slot: &mut Slot, now: u64, event: Event, plan: &mut Plan, announce: boo
             order: slot.row.task.clone(),
             base: slot.row.base.clone(),
             hub: String::new(),
+            attempt: slot.row.attempt,
+            dispatch: u32::from(slot.st.dispatches),
+            round: slot.st.started_at.unwrap_or(0),
         }));
     }
     if announce && before.phase == Phase::Queued && slot.st.phase != Phase::Queued {
@@ -343,7 +363,7 @@ async fn poll(
     api: &dyn DynGitHub,
     repo: &str,
     workflow: &str,
-    sha: &str,
+    name: &str,
     run_id: Option<u64>,
 ) -> Event {
     let run = match run_id {
@@ -352,7 +372,7 @@ async fn poll(
             Err(_) => return Event::PollFailed,
         },
         None => match api.list_runs(repo, workflow).await {
-            Ok(runs) => match find_run(&runs, sha) {
+            Ok(runs) => match find_run(&runs, name) {
                 Some(r) => r.clone(),
                 None => return Event::RunNotFound,
             },
@@ -391,8 +411,8 @@ fn launch(cfg: &VerifyConfig, api: SharedApi, calls: Vec<Call>) {
                     }
                 });
             }
-            Call::Poll { sha, run_id } => spawn(async move {
-                let event = poll(api.0.as_ref(), &repo, &workflow, &sha, run_id).await;
+            Call::Poll { sha, run_id, name } => spawn(async move {
+                let event = poll(api.0.as_ref(), &repo, &workflow, &name, run_id).await;
                 lock(&rt.inbox).push((sha, event));
             }),
         }

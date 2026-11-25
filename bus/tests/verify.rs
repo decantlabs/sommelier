@@ -7,7 +7,7 @@ use sommelier::verify::{
     Action, ApiError, Conclusion, DispatchInputs, Entry, Event, FakeGitHub, GitHubApi, Phase,
     ReqwestGitHub, Timers, VerifyRules, VerifyState, conclusion, dispatch_request, fact_topic,
     find_run, job_minutes, jobs_request, list_runs_request, next_to_verify, parse_jobs, parse_run,
-    parse_runs, run_request, step,
+    parse_runs, run_name, run_request, step,
 };
 
 const FAKE_TOKEN: &str = "ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0001";
@@ -28,6 +28,9 @@ fn inputs() -> DispatchInputs {
         order: "t412".into(),
         base: "0123456789abcdef0123456789abcdef01234567".into(),
         hub: "https://hub.example.test".into(),
+        attempt: 1,
+        dispatch: 1,
+        round: 1000,
     }
 }
 
@@ -53,7 +56,10 @@ fn dispatch_request_has_expected_url_and_body() {
     assert_eq!(i["order"], "t412");
     assert_eq!(i["base"], "0123456789abcdef0123456789abcdef01234567");
     assert_eq!(i["hub"], "https://hub.example.test");
-    assert_eq!(i.as_object().unwrap().len(), 4);
+    assert_eq!(i["attempt"], "1");
+    assert_eq!(i["dispatch"], "1");
+    assert_eq!(i["round"], "1000");
+    assert_eq!(i.as_object().unwrap().len(), 7);
 }
 
 #[test]
@@ -97,27 +103,78 @@ fn urls_are_percent_encoded_per_segment() {
 // ---- parsers ----
 
 #[test]
-fn runs_list_parses_and_find_run_matches_whole_hash() {
+fn runs_list_parses_and_find_run_matches_the_whole_run_name() {
     let runs = parse_runs(&fixture("runs_list.json")).unwrap();
     assert_eq!(runs.len(), 4);
-    assert_eq!(find_run(&runs, A).map(|r| r.id), Some(1002));
-    assert_eq!(find_run(&runs, B).map(|r| r.id), Some(1003));
-    assert_eq!(find_run(&runs, C).map(|r| r.id), Some(1004));
-    assert!(find_run(&runs, &"d".repeat(64)).is_none());
+    let name = |sha: &str, a: u32, d: u32, t: u64| run_name(sha, a, d, t);
+    assert_eq!(
+        find_run(&runs, &name(A, 1, 1, 1000)).map(|r| r.id),
+        Some(1002)
+    );
+    assert_eq!(
+        find_run(&runs, &name(B, 1, 1, 1000)).map(|r| r.id),
+        Some(1003)
+    );
+    assert_eq!(
+        find_run(&runs, &name(C, 1, 1, 1000)).map(|r| r.id),
+        Some(1004)
+    );
+    assert!(find_run(&runs, &name(&"d".repeat(64), 1, 1, 1000)).is_none());
     assert!(
-        find_run(&runs, &A[..32]).is_none(),
+        find_run(&runs, &name(&A[..32], 1, 1, 1000)).is_none(),
         "a prefix must not match"
     );
+    // The attempt, the dispatch count and the round are part of the name.
+    assert!(find_run(&runs, &name(A, 2, 1, 1000)).is_none());
+    assert!(find_run(&runs, &name(A, 1, 2, 1000)).is_none());
+    assert!(find_run(&runs, &name(A, 1, 1, 2000)).is_none());
     assert!(find_run(&runs, "").is_none());
 }
 
 #[test]
-fn find_run_takes_the_oldest_of_two_matches() {
+fn find_run_reads_the_display_title_before_the_name() {
+    // GitHub puts the workflow name into `name` and the `run-name` into `display_title`.
     let mut runs = parse_runs(&fixture("runs_list.json")).unwrap();
+    assert_eq!(runs[2].name.as_deref(), Some("factory-verify"));
+    assert_eq!(
+        find_run(&runs, &inputs().run_name()).map(|r| r.id),
+        Some(1002)
+    );
+    // A hostile name field does not make a run match: the title decides.
+    runs[0].name = Some(inputs().run_name());
+    assert_eq!(
+        find_run(&runs, &inputs().run_name()).map(|r| r.id),
+        Some(1002)
+    );
+}
+
+#[test]
+fn find_run_takes_the_newest_match_and_never_the_run_of_an_earlier_round() {
+    let mut runs = parse_runs(&fixture("runs_list.json")).unwrap();
+    // The failed run of the first round and the new run of the retry round.
+    let mut retry = runs[2].clone();
+    retry.id = 5000;
+    retry.display_title = Some(run_name(A, 1, 1, 9000));
+    runs.push(retry);
+    assert_eq!(
+        find_run(&runs, &run_name(A, 1, 1, 1000)).map(|r| r.id),
+        Some(1002)
+    );
+    assert_eq!(
+        find_run(&runs, &run_name(A, 1, 1, 9000)).map(|r| r.id),
+        Some(5000)
+    );
+    // Before the retry run shows up, the old failed run is not taken for it.
+    runs.pop();
+    assert!(find_run(&runs, &run_name(A, 1, 1, 9000)).is_none());
+    // Two runs with the same name: the newest wins.
     let mut dup = runs[2].clone();
-    dup.id = 5000;
+    dup.id = 7000;
     runs.push(dup);
-    assert_eq!(find_run(&runs, A).map(|r| r.id), Some(1002));
+    assert_eq!(
+        find_run(&runs, &run_name(A, 1, 1, 1000)).map(|r| r.id),
+        Some(7000)
+    );
 }
 
 #[test]
@@ -846,7 +903,7 @@ async fn fake_github_drives_the_machine_end_to_end() {
                     let runs = gh.list_runs("o/r", "factory-verify.yml").await.unwrap();
                     let found = match run_id {
                         Some(id) => gh.get_run("o/r", id).await.ok(),
-                        None => find_run(&runs, A).cloned(),
+                        None => find_run(&runs, &inputs().run_name()).cloned(),
                     };
                     match found {
                         Some(r) => {

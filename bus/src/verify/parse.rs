@@ -9,10 +9,10 @@ use serde::Deserialize;
 pub struct Run {
     /// The run id.
     pub id: u64,
-    /// The run name. The template sets it to `verify <submission>`.
+    /// The name of the workflow. The run name is in `display_title`.
     #[serde(default)]
     pub name: Option<String>,
-    /// The display title. GitHub fills it from `run-name` too, so it is the fallback of `name`.
+    /// The display title. GitHub fills it from `run-name`, so [`find_run`] reads it first.
     #[serde(default)]
     pub display_title: Option<String>,
     /// `queued`, `in_progress`, `completed` and a few more.
@@ -98,26 +98,29 @@ pub fn parse_jobs(json: &str) -> Result<Vec<Job>, String> {
         .map_err(|e| format!("invalid jobs answer: {e}"))
 }
 
-/// The run name, from `name` or else from `display_title`.
-fn run_name(run: &Run) -> &str {
-    run.name
+/// The title of a run. GitHub puts the `run-name` of the template into `display_title` and the name of
+/// the workflow into `name`, so `display_title` is read first.
+fn run_title(run: &Run) -> &str {
+    run.display_title
         .as_deref()
-        .or(run.display_title.as_deref())
+        .filter(|t| !t.trim().is_empty())
+        .or(run.name.as_deref())
         .unwrap_or("")
 }
 
-/// Finds the run of a submission by the run name. The template names a run `verify <submission>`.
+/// Finds the run that the hub waits for by its whole name, see [`crate::verify::request::run_name`].
 ///
-/// A run matches when one whole word of its name equals `submission`, so a prefix never matches. When
-/// several runs match (a retried dispatch), the oldest id wins, because the first dispatch is the one that
-/// the concurrency group of the template runs first.
-pub fn find_run<'a>(runs: &'a [Run], submission: &str) -> Option<&'a Run> {
-    if submission.is_empty() {
+/// The name carries the submission, the attempt of the order, the dispatch count and the start of the
+/// round. Only a run with exactly this name matches, so the run of an earlier round or of an earlier
+/// attempt never does. When several runs match, the newest id wins.
+pub fn find_run<'a>(runs: &'a [Run], expected_name: &str) -> Option<&'a Run> {
+    let want: Vec<&str> = expected_name.split_whitespace().collect();
+    if want.is_empty() {
         return None;
     }
     runs.iter()
-        .filter(|r| run_name(r).split_whitespace().any(|w| w == submission))
-        .min_by_key(|r| r.id)
+        .filter(|r| run_title(r).split_whitespace().eq(want.iter().copied()))
+        .max_by_key(|r| r.id)
 }
 
 /// What the hub makes of a run.

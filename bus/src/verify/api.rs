@@ -230,6 +230,30 @@ struct FakeInner {
     jobs: BTreeMap<u64, Vec<Job>>,
 }
 
+impl FakeInner {
+    /// The runs the fake serves. A run titled just `verify <submission>`, with no attempt, dispatch or round
+    /// in it, follows the dispatches: it is served under the run name of the latest dispatch of that
+    /// submission, as GitHub names it from the template, and only after such a dispatch. Any other run is
+    /// served as it is.
+    fn served(&self) -> Vec<Run> {
+        let mut out = Vec::new();
+        for run in &self.runs {
+            let title = run.display_title.as_deref().or(run.name.as_deref());
+            let words: Vec<&str> = title.unwrap_or("").split_whitespace().collect();
+            if let ["verify", sha] = words[..] {
+                if let Some(d) = self.dispatched.iter().rfind(|d| d.submission == sha) {
+                    let mut r = run.clone();
+                    r.display_title = Some(d.run_name());
+                    out.push(r);
+                }
+            } else {
+                out.push(run.clone());
+            }
+        }
+        out
+    }
+}
+
 /// A fake `GitHubApi` for tests. It records dispatches and serves the runs and jobs it was given.
 #[derive(Default)]
 pub struct FakeGitHub {
@@ -246,7 +270,8 @@ impl FakeGitHub {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Replaces the runs that `list_runs` and `get_run` serve.
+    /// Replaces the runs that `list_runs` and `get_run` serve. A run named `verify <submission>` follows the
+    /// dispatches of that submission, see the reading of the fake.
     pub fn set_runs(&self, runs: Vec<Run>) {
         self.lock().runs = runs;
     }
@@ -281,15 +306,14 @@ impl GitHubApi for FakeGitHub {
     }
 
     async fn list_runs(&self, _repo: &str, _workflow_file: &str) -> Result<Vec<Run>, ApiError> {
-        Ok(self.lock().runs.clone())
+        Ok(self.lock().served())
     }
 
     async fn get_run(&self, _repo: &str, run_id: u64) -> Result<Run, ApiError> {
         self.lock()
-            .runs
-            .iter()
+            .served()
+            .into_iter()
             .find(|r| r.id == run_id)
-            .cloned()
             .ok_or(ApiError::Status {
                 code: 404,
                 message: "run not found".into(),

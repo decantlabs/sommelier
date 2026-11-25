@@ -27,5 +27,6 @@ pub use parse::{
 };
 pub use queue::{Entry, VerifyRules, next_to_verify};
 pub use request::{
-    DispatchInputs, HttpRequestSpec, dispatch_request, jobs_request, list_runs_request, run_request,
+    DispatchInputs, HttpRequestSpec, dispatch_request, jobs_request, list_runs_request, run_name,
+    run_request,
 };
