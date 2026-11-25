@@ -15,11 +15,15 @@ pub mod metric;
 pub mod plan;
 pub mod promote;
 pub mod quota;
+pub mod review;
 pub mod role;
 pub mod run;
 pub mod standby;
+pub mod standing;
 pub mod state;
+pub mod submit;
 pub mod task;
+pub mod test;
 pub mod work;
 
 fn unimplemented(cmd: &str) -> Result<ExitCode, String> {
@@ -49,6 +53,10 @@ pub async fn dispatch(cmd: &str, args: &[String]) -> Option<Result<ExitCode, Str
         "promote" => Some(promote::run(args).await),
         "drill" => Some(drill::run(args).await),
         "join" | "key" => Some(key::run(cmd, args).await),
+        "submit" => Some(submit::run(args).await),
+        "review" => Some(review::run(args).await),
+        "test" => Some(test::run(args).await),
+        "standing" => Some(standing::run(args).await),
         _ => None,
     }
 }
