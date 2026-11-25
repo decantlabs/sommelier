@@ -1,0 +1,46 @@
+# Example title profile with made up values. The hash and the size match no real file.
+id = "example_title"
+name = "Example Title"
+
+[executable]
+file = "example_title.exe"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+size = 123456789
+
+[[scenarios]]
+id = "boot_menu"
+seconds = 60
+metrics = ["fps_median", "frames", "first_present_s"]
+
+[[scenarios.inputs]]
+at = 35
+key = "enter"
+
+[[scenarios.inputs]]
+at = 50
+key = "escape"
+
+[[scenarios.milestones]]
+id = "window_up"
+pattern = "swapchain created"
+by = 20
+
+[[scenarios.milestones]]
+id = "first_frame"
+pattern = 'present probe: frame \d+'
+by = 30
+
+[[scenarios.milestones]]
+id = "menu_shown"
+pattern = "menu ready"
+by = 45
+
+[[scenarios]]
+id = "drive_loop"
+seconds = 120
+metrics = ["fps_median"]
+
+[[scenarios.milestones]]
+id = "world_loaded"
+pattern = "world loaded"
+by = 90

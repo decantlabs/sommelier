@@ -1,0 +1,12 @@
+
+Name          : Microsoft Basic Render Driver
+AdapterRAM    : 0
+DriverVersion : 10.0.26100.1
+
+Name          : Example Gamer Card RTX 4080 (R)
+AdapterRAM    : 4293918720
+DriverVersion : 31.0.15.5123
+
+Name          : Example Integrated Graphics
+AdapterRAM    : 1073741824
+DriverVersion : 31.0.101.4000

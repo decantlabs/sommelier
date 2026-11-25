@@ -1,0 +1,3 @@
+00:02.0 "VGA compatible controller" "Intel Corporation" "Example Graphics [UHD 770]" -r04 "Example OEM" "Device 1234"
+01:00.0 "VGA compatible controller" "Advanced Micro Devices, Inc. [AMD/ATI]" "Navi 99 [Radeon RX 7900 XT]" -rc8 "Example OEM" "Device 5678"
+00:1f.3 "Audio device" "Intel Corporation" "Example Audio" -r11 "Example OEM" "Device 9999"

@@ -1,0 +1,8 @@
+run folder: runs/20260101-000000-boot
+frames: 1800 at 59.0 s (last probe sample)
+device loss: 0 lines
+unhandled: 
+exit: 
+first_present_s: 12.0
+fps_median: 58.20
+fps_p10: 41.00
