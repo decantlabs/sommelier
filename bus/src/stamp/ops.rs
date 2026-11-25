@@ -5,7 +5,6 @@
 //! runs no slow work under the state lock.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Mutex, OnceLock};
 
 use rusqlite::Connection;
 use serde_json::{Map, Value, json};
@@ -21,9 +20,6 @@ use crate::report::types::Outcome;
 use crate::report::{QuorumRules, ReportView, Verdict, cell, classify, query_reports};
 use crate::review::query_reviews;
 use crate::time::parse_ms;
-
-/// The trust name of a caller that the policy lists as a maintainer (a token member).
-pub const MAINTAINER_TRUST: &str = "maintainer";
 
 /// Longest `cause` of a maintainer request, in characters.
 const MAX_CAUSE: usize = 160;
@@ -427,7 +423,6 @@ pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     // The address blocks come from the front door, outside the state lock.
     let reporters: Vec<String> = hub
         .with_store(|s| {
-            register(s.connection(), cfg);
             let mut m: Vec<String> = query_reports(s.connection())
                 .unwrap_or_default()
                 .into_iter()
@@ -451,41 +446,17 @@ pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
 
 // The part of /api/state
 
-type Registered = (TierRules, Vec<String>);
-
-fn registry() -> &'static Mutex<BTreeMap<String, Registered>> {
-    static REG: OnceLock<Mutex<BTreeMap<String, Registered>>> = OnceLock::new();
-    REG.get_or_init(Default::default)
-}
-
-fn db_key(conn: &Connection) -> Option<String> {
-    conn.path().map(|p| p.to_string()).filter(|p| !p.is_empty())
-}
-
-/// Remembers the rules of the hub that owns `conn`, so the state page can say what is missing.
-fn register(conn: &Connection, cfg: &StampConfig) {
-    if let Some(key) = db_key(conn) {
-        let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
-        reg.insert(key, (cfg.rules.clone(), cfg.maintainers.clone()));
-    }
-}
-
 /// The `standing` rows of `/api/state` for a hub that runs with standing on: counts by kind, the tier
-/// and what is missing for the next one. `None` for a store no hub registered.
-pub fn api_rows(conn: &Connection, now_sec: u64) -> Option<Vec<Value>> {
-    let (rules, maintainers) = registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&db_key(conn)?)?
-        .clone();
+/// and what is missing for the next one. `None` when standing is off.
+pub fn api_rows(conn: &Connection, cfg: &StampConfig, now_sec: u64) -> Option<Vec<Value>> {
+    if !cfg.enabled {
+        return None;
+    }
+    let rules = &cfg.rules;
     let stamps = query_stamps(conn).ok()?;
     let keys = key_rows(conn);
     let mut members: BTreeSet<String> = stamps.iter().map(|s| s.subject.clone()).collect();
     members.extend(keys.iter().map(|k| k.member.clone()));
-    let cfg = StampConfig {
-        maintainers,
-        ..StampConfig::default()
-    };
     let rows = members
         .into_iter()
         .map(|member| {
@@ -496,7 +467,7 @@ pub fn api_rows(conn: &Connection, now_sec: u64) -> Option<Vec<Value>> {
             }
             let mut row = json!({ "member": member, "counts": counts });
             if let Some(k) = keys.iter().find(|k| k.member == member) {
-                let d = tier(&member_facts(&cfg, k, &stamps), &stamps, &rules, now_sec);
+                let d = tier(&member_facts(cfg, k, &stamps), &stamps, rules, now_sec);
                 row["tier"] = json!(tier_from_table(conn, &member, None));
                 row["missing"] = json!(d.missing);
                 row["reasons"] = json!(d.reasons);
@@ -540,9 +511,11 @@ fn cause_of(body: &Value) -> Result<String, String> {
     Ok(c.to_owned())
 }
 
+/// An orchestrator, a member the config lists (a token name or a member id), or a key member that
+/// holds tier 3.
 fn is_maintainer(ctx: &OpContext<'_>) -> bool {
     ctx.caller.role == Role::Orchestrator
-        || ctx.caller.trust == MAINTAINER_TRUST
+        || ctx.config().stamp.is_listed_maintainer(&ctx.caller.name)
         || (ctx.caller.trust == crate::key::ops::TRUST
             && tier_from_table(ctx.store.connection(), &ctx.caller.name, None) == 3)
 }

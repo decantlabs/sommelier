@@ -135,17 +135,21 @@ struct Env {
     next: u64,
     /// Every message applied, in order, to rebuild the tables.
     log: Vec<Message>,
+    /// The settings of the hub the requests run under: the data folder is the temp folder.
+    config: HubConfig,
 }
 
 impl Env {
     fn new() -> Env {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
+        let config = HubConfig::new(dir.path());
         Env {
             dir,
             store,
             next: 1,
             log: Vec::new(),
+            config,
         }
     }
 
@@ -238,7 +242,8 @@ impl Env {
             role,
             trust,
         };
-        let mut ctx = OpContext::new(caller, &mut self.store, now_ms(), &mut emit);
+        let mut ctx =
+            OpContext::new(caller, &mut self.store, now_ms(), &mut emit).with_config(&self.config);
         let out = on_op(&mut ctx, op, &body);
         self.next = next;
         self.log.extend(logged);

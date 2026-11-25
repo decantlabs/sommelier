@@ -33,9 +33,6 @@ pub struct ReviewConfig {
     pub answer_secs: u64,
     /// A member counts as online when it spoke within this many seconds.
     pub online_secs: u64,
-    /// Where the hub keeps the stored bundles. `None` is `<data>/bundles`.
-    /// The ops of `review.*` read the default place, see PROTOCOL.md.
-    pub bundles_dir: Option<PathBuf>,
 }
 
 impl Default for ReviewConfig {
@@ -46,7 +43,6 @@ impl Default for ReviewConfig {
             audit_share: 0.0,
             answer_secs: 24 * 3600,
             online_secs: 15 * 60,
-            bundles_dir: None,
         }
     }
 }
@@ -75,10 +71,9 @@ pub fn load_secret(data_dir: &Path) -> Result<Vec<u8>, String> {
     Ok(hex.into_bytes())
 }
 
-fn bundles_in(data_dir: &Path, cfg: &ReviewConfig) -> PathBuf {
-    cfg.bundles_dir
-        .clone()
-        .unwrap_or_else(|| data_dir.join("bundles"))
+/// Where the hub keeps the stored bundles and diffs: the store of the intake.
+fn bundles_in(config: &crate::hub::HubConfig) -> PathBuf {
+    config.intake.store_path(&config.data_dir)
 }
 
 fn is_sha(s: &str) -> bool {
@@ -104,14 +99,6 @@ pub fn on_op(
     }
 }
 
-fn data_dir(ctx: &OpContext<'_>) -> Result<PathBuf, String> {
-    ctx.store
-        .path()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "the hub has no data folder for stored bundles".to_string())
-}
-
 fn text<'a>(body: &'a Value, field: &str) -> Result<&'a str, String> {
     body.get(field)
         .and_then(Value::as_str)
@@ -131,7 +118,7 @@ fn prompt_of(ctx: &OpContext<'_>, review: &Review) -> Result<String, String> {
     if !is_sha(sha) {
         return Err("the review names no stored submission".into());
     }
-    let dir = data_dir(ctx)?.join("bundles");
+    let dir = bundles_in(ctx.config());
     let raw = std::fs::read_to_string(diff_path(&dir, sha))
         .map_err(|_| "the diff of this submission is not stored on the hub yet".to_string())?;
     let diff: ParsedDiff = serde_json::from_str(&raw)
@@ -372,7 +359,7 @@ pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     if snap.is_idle() {
         return Vec::new();
     }
-    let dir = bundles_in(&hub.config().data_dir, cfg);
+    let dir = bundles_in(hub.config());
     let ready: HashSet<String> = snap
         .verified
         .iter()

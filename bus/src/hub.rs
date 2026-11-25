@@ -1289,8 +1289,6 @@ impl Hub {
                 let mut caller = crate::hooks::OpCaller::from_member(member);
                 if tier0 {
                     caller.trust = crate::key::ops::TRUST;
-                } else if self.cfg.stamp.is_listed_maintainer(&member.name) {
-                    caller.trust = crate::stamp::ops::MAINTAINER_TRUST;
                 }
                 if mod_op.starts_with("stamp.") && !self.cfg.stamp.enabled {
                     return reply_err(op, rid, "standing is switched off on this hub");
@@ -1312,7 +1310,8 @@ impl Hub {
                         let _ = s.catch_up_from_log(&self.log_path);
                         Ok(id)
                     };
-                let mut ctx = crate::hooks::OpContext::new(caller, &mut store, now, &mut emit);
+                let mut ctx = crate::hooks::OpContext::new(caller, &mut store, now, &mut emit)
+                    .with_config(&self.cfg);
                 match crate::hooks::on_op(&mut ctx, &mod_op, &body) {
                     Ok(extra) => {
                         if let Some(ref mut cached) = lock(&self.state).store {

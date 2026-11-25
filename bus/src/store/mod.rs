@@ -548,5 +548,11 @@ pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
 pub fn api(hub: &Hub, now_ms: u64, state: &mut Map<String, Value>) {
     let _ = hub.with_store(|store| {
         let _ = store.registry.api_all(&store.conn, now_ms / 1000, state);
+        // The standing rows know the tier rules, which only the hub config holds.
+        if let Some(rows) =
+            crate::stamp::ops::api_rows(&store.conn, &hub.config().stamp, now_ms / 1000)
+        {
+            state.insert("standing".to_owned(), serde_json::Value::Array(rows));
+        }
     });
 }

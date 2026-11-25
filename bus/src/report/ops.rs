@@ -15,8 +15,7 @@
 //! newer one.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 
@@ -116,27 +115,13 @@ fn need_enabled(cfg: &TestConfig) -> Result<(), String> {
     }
 }
 
-/// The settings of each running hub by the path of its `state.db`.
-///
-/// `hooks::on_op` gives a request no hub and no config, and `hooks.rs` is not mine. The tick has the
-/// hub, so it files a copy of the settings here and the requests read it. A request in the first
-/// moments of a hub, before its first tick, is told to try again.
-fn registry() -> &'static Mutex<BTreeMap<PathBuf, TestConfig>> {
-    static R: OnceLock<Mutex<BTreeMap<PathBuf, TestConfig>>> = OnceLock::new();
-    R.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
 /// Handles the requests `report.*` and `test.*`.
 pub fn on_op(
     ctx: &mut OpContext<'_>,
     op: &str,
     body: &Value,
 ) -> Result<Map<String, Value>, String> {
-    let cfg = ctx
-        .store
-        .path()
-        .and_then(|p| lock(registry()).get(p).cloned())
-        .ok_or("the test network is starting: try again in a few seconds")?;
+    let cfg = ctx.config().test.clone();
     on_op_with(ctx, op, body, &cfg)
 }
 
@@ -466,9 +451,6 @@ fn plain_key(s: &str, max: usize) -> String {
 /// slow runs under the state lock.
 pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     let cfg = &hub.config().test;
-    if let Some(Some(path)) = hub.with_store(|s| s.path().map(PathBuf::from)) {
-        lock(registry()).insert(path, cfg.clone());
-    }
     if !cfg.enabled {
         return Vec::new();
     }

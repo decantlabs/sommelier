@@ -4,7 +4,7 @@ use serde_json::{Map, Value, json};
 
 use crate::agent::lease_loop::handle_task_exit_op;
 use crate::brief::HttpOutcome;
-use crate::hub::Hub;
+use crate::hub::{Hub, HubConfig};
 use crate::msg::{Kind, Message, Role};
 use crate::quota::apply::{
     DEFAULT_COORD_BUDGET_ALARM_PCT, QuotaReportOp, check_coord_budget_alerts,
@@ -54,6 +54,7 @@ pub struct OpContext<'a> {
     pub caller: OpCaller,
     pub store: &'a mut Store,
     pub now_ms: u64,
+    config: Option<&'a HubConfig>,
     emit_fn: &'a mut dyn FnMut(&mut Store, Message) -> Result<u64, String>,
 }
 
@@ -68,8 +69,24 @@ impl<'a> OpContext<'a> {
             caller,
             store,
             now_ms,
+            config: None,
             emit_fn,
         }
+    }
+
+    /// Gives the context the settings of the hub that runs the op.
+    pub fn with_config(mut self, config: &'a HubConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// The settings of the hub. A context made without them (a test of one module) sees a default
+    /// config with every part off and an empty data folder.
+    pub fn config(&self) -> &HubConfig {
+        self.config.unwrap_or_else(|| {
+            static DEFAULT: std::sync::OnceLock<HubConfig> = std::sync::OnceLock::new();
+            DEFAULT.get_or_init(|| HubConfig::new(""))
+        })
     }
 
     /// Validates, appends to `bus.jsonl`, projects into `state.db`, and broadcasts one
