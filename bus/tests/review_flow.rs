@@ -989,11 +989,21 @@ fn a_fact_on_a_bundle_landing_row_counts_only_from_the_hub() {
         &[],
     );
     assert_eq!(e.landings(), vec![format!("bundle:{s}")]);
-    // An ordinary branch row keeps working for any sender, as before.
+    // Every row of the landing queue is a FACT of the hub now, an ordinary branch row too.
     apply_as(
         &mut e,
         "orch",
         Role::Orchestrator,
+        Kind::Fact,
+        "land/fx/a",
+        row_of("fx/a", 'e'),
+        &[],
+    );
+    assert!(!e.landings().contains(&"fx/a".to_string()));
+    apply_as(
+        &mut e,
+        "hub",
+        Role::Hub,
         Kind::Fact,
         "land/fx/a",
         row_of("fx/a", 'e'),

@@ -633,7 +633,8 @@ impl RoleTable {
 
     /// Applies a `FACT` message with topic `role/<role>` during log replay.
     pub fn apply_message(&mut self, msg: &Message) {
-        if msg.kind != Kind::Fact {
+        // Only the hub writes role rows. A line of a member gives nobody a role.
+        if msg.kind != Kind::Fact || msg.role != Role::Hub {
             return;
         }
         let Some(role) = msg.topic.strip_prefix("role/").filter(|r| !r.is_empty()) else {

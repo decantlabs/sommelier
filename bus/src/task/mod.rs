@@ -212,6 +212,10 @@ fn merge_task_fields(row: &mut TaskRow, src: &Value) {
 /// Projects `TASK_UPDATE`, `OFFER`, and task-related `FACT` messages into `TASK`, `LEASE`, `OFFER`, and `CHECKPOINT`.
 pub fn apply_task_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), String> {
     let ts_sec = parse_ms(&msg.ts).unwrap_or(0) / 1000;
+    // Only the hub writes TASK_UPDATE and OFFER. A line of anyone else in an old log gives no lease and no offer.
+    if matches!(msg.kind, Kind::TaskUpdate | Kind::Offer) && msg.role != Role::Hub {
+        return Ok(());
+    }
     match msg.kind {
         Kind::TaskUpdate => {
             let body: Value = serde_json::from_str(&msg.body)

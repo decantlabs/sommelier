@@ -157,3 +157,234 @@ async fn a_token_member_still_sends_the_plain_kinds() {
     );
     send(&w.orch, "TASK", "issue/50", json!("x")).await.unwrap();
 }
+
+// ---- the second guard: a projection takes the line only from the hub ----
+
+use sommelier::msg::{Kind, Message};
+use sommelier::store::Store;
+
+fn line(id: u64, role: Role, from: &str, kind: Kind, topic: &str, body: Value) -> Message {
+    Message {
+        id,
+        ts: "2026-11-26T10:00:00Z".into(),
+        from: from.into(),
+        role,
+        kind,
+        topic: topic.into(),
+        body: body.to_string(),
+        refs: vec![],
+        to: vec![],
+    }
+}
+
+/// The same line as a member and as the hub: only the hub's line changes a table.
+fn apply_both(
+    store: &mut Store,
+    kind: Kind,
+    topic: &str,
+    body: Value,
+    check: impl Fn(&Store) -> bool,
+) {
+    let forged = line(1, Role::Member, "alice", kind, topic, body.clone());
+    store.apply(&forged).unwrap();
+    assert!(
+        !check(store),
+        "a line of a member changed the table: {topic}"
+    );
+    let forged = line(2, Role::Orchestrator, "orch", kind, topic, body.clone());
+    store.apply(&forged).unwrap();
+    assert!(
+        !check(store),
+        "a line of the orchestrator changed the table: {topic}"
+    );
+    let real = line(3, Role::Hub, "hub", kind, topic, body);
+    store.apply(&real).unwrap();
+    assert!(check(store), "the line of the hub changed nothing: {topic}");
+}
+
+#[test]
+fn a_forged_task_update_or_offer_in_the_log_gives_no_lease_and_no_offer() {
+    let mut store = Store::open_in_memory().unwrap();
+    let body = json!({"task": "T1", "task_row": {"min_trust": 0, "risk": "low", "scope": "**"},
+                      "lease": {"owner": "alice", "attempt": 1, "state": "active"}});
+    apply_both(&mut store, Kind::TaskUpdate, "task/T1", body, |s| {
+        sommelier::task::query_task(s.connection(), "T1")
+            .unwrap()
+            .is_some()
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    let offer = json!({"offer_id": "o1", "task": "T1", "to_owner": "alice", "state": "open"});
+    apply_both(&mut store, Kind::Offer, "task/T1", offer, |s| {
+        !sommelier::task::query_offers(s.connection())
+            .unwrap()
+            .is_empty()
+    });
+}
+
+#[test]
+fn a_forged_landing_batch_branch_or_run_row_in_the_log_changes_nothing() {
+    let sha = "a".repeat(40);
+    let row = json!(sommelier::land::LandingRow {
+        ref_name: "fx/x".into(),
+        sha: sha.clone(),
+        state: "landed".into(),
+        ..Default::default()
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    apply_both(&mut store, Kind::Fact, "land/fx/x", row, |s| {
+        !sommelier::land::query_landings(s.connection())
+            .unwrap()
+            .is_empty()
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    apply_both(
+        &mut store,
+        Kind::Fact,
+        "batch/b1",
+        json!(sommelier::land::BatchRow {
+            batch_id: "b1".into(),
+            result: "landed".into(),
+            ..Default::default()
+        }),
+        |s| {
+            !sommelier::land::query_batches(s.connection())
+                .unwrap()
+                .is_empty()
+        },
+    );
+    let mut store = Store::open_in_memory().unwrap();
+    apply_both(
+        &mut store,
+        Kind::Fact,
+        "run/r1",
+        json!(sommelier::land::RunRow {
+            run_id: "r1".into(),
+            sha: sha.clone(),
+            outcome: "pass".into(),
+            ..Default::default()
+        }),
+        |s| {
+            !sommelier::land::query_runs(s.connection())
+                .unwrap()
+                .is_empty()
+        },
+    );
+}
+
+#[test]
+fn a_forged_stamp_in_the_log_gives_no_stamp() {
+    let mut store = Store::open_in_memory().unwrap();
+    let body = json!({"v": 1, "subject": "m1", "issuer": "m2", "kind": "landed",
+                      "evidence": {"msg": 7, "commit": "abc"}, "at": 100});
+    apply_both(&mut store, Kind::Fact, "stamp/m1", body, |s| {
+        s.connection()
+            .query_row("SELECT COUNT(*) FROM STAMP", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+            > 0
+    });
+}
+
+#[test]
+fn a_forged_alert_or_role_row_in_the_log_changes_nothing() {
+    let mut store = Store::open_in_memory().unwrap();
+    let alert =
+        json!({"code": "STUCK", "key": "T1", "severity": "warn", "state": "open", "text": "x"});
+    apply_both(&mut store, Kind::Alert, "alert/STUCK/T1", alert, |s| {
+        !sommelier::store::core::query_alerts(s.connection())
+            .unwrap()
+            .is_empty()
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    let role = json!({"role": "lander", "scope": "global", "holder": "alice", "state": "held", "epoch": 1});
+    apply_both(&mut store, Kind::Fact, "role/lander", role, |s| {
+        sommelier::role::query_row(s.connection(), "lander", "global")
+            .ok()
+            .flatten()
+            .is_some()
+    });
+}
+
+#[test]
+fn the_owner_of_a_capacity_fact_is_the_sender_never_the_topic() {
+    let mut store = Store::open_in_memory().unwrap();
+    let decl = json!({"class": "codex", "useful_parallel": 3, "machine": "m1"});
+    // alice writes the owner bob: nothing.
+    store
+        .apply(&line(
+            1,
+            Role::Member,
+            "alice",
+            Kind::Fact,
+            "capacity/bob/m1",
+            decl.clone(),
+        ))
+        .unwrap();
+    assert!(
+        sommelier::store::core::query_capacities(store.connection())
+            .unwrap()
+            .is_empty()
+    );
+    // alice for herself: one row.
+    store
+        .apply(&line(
+            2,
+            Role::Member,
+            "alice",
+            Kind::Fact,
+            "capacity/alice/m1",
+            decl,
+        ))
+        .unwrap();
+    let rows = sommelier::store::core::query_capacities(store.connection()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].owner, "alice");
+}
+
+#[test]
+fn capacity_is_capped_per_owner_in_total() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut id = 0;
+    // Many machines, many classes, each at the single declaration cap.
+    for m in 0..40 {
+        for c in 0..6 {
+            id += 1;
+            let decl = json!({"class": format!("c{c}"), "useful_parallel": 64, "machine": format!("m{m}")});
+            store
+                .apply(&line(
+                    id,
+                    Role::Member,
+                    "alice",
+                    Kind::Fact,
+                    &format!("capacity/alice/m{m}"),
+                    decl,
+                ))
+                .unwrap();
+        }
+    }
+    let rows = sommelier::store::core::query_capacities(store.connection()).unwrap();
+    let total: u32 = rows.iter().map(|r| r.useful_parallel).sum();
+    assert!(
+        total <= sommelier::derive::capacity::MAX_TOTAL_SLOTS,
+        "total {total}"
+    );
+    let machines: std::collections::BTreeSet<_> = rows.iter().map(|r| r.machine.clone()).collect();
+    assert!(machines.len() as i64 <= sommelier::store::core::MAX_MACHINES_PER_OWNER);
+    // Another owner is not touched by the cap of the first.
+    store
+        .apply(&line(
+            id + 1,
+            Role::Member,
+            "bob",
+            Kind::Fact,
+            "capacity/bob/m1",
+            json!({"class": "codex", "useful_parallel": 5, "machine": "m1"}),
+        ))
+        .unwrap();
+    let rows = sommelier::store::core::query_capacities(store.connection()).unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.owner == "bob")
+            .map(|r| r.useful_parallel),
+        Some(5)
+    );
+}

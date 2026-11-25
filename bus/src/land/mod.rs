@@ -136,6 +136,11 @@ pub fn apply_land_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
 
     match msg.kind {
         Kind::Fact => {
+            // Only the hub writes the rows of the landing queue, the batches, the branches and the runs. A line of a
+            // member in an old log changes none of them.
+            if msg.role != Role::Hub {
+                return Ok(());
+            }
             if msg.topic.starts_with("land/") {
                 let v: Value = serde_json::from_str(&msg.body)
                     .map_err(|e| format!("invalid land FACT JSON: {e}"))?;
