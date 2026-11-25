@@ -220,6 +220,199 @@ lander_verify() {
   return "$VERIFY_CODE"
 }
 
+# --- Bundle entries and the second lock (docs/factory.md 8.5) ---
+# A queue line is a ref as before, or a bundle entry:
+#   bundle:<sha256> <head sha> [key=value ...] [title=<text>]
+# with the keys member_handle, member_id, order, submission and email. The title takes the rest of the line.
+
+lander_gitref() {
+  case $1 in
+    bundle:*) printf 'refs/submissions/%s\n' "${1#bundle:}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+lander_entry_line() {
+  awk -v r="$1" '$1 == r { print; exit }' "$Q.entries" 2>/dev/null
+}
+
+# lander_entry_get <line> <key>: the value of key=value in the line, or nothing.
+lander_entry_get() {
+  _eg_line=$1
+  if [ "$2" = title ]; then
+    case $_eg_line in *" title="*) printf '%s\n' "${_eg_line#* title=}" ;; esac
+    return 0
+  fi
+  _eg_head=${_eg_line%% title=*}
+  for _eg_w in $_eg_head; do
+    case $_eg_w in "$2="*) printf '%s\n' "${_eg_w#*=}"; return 0 ;; esac
+  done
+}
+
+lander_safe_word() {
+  printf '%s' "$1" | tr -cd 'A-Za-z0-9._+@-'
+}
+
+# lander_commit_message <entry line>: the message of a landed submission. Only the entry and the
+# lander write it. The commit messages of the patch never get here.
+lander_commit_message() {
+  _cm_hash=${1%% *}
+  _cm_hash=${_cm_hash#bundle:}
+  _cm_title=$(lander_entry_get "$1" title | tr -d '\000-\037\177' | cut -c1-200 | sed 's/^ *//; s/ *$//')
+  [ -n "$_cm_title" ] || _cm_title="Land submission $(printf '%s' "$_cm_hash" | cut -c1-12)"
+  _cm_handle=$(lander_safe_word "$(lander_entry_get "$1" member_handle)")
+  _cm_id=$(lander_safe_word "$(lander_entry_get "$1" member_id)")
+  _cm_order=$(lander_safe_word "$(lander_entry_get "$1" order)")
+  _cm_sub=$(lander_safe_word "$(lander_entry_get "$1" submission)")
+  _cm_mail=$(lander_safe_word "$(lander_entry_get "$1" email)")
+  [ -n "$_cm_handle" ] || _cm_handle=unknown
+  [ -n "$_cm_id" ] || _cm_id=unknown
+  [ -n "$_cm_order" ] || _cm_order=unknown
+  [ -n "$_cm_sub" ] || _cm_sub=$_cm_hash
+  case $_cm_mail in *?@?*) ;; *) _cm_mail="$_cm_id@${LANDER_MEMBER_DOMAIN:-members.sommelier.invalid}" ;; esac
+  printf '%s\n\n' "$_cm_title"
+  printf 'Co-authored-by: %s <%s>\n' "$_cm_handle" "$_cm_mail"
+  printf 'Factory-Order: %s\n' "$_cm_order"
+  printf 'Factory-Submission: %s\n' "$_cm_sub"
+  printf 'Signed-off-by: %s\n' "$_cm_handle"
+}
+
+# The address of the hub for plain http. No address is ever written to a log.
+lander_hub_http() {
+  if [ -n "${SOMMELIER_HUB_HTTP:-}" ]; then printf '%s\n' "$SOMMELIER_HUB_HTTP"; return 0; fi
+  case ${SOMMELIER_URL:-} in
+    wss://*) printf 'https://%s\n' "${SOMMELIER_URL#wss://}" ;;
+    ws://*) printf 'http://%s\n' "${SOMMELIER_URL#ws://}" ;;
+    *) printf '%s\n' "${SOMMELIER_LOCAL:-http://127.0.0.1:7300}" ;;
+  esac
+}
+
+lander_download() {
+  curl -fs --proto '=http,https' --max-time 300 --max-filesize 536870912 -o "$2" "$1"
+}
+
+lander_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+lander_nohooks_dir() {
+  mkdir -p "$SW/nohooks"
+  printf '%s\n' "$SW/nohooks"
+}
+
+lander_bundle_fail() {
+  echo "$BF_REF" >> "$RUNS/landing.failed"
+  say "FAILED at bundle ($1) for: $BF_REF ($2) (log $LOG)"
+  rm -f "$BF_FILE"
+  return 1
+}
+
+# lander_bundle_fetch <entry line>: downloads, checks and fetches a bundle into refs/submissions/<sha256>.
+# On success BUNDLE_GREF names that ref. On failure the entry is in landing.failed and 1 comes back.
+lander_bundle_fetch() {
+  BF_REF=${1%% *}
+  BF_FILE="$SW/bundle.$$"
+  _bf_hash=${BF_REF#bundle:}
+  _bf_want=""
+  [ "$1" = "$BF_REF" ] || { _bf_want=${1#* }; _bf_want=${_bf_want%% *}; }
+  BUNDLE_GREF=""
+  case $_bf_hash in
+    *[!0-9a-f]*|"") lander_bundle_fail entry "the name is not a sha256"; return 1 ;;
+  esac
+  [ "${#_bf_hash}" = 64 ] || { lander_bundle_fail entry "the name is not a sha256"; return 1; }
+  case $_bf_want in
+    *[!0-9a-f]*|"") lander_bundle_fail entry "the entry has no head sha"; return 1 ;;
+  esac
+  rm -f "$BF_FILE"
+  if ! lander_download "$(lander_hub_http)/api/bundle/$_bf_hash" "$BF_FILE" || [ ! -s "$BF_FILE" ]; then
+    lander_bundle_fail fetch "the hub did not serve the file"; return 1
+  fi
+  if [ "$(lander_sha256 "$BF_FILE")" != "$_bf_hash" ]; then
+    lander_bundle_fail content "the sha256 of the file does not match its name"; return 1
+  fi
+  _bf_heads=$(git bundle list-heads "$BF_FILE" 2>/dev/null)
+  if [ -z "$_bf_heads" ] || [ "$(printf '%s\n' "$_bf_heads" | wc -l | tr -d ' ')" != 1 ]; then
+    lander_bundle_fail content "the bundle must hold exactly one ref"; return 1
+  fi
+  _bf_bref=${_bf_heads#* }
+  if ! git check-ref-format "$_bf_bref" 2>/dev/null; then
+    lander_bundle_fail content "the ref name in the bundle is not valid"; return 1
+  fi
+  git update-ref -d "refs/submissions/$_bf_hash" 2>/dev/null
+  if ! git -c core.hooksPath="$(lander_nohooks_dir)" -c transfer.fsckObjects=true fetch -q --no-tags "$BF_FILE" "+$_bf_bref:refs/submissions/$_bf_hash" >>"$LOG" 2>&1; then
+    lander_bundle_fail content "the bundle does not fetch"; return 1
+  fi
+  rm -f "$BF_FILE"
+  _bf_head=$(git rev-parse -q --verify "refs/submissions/$_bf_hash^{commit}" 2>/dev/null)
+  if [ "$_bf_head" != "$_bf_want" ]; then
+    lander_bundle_fail content "the head of the bundle is not the sha of the entry"; return 1
+  fi
+  BUNDLE_GREF="refs/submissions/$_bf_hash"
+}
+
+# lander_squash_entry <bundle ref> <onto sha>: one commit on top of onto with the content of the whole
+# submission. On failure the tree is clean again and SQUASH_FILES names the files in conflict.
+lander_squash_entry() {
+  _sq_g=$(lander_gitref "$1")
+  _sq_hp=$(lander_nohooks_dir)
+  SQUASH_FILES=""
+  git checkout -q --detach "$2" || return 1
+  if ! git -c core.hooksPath="$_sq_hp" merge --squash "$_sq_g" >>"$LOG" 2>&1; then
+    SQUASH_FILES=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+    git reset -q --hard "$2"
+    return 1
+  fi
+  if git diff --cached --quiet; then
+    SQUASH_FILES="no change is left after the squash"
+    git reset -q --hard "$2"
+    return 1
+  fi
+  lander_commit_message "$(lander_entry_line "$1")" > "$SW/squash.msg"
+  if ! git -c core.hooksPath="$_sq_hp" commit -q --no-verify -F "$SW/squash.msg" >>"$LOG" 2>&1; then
+    SQUASH_FILES="the commit failed"
+    git reset -q --hard "$2"
+    return 1
+  fi
+}
+
+# The conclusion GitHub gives the batch check on a commit, or nothing while there is none.
+lander_check_conclusion() {
+  _cc_name=$(lander_safe_word "${SOMMELIER_BATCH_CHECK:-factory-batch}")
+  _cc_repo=${SOMMELIER_GH_REPO:-'{owner}/{repo}'}
+  gh api "repos/$_cc_repo/commits/$1/check-runs?check_name=$_cc_name&per_page=100" \
+    --jq ".check_runs | map(select(.name == \"$_cc_name\")) | sort_by(.id) | last | .conclusion // empty" 2>>"$LOG" || true
+}
+
+# lander_second_lock <refs>: pushes HEAD as landing/<batch id> and waits for GitHub to pass it.
+# Returns 0 when the check succeeded, 1 when it ended with another conclusion (SECOND_LOCK_CONCLUSION),
+# 2 when nothing could be decided (nothing was pushed to main). The landing branch goes in every case.
+lander_second_lock() {
+  _sl_sha=$(git rev-parse HEAD)
+  _sl_branch="landing/${_batch_id:-batch-$$}"
+  _sl_name=${SOMMELIER_BATCH_CHECK:-factory-batch}
+  SECOND_LOCK_CONCLUSION=""
+  if ! git push -q -f "$SOMMELIER_UPSTREAM" "HEAD:refs/heads/$_sl_branch" >>"$LOG" 2>&1; then
+    say "SECOND LOCK: could not push $_sl_branch, nothing was pushed to main, queued again: $1"
+    return 2
+  fi
+  _sl_deadline=$(( $(date +%s) + ${SOMMELIER_BATCH_CHECK_SECS:-1800} ))
+  while :; do
+    SECOND_LOCK_CONCLUSION=$(lander_check_conclusion "$_sl_sha")
+    [ -n "$SECOND_LOCK_CONCLUSION" ] && break
+    [ "$(date +%s)" -ge "$_sl_deadline" ] && break
+    sleep "${SOMMELIER_BATCH_CHECK_PAUSE:-15}"
+  done
+  git push -q "$SOMMELIER_UPSTREAM" --delete "refs/heads/$_sl_branch" >>"$LOG" 2>&1 ||
+    say "SECOND LOCK: could not delete $_sl_branch, delete it by hand"
+  case $SECOND_LOCK_CONCLUSION in
+    success) return 0 ;;
+    "")
+      say "SECOND LOCK: no answer for the check $_sl_name on $(git rev-parse --short "$_sl_sha") within ${SOMMELIER_BATCH_CHECK_SECS:-1800} s, nothing was pushed to main, queued again: $1"
+      return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
 lander_rebase_list() {
   _base_sha=$1
   _candidates=$2
@@ -227,6 +420,17 @@ lander_rebase_list() {
   REBASED_TIP=$_base_sha
   git checkout -q --detach "$_base_sha"
   for _r in $_candidates; do
+    case $_r in
+      bundle:*)
+        if lander_squash_entry "$_r" "$REBASED_TIP"; then
+          REBASED_TIP=$(git rev-parse HEAD)
+          REBASED_REFS="$REBASED_REFS $_r"
+        else
+          say "CONFLICT: $_r does not squash onto main plus the batch (files: $SQUASH_FILES), left out: its author must rebase it"
+          echo "$_r" >> "$RUNS/landing.conflict"
+        fi
+        continue ;;
+    esac
     git checkout -q -B lander-tmp "$_r" 2>>"$LOG"
     if git rebase "$REBASED_TIP" >>"$LOG" 2>&1; then
       REBASED_TIP=$(git rev-parse HEAD)
@@ -244,8 +448,12 @@ lander_rebase_list() {
 
 lander_requeue_unique() {
   _rq_ref=$1
-  if ! grep -qxF "$_rq_ref" "$Q" 2>/dev/null; then
-    echo "$_rq_ref" >> "$Q"
+  _rq_line=$_rq_ref
+  case $_rq_ref in
+    bundle:*) _rq_e=$(lander_entry_line "$_rq_ref"); [ -n "$_rq_e" ] && _rq_line=$_rq_e ;;
+  esac
+  if ! awk -v r="$_rq_ref" '$1 == r { f = 1 } END { exit !f }' "$Q" 2>/dev/null; then
+    echo "$_rq_line" >> "$Q"
   fi
 }
 
@@ -279,7 +487,7 @@ lander_find_crate_culprits() {
   CULPRIT_S=""
   CULPRIT_REST=""
   for _w in $_refs; do
-    if git diff --name-only "$base...$_w" 2>/dev/null | grep -qE "(^|/)$_crate(/|$)"; then
+    if git diff --name-only "$base...$(lander_gitref "$_w")" 2>/dev/null | grep -qE "(^|/)$_crate(/|$)"; then
       CULPRIT_S="$CULPRIT_S $_w"
     else
       CULPRIT_REST="$CULPRIT_REST $_w"
@@ -300,6 +508,14 @@ lander_land_or_split() {
   tip=$REBASED_TIP
 
   lander_verify "$_rebased"
+  if [ "$VERIFY_CODE" = 0 ] && [ "${SOMMELIER_SECOND_LOCK:-0}" = 1 ]; then
+    lander_second_lock "$_rebased"
+    case $? in
+      0) ;;
+      1) VERIFY_CODE=15; VERIFY_FAILED_AT="second lock (${SECOND_LOCK_CONCLUSION:-no conclusion})"; VERIFY_INFRA=0 ;;
+      *) for _r in $_rebased; do lander_requeue_unique "$_r"; done; return 0 ;;
+    esac
+  fi
   if [ "$VERIFY_CODE" = 0 ]; then
     if git push -q "$SOMMELIER_UPSTREAM" HEAD:main >>"$LOG" 2>&1; then
       sha=$(git rev-parse --short HEAD)
@@ -367,16 +583,26 @@ batch() {
   # Take the queue as a whole: appends that come after this go to a fresh queue file, none is lost.
   mv "$Q" "$Q.batch" && touch "$Q"
   : > "$Q.seen"
+  : > "$Q.entries"
   batch_refs=""
   batch_count=0
 
-  while IFS= read -r ref || [ -n "$ref" ]; do
-    [ -z "$ref" ] && continue
-    if ! git rev-parse -q --verify "$ref" >/dev/null 2>&1; then
-      say "queue: $ref does not exist, dropped"
-      continue
-    fi
-    full_sha=$(git rev-parse "$ref")
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    [ -z "$entry" ] && continue
+    ref=${entry%% *}
+    gref=$ref
+    case $ref in
+      bundle:*)
+        printf '%s\n' "$entry" >> "$Q.entries"
+        lander_bundle_fetch "$entry" || continue
+        gref=$BUNDLE_GREF ;;
+      *)
+        if ! git rev-parse -q --verify "$ref" >/dev/null 2>&1; then
+          say "queue: $ref does not exist, dropped"
+          continue
+        fi ;;
+    esac
+    full_sha=$(git rev-parse "$gref")
     if [ "$(git rev-list --count "$base..$full_sha")" = 0 ]; then
       say "queue: $ref is already on main, dropped"
       continue
@@ -388,8 +614,8 @@ batch() {
 
     # Guard against instructions smuggled into the tree: a branch that changes what steers agents,
     # builds or this harness is held until the coordinator has read its diff and approved that commit.
-    sha=$(git rev-parse --short "$ref")
-    risky=$(git diff --name-only "$base...$ref" | grep -E "$GUARD" | tr '\n' ' ')
+    sha=$(git rev-parse --short "$gref")
+    risky=$(git diff --name-only "$base...$gref" | grep -E "$GUARD" | tr '\n' ' ')
     if [ -n "$risky" ] &&
        ! grep -qxF "$ref $sha" "$RUNS/landing.approved" 2>/dev/null &&
        ! grep -qxF "$ref $full_sha" "$RUNS/landing.approved" 2>/dev/null; then
@@ -401,7 +627,7 @@ batch() {
       continue
     fi
 
-    if ! lander_licence_marker_scan "$base" "$ref"; then
+    if ! lander_licence_marker_scan "$base" "$gref"; then
       echo "$ref" >> "$RUNS/landing.failed"
       say "FAILED at clean-room (licence marker) for: $ref (log $LOG)"
       continue

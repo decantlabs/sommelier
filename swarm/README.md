@@ -81,6 +81,38 @@ unresolved, and collects the rest in batches. The `LANDED` and poll messages the
 short line each.
 `github-wait.sh` feeds the agent that keeps GitHub current.
 
+### Submissions from strangers and the second lock
+
+Three things were added for the public factory (`docs/factory.md` 8.5). Without them set, the lander
+behaves as above.
+
+1. **Bundle entries.** A queue line can be `bundle:<sha256> <head sha>` followed by `key=value` words
+   (`member_handle`, `member_id`, `order`, `submission`, `email`) and, last, `title=` with the rest of
+   the line. The lander downloads `<hub http address>/api/bundle/<sha256>` with `curl` and checks that the
+   SHA 256 of the file is its name. It fetches the single ref of the bundle into `refs/submissions/<sha256>`
+   with hooks off and object checks on, and checks that the head is the sha of the entry. Any mismatch puts
+   the entry in `landing.failed` with the class `content` (`fetch` when the hub did not serve the file), and
+   the rest of the batch lands. The file is removed afterwards.
+2. **One commit with credit.** A bundle entry lands as exactly one commit on the batch base. The message is
+   the title of the order and four trailers that the lander writes: `Co-authored-by:` (handle and an address
+   made from the member id, or the linked `email` of the entry), `Factory-Order:`, `Factory-Submission:` and
+   `Signed-off-by:`. Commit messages of the patch are dropped. A missing field becomes `unknown`.
+   Ordinary branch entries land as before.
+3. **The second lock.** With `SOMMELIER_SECOND_LOCK=1`, a batch that passed the local checks is pushed as
+   `landing/<batch id>` first. The lander asks GitHub through `gh` for the check `SOMMELIER_BATCH_CHECK`
+   (default `factory-batch`) on that exact commit and pushes main only when its conclusion is `success`.
+   Another conclusion fails the batch and the split logic runs. No answer within
+   `SOMMELIER_BATCH_CHECK_SECS` (default 1800) pushes nothing to main, logs one line `SECOND LOCK: no answer`
+   and queues the batch again. The `landing/` branch is deleted in every case. A ruleset on main that
+   requires the check makes this a lock that GitHub enforces, so a lander that skips it cannot push.
+
+Variables: `SOMMELIER_SECOND_LOCK` (0 or 1), `SOMMELIER_BATCH_CHECK`, `SOMMELIER_BATCH_CHECK_SECS`,
+`SOMMELIER_BATCH_CHECK_PAUSE` (seconds between asks, default 15), `SOMMELIER_GH_REPO` (`owner/name`, default the
+repository of the landing checkout), `SOMMELIER_HUB_HTTP` (default made from `SOMMELIER_URL`, else
+`SOMMELIER_LOCAL`) and `LANDER_MEMBER_DOMAIN` (the domain of the made up member address).
+The lander machine needs `curl`, and `gh` logged in with the right to read checks and push branches.
+`LANDER_DRY=1 lander.sh` prints what a bundle entry and the second lock would do.
+
 ## Quota rule
 
 When any participant runs out of quota, its open work does not wait. The participant sends `STUCK`
