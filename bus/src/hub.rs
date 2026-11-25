@@ -486,10 +486,12 @@ impl Hub {
                 msg.kind.as_str()
             ));
         }
-        if msg.kind == Kind::Fact && hub_only_topic(&msg.topic) && msg.role != Role::Hub {
+        if msg.kind == Kind::Fact
+            && msg.role != Role::Hub
+            && let Some(prefix) = hub_only_prefix(&msg.topic)
+        {
             return Err(format!(
-                "FACT topics under {}/ are written by the hub only",
-                msg.topic.split('/').next().unwrap_or_default()
+                "FACT topics under {prefix} are written by the hub only"
             ));
         }
         check_kind_limit(&self.cfg.limits, msg.kind, &msg.body)?;
@@ -620,10 +622,11 @@ impl Hub {
             }
             _ => {}
         }
-        if kind == Kind::Fact && hub_only_topic(&msg.topic) {
+        if kind == Kind::Fact
+            && let Some(prefix) = hub_only_prefix(&msg.topic)
+        {
             return Err(format!(
-                "FACT topics under {}/ are written by the hub only",
-                msg.topic.split('/').next().unwrap_or_default()
+                "FACT topics under {prefix} are written by the hub only"
             ));
         }
         check_kind_limit(&self.cfg.limits, kind, &msg.body)?;
@@ -1327,11 +1330,29 @@ impl Hub {
     }
 }
 
-/// FACT topics that only the hub itself may write: the keys, the stamps and the tiers.
-fn hub_only_topic(topic: &str) -> bool {
-    ["key/", "stamp/", "tier/"]
+/// The topic prefixes of the factory's FACTs. Only the hub itself writes them: a client FACT on one is
+/// refused in `publish_message`, and a hook may emit one only as the hub in `append_hook_message`. Each
+/// projection also checks the sender role, as the second guard. `land/bundle:` is the landing row of a
+/// submission, which reaches the queue through `land.enqueue` and its lock only.
+pub const HUB_ONLY_TOPICS: [&str; 10] = [
+    "key/",
+    "submission/",
+    "gate/",
+    "verify/",
+    "review/",
+    "report/",
+    "runorder/",
+    "stamp/",
+    "tier/",
+    "land/bundle:",
+];
+
+/// The prefix of [`HUB_ONLY_TOPICS`] that `topic` starts with.
+fn hub_only_prefix(topic: &str) -> Option<&'static str> {
+    HUB_ONLY_TOPICS
         .iter()
-        .any(|p| topic.starts_with(p))
+        .copied()
+        .find(|p| topic.starts_with(p))
 }
 
 /// What a member of `tier` asked for that it may not use, as the text for the refusal.

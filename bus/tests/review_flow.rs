@@ -742,6 +742,158 @@ fn the_first_lock_passes_when_everything_holds_and_other_refs_are_untouched() {
     assert!(e.landings().contains(&"fx/some-branch".to_string()));
 }
 
+/// A message of `from` as the projection sees it, applied to the store of the environment.
+fn apply_as(
+    e: &mut Env,
+    from: &str,
+    role: Role,
+    kind: Kind,
+    topic: &str,
+    body: Value,
+    refs: &[String],
+) {
+    let m = Message {
+        id: e.next,
+        ts: rfc3339(now_ms()),
+        from: from.into(),
+        role,
+        kind,
+        topic: topic.into(),
+        body: body.to_string(),
+        refs: refs.to_vec(),
+        to: vec![],
+    };
+    e.next += 1;
+    e.store.apply(&m).unwrap();
+    e.log.push(m);
+}
+
+#[test]
+fn a_fact_on_a_bundle_landing_row_counts_only_from_the_hub() {
+    let mut e = Env::new();
+    // A submission that never passed the lock: nothing known about it.
+    let s = sha('8');
+    let row_of = |r: &str, c: char| {
+        serde_json::to_value(sommelier::land::LandingRow {
+            ref_name: r.into(),
+            sha: c.to_string().repeat(40),
+            state: "queued".into(),
+            priority: "normal".into(),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let row = row_of(&format!("bundle:{s}"), 'd');
+    // The row named by the topic, and the row named only in the body of another topic.
+    for (from, role) in [("mallory", Role::Member), ("orch", Role::Orchestrator)] {
+        apply_as(
+            &mut e,
+            from,
+            role,
+            Kind::Fact,
+            &format!("land/bundle:{s}"),
+            row.clone(),
+            &[],
+        );
+        apply_as(
+            &mut e,
+            from,
+            role,
+            Kind::Fact,
+            "land/other",
+            row.clone(),
+            &[],
+        );
+    }
+    assert!(e.landings().is_empty(), "{:?}", e.landings());
+    // The same FACT of the hub (what land.enqueue writes after its lock) is the way in.
+    apply_as(
+        &mut e,
+        "hub",
+        Role::Hub,
+        Kind::Fact,
+        &format!("land/bundle:{s}"),
+        row,
+        &[],
+    );
+    assert_eq!(e.landings(), vec![format!("bundle:{s}")]);
+    // An ordinary branch row keeps working for any sender, as before.
+    apply_as(
+        &mut e,
+        "orch",
+        Role::Orchestrator,
+        Kind::Fact,
+        "land/fx/a",
+        row_of("fx/a", 'e'),
+        &[],
+    );
+    assert!(e.landings().contains(&"fx/a".to_string()));
+}
+
+#[test]
+fn a_ready_of_a_trusted_sender_cannot_enqueue_a_bundle_around_the_lock() {
+    let mut e = Env::new();
+    let s = sha('9');
+    let refs = [
+        format!("branch:bundle:{s}"),
+        format!("sha:{}", "f".repeat(40)),
+    ];
+    apply_as(
+        &mut e,
+        "orch",
+        Role::Orchestrator,
+        Kind::Ready,
+        "t1",
+        json!({}),
+        &refs,
+    );
+    assert!(e.landings().is_empty(), "{:?}", e.landings());
+    // A LANDED of an untrusted member does not flip a queued bundle either.
+    let ok = locked(&mut e, 'a', true, "passed", Some(("answered", "pass")));
+    enqueue(&mut e, &format!("bundle:{ok}")).unwrap();
+    let landed_refs = [
+        format!("branch:bundle:{ok}"),
+        format!("sha:{}", "c".repeat(40)),
+    ];
+    apply_as(
+        &mut e,
+        "mallory",
+        Role::Member,
+        Kind::Landed,
+        "t1",
+        json!({}),
+        &landed_refs,
+    );
+    let state = |e: &Env| {
+        sommelier::land::query_landings(e.store.connection()).unwrap()[0]
+            .state
+            .clone()
+    };
+    assert_eq!(state(&e), "queued");
+    apply_as(
+        &mut e,
+        "orch",
+        Role::Orchestrator,
+        Kind::Landed,
+        "t1",
+        json!({}),
+        &landed_refs,
+    );
+    assert_eq!(state(&e), "landed");
+    // An ordinary branch still enqueues from a READY.
+    let refs = ["branch:fx/b".to_string(), format!("sha:{}", "1".repeat(40))];
+    apply_as(
+        &mut e,
+        "orch",
+        Role::Orchestrator,
+        Kind::Ready,
+        "t2",
+        json!({}),
+        &refs,
+    );
+    assert!(e.landings().contains(&"fx/b".to_string()));
+}
+
 // ---------------------------------------------------------------------------------------------
 // The tables
 // ---------------------------------------------------------------------------------------------

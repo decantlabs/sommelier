@@ -59,6 +59,10 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("land schema error: {e}"))
 }
 
+/// The prefix of the ref of a submission in the landing queue. Such a ref reaches `LANDING` only through
+/// `land.enqueue`, which runs the first lock, and is written as a FACT of the hub.
+pub const BUNDLE_REF_PREFIX: &str = "bundle:";
+
 fn str_field(v: &Value, key: &str) -> Option<String> {
     v.get(key)
         .and_then(Value::as_str)
@@ -141,6 +145,13 @@ pub fn apply_land_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
                 if row.ref_name.is_empty() {
                     row.ref_name = msg.topic.trim_start_matches("land/").to_owned();
                 }
+                // The first lock holds for a bundle only if nobody else can write its row.
+                if (row.ref_name.starts_with(BUNDLE_REF_PREFIX)
+                    || msg.topic.starts_with(&format!("land/{BUNDLE_REF_PREFIX}")))
+                    && msg.role != Role::Hub
+                {
+                    return Ok(());
+                }
                 if row.enqueued_at == 0 {
                     row.enqueued_at = ts_sec;
                 }
@@ -184,7 +195,11 @@ pub fn apply_land_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
         Kind::Ready => {
             if is_trusted_sender(tx, msg) {
                 let (ref_name, sha, task_id) = extract_ready_ref_sha_task(msg);
-                if !ref_name.is_empty() && !sha.is_empty() {
+                // A bundle is enqueued by `land.enqueue` and its lock, never by a READY.
+                if !ref_name.is_empty()
+                    && !sha.is_empty()
+                    && !ref_name.starts_with(BUNDLE_REF_PREFIX)
+                {
                     let row = LandingRow {
                         ref_name,
                         sha,
@@ -201,7 +216,8 @@ pub fn apply_land_message(tx: &Transaction<'_>, msg: &Message) -> Result<(), Str
         }
         Kind::Landed => {
             let (ref_name, sha, _) = extract_ready_ref_sha_task(msg);
-            if !ref_name.is_empty() && !sha.is_empty() {
+            let allowed = !ref_name.starts_with(BUNDLE_REF_PREFIX) || is_trusted_sender(tx, msg);
+            if !ref_name.is_empty() && !sha.is_empty() && allowed {
                 tx.execute(
                     "UPDATE LANDING SET state = 'landed', msg_id = ?1 WHERE ref_name = ?2 AND sha = ?3",
                     params![msg.id as i64, ref_name, sha],

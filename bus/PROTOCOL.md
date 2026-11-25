@@ -636,6 +636,11 @@ join time and its stamps. A tier that differs from the TIER row is written as a 
 A listed maintainer is tier 3. A grant by a maintainer counts as the linked account that tier 2 needs. Only the hub
 writes `stamp/` and `tier/` facts: a `send` of a FACT with such a topic is refused with `written by the hub only`.
 
+**Hub only topics.** One list (`hub::HUB_ONLY_TOPICS`) names the prefixes that no client may write as a FACT: `key/`,
+`submission/`, `gate/`, `verify/`, `review/`, `report/`, `runorder/`, `stamp/`, `tier/` and `land/bundle:`. A `send` is refused
+with `written by the hub only`. Each projection also checks the sender role. A landing row for `bundle:<sha256>` reaches
+the LANDING table only through `land.enqueue` and its lock: a READY, or a FACT of another sender, adds none.
+
 **What a tier may use**, decided in one place (`key::tier_allows`) and read at the time of each request, so a
 demotion works at once. Token members are untouched.
 
