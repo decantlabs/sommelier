@@ -1325,7 +1325,6 @@ fn hooks_on_tick_projects_task_reaper_before_plan_enforce_avoids_duplicates() {
     let owner_tok = tokens.add("owner", Role::Orchestrator).unwrap();
     let _worker_tok = tokens.add("worker-a", Role::Member).unwrap();
     tokens.save(&dir.path().join("tokens.json")).unwrap();
-    let owner_member = tokens.lookup(&owner_tok).unwrap().clone();
 
     let pol_path = dir.path().join("enforce.toml");
     let source = sommelier::policy::DEFAULT_POLICY.replace("version = 1", "version = 2");

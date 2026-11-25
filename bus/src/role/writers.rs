@@ -239,6 +239,18 @@ mod tests {
     }
 
     #[test]
+    fn the_ops_of_the_task_and_land_families_have_an_answer() {
+        assert_eq!(op_who("task.stuck"), Some(OpWho::Holder));
+        assert_eq!(op_who("task.add"), Some(OpWho::Orchestrator));
+        assert_eq!(op_who("land.result"), Some(OpWho::Lander));
+        assert_eq!(op_who("land.next"), Some(OpWho::Lander));
+        assert_eq!(op_who("land.approve"), Some(OpWho::Orchestrator));
+        assert_eq!(op_who("run.register"), Some(OpWho::Own));
+        assert_eq!(op_who("pause"), Some(OpWho::Orchestrator));
+        assert_eq!(op_who("quota.report"), None);
+    }
+
+    #[test]
     fn every_hub_only_prefix_is_a_hub_topic() {
         for p in HUB_ONLY_TOPICS {
             assert_eq!(fact_writer(&format!("{p}x")), Writer::Hub, "{p}");

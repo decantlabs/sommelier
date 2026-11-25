@@ -869,3 +869,56 @@ pub fn is_slot_admissible(
     }
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::PlanMember;
+
+    fn state_with(name: &str, trust: &str, tier: Option<i64>) -> PlanState {
+        let mut s = PlanState::default();
+        s.members.insert(
+            name.to_owned(),
+            PlanMember {
+                name: name.to_owned(),
+                trust: trust.to_owned(),
+                online: true,
+                tier,
+            },
+        );
+        s
+    }
+
+    #[test]
+    fn a_key_member_at_tier_one_or_two_is_offered_work_like_a_guest() {
+        let policy = PlanPolicy::default();
+        for tier in [1, 2] {
+            let s = state_with("m1", "tier0", Some(tier));
+            assert_eq!(effective_trust(&s, "m1"), "guest");
+            assert!(trust_allows_kind(
+                &effective_trust(&s, "m1"),
+                "fix",
+                &policy
+            ));
+        }
+        // Tier 0 and no tier get nothing, a token member and the owner are as before.
+        for tier in [0, -1] {
+            let s = state_with("m1", "tier0", Some(tier));
+            assert_eq!(effective_trust(&s, "m1"), "tier0");
+            assert!(!trust_allows_kind(
+                &effective_trust(&s, "m1"),
+                "fix",
+                &policy
+            ));
+        }
+        assert_eq!(
+            effective_trust(&state_with("g", "guest", Some(2)), "g"),
+            "guest"
+        );
+        assert_eq!(
+            effective_trust(&state_with("o", "owner", Some(3)), "o"),
+            "owner"
+        );
+        assert_eq!(effective_trust(&PlanState::default(), "nobody"), "owner");
+    }
+}
