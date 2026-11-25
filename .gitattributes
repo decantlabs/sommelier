@@ -6,3 +6,8 @@
 *.svg text
 *.png binary
 *.ico binary
+*.yml text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+bus/tests/fixtures/** text eol=lf
+templates/** text eol=lf
