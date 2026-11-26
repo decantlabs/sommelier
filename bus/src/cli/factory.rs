@@ -154,5 +154,8 @@ fn status(data: &PathBuf) -> Result<ExitCode, String> {
     if orders.is_empty() {
         println!("  none");
     }
+    for l in crate::report::status_lines(conn) {
+        println!("  {}", crate::cli::plain::plain(&l));
+    }
     Ok(exit::code(exit::OK))
 }

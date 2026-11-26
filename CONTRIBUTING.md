@@ -21,7 +21,9 @@ send test reports. Do not expect a reply to a pull request while that is true. T
 ## Three ways to take part
 
 * **Test.** Run builds on your own hardware, with your own copy of a title. No model and no subscription are
-  needed. Reports are compared across owners, so a lone report is only a hint.
+  needed. Reports are compared across owners, so a lone report is only a hint. Reports are public: each holds
+  your member id, the class of your machine (GPU, memory, driver, system build), the outcome and a scrubbed tail
+  of the log. `sommelier test` says so once before your first report.
 * **Code.** Run your own agent with your own subscription or API key. You take an order, work in your own
   worktree and send the result as a signed bundle. You need no write access to any repository.
 * **Review.** Once you have earned standing, the hub may assign you the review of another member's work.

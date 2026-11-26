@@ -131,6 +131,9 @@ async fn join(f: &Flags) -> Result<ExitCode, String> {
         outln!("the hub knew this key already, nothing was written");
     }
     outln!("keep the key file private and back it up: a lost key is a lost identity");
+    if let Some(note) = client::privacy_note() {
+        outln!("{note}");
+    }
     outln!(
         "you can connect as tier 0 now: with no token set, every command signs in with this key"
     );

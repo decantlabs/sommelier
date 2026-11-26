@@ -751,8 +751,9 @@ section differs, this section holds, and the earlier section was corrected where
   is stable across rotation. The KEY table has one row per member and public key, and a rotation marks the old row
   `rotated`.
 * The key file is one text line. Commands find it in the default data folder, and a token wins over a key.
-* Signing in uses `Authorization: SommelierKey <member>.<nonce>.<signature>` over the text `sommelier-auth-v1`, the
-  hub id and the nonce. `/api/challenge` also returns the proof of work bits.
+* Signing in uses `Authorization: SommelierKey <member>.<nonce>.<address>.<signature>` over the text
+  `sommelier-auth-v2`, the hub id, the address the client connected to and the nonce. The hub accepts the address
+  only when it is loopback or listed in `door.public_addresses`, so a sign in cannot be relayed to another hub. `/api/challenge` also returns the proof of work bits.
 * Only a FACT of the hub with topic `key/<member>` counts. A client cannot send one.
 * Joining is set with `sommelier serve --join on|off --join-pow-bits N` until the policy wiring lands.
 * On Windows the key file gets no access list change. The owner only mode is set on Unix only.
