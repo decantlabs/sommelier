@@ -7,6 +7,10 @@ use serde_json::{Value, json};
 /// Names of the four task-queue tables owned by `TaskModule` (section 3, 10.3).
 pub const TASK_TABLES: [&str; 5] = ["TASK", "LEASE", "OFFER", "CHECKPOINT", "TASK_ORDER"];
 
+/// The feature of an order, when it names one. Its own table, like `TASK_ORDER`, so that a state.db
+/// made before the feature map opens unchanged: a task without a row here has no feature.
+pub const TASK_FEATURE_TABLE: &str = "TASK_FEATURE";
+
 /// SQLite DDL for `TASK`, `LEASE`, `OFFER`, and `CHECKPOINT` in `state.db`.
 pub const TASK_SCHEMA_SQL: &str = "\
 CREATE TABLE IF NOT EXISTS TASK (
@@ -50,6 +54,11 @@ CREATE TABLE IF NOT EXISTS TASK_ORDER (
     min_trust INTEGER NOT NULL DEFAULT 2,
     review TEXT NOT NULL DEFAULT 'default',
     credit TEXT NOT NULL DEFAULT 'handle'
+);
+
+CREATE TABLE IF NOT EXISTS TASK_FEATURE (
+    task_id TEXT PRIMARY KEY,
+    feature TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS LEASE (
@@ -144,6 +153,9 @@ pub struct TaskRow {
     /// How the commit names the member: `handle` or `none`.
     #[serde(default = "default_credit")]
     pub credit: String,
+    /// The feature of the feature map that the order is about. Old log lines have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature: Option<String>,
 }
 
 pub const DEFAULT_RISK: &str = "normal";
@@ -201,6 +213,7 @@ impl Default for TaskRow {
             min_trust: default_min_trust(),
             review: default_review(),
             credit: default_credit(),
+            feature: None,
         }
     }
 }
@@ -352,6 +365,21 @@ pub fn upsert_task_tx(tx: &Transaction<'_>, row: &TaskRow) -> Result<(), String>
         ],
     )
     .map_err(|e| format!("upsert TASK_ORDER failed: {e}"))?;
+    match row.feature.as_deref().filter(|f| !f.is_empty()) {
+        Some(f) => tx
+            .execute(
+                "INSERT INTO TASK_FEATURE (task_id, feature) VALUES (?1, ?2)
+                 ON CONFLICT(task_id) DO UPDATE SET feature = excluded.feature",
+                params![row.id, f],
+            )
+            .map_err(|e| format!("upsert TASK_FEATURE failed: {e}"))?,
+        None => tx
+            .execute(
+                "DELETE FROM TASK_FEATURE WHERE task_id = ?1",
+                params![row.id],
+            )
+            .map_err(|e| format!("clear TASK_FEATURE failed: {e}"))?,
+    };
     Ok(())
 }
 
@@ -390,9 +418,34 @@ fn order_fields(
     Ok(out)
 }
 
+/// The feature of every task that names one, keyed by task id.
+fn feature_fields(
+    conn: &Connection,
+    only: Option<&str>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT task_id, feature FROM TASK_FEATURE WHERE ?1 IS NULL OR task_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![only], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let (id, f) = row.map_err(|e| e.to_string())?;
+        out.insert(id, f);
+    }
+    Ok(out)
+}
+
 /// Puts the order fields of the side table into rows read from `TASK`.
 fn fill_orders(conn: &Connection, rows: &mut [TaskRow], only: Option<&str>) -> Result<(), String> {
     let mut fields = order_fields(conn, only)?;
+    let features = feature_fields(conn, only)?;
+    for row in rows.iter_mut() {
+        row.feature = features.get(&row.id).cloned();
+    }
     for row in rows {
         if let Some((risk, min_trust, review, credit)) = fields.remove(&row.id) {
             row.risk = risk;
@@ -554,6 +607,7 @@ fn task_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         min_trust: default_min_trust(),
         review: default_review(),
         credit: default_credit(),
+        feature: None,
     })
 }
 

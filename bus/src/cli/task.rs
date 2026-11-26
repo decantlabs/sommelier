@@ -14,7 +14,9 @@ use crate::{errln, outln};
 
 const USAGE: &str = "\
 usage:
-  sommelier task add --kind K --title T --scope G --done-when D --brief FILE [--id ID] [--priority P] [--after ID] [--branch B] [--accepts C] [--size S] [--base SHA] [--risk low|normal] [--min-trust 0-3] [--review RULE] [--credit handle|none] [--prior-art] [--brief-sha256 H] [--json]
+  sommelier task add --kind K --title T [--scope G] [--done-when D] [--feature ID] --brief FILE [--id ID] [--priority P] [--after ID] [--branch B] [--accepts C] [--size S] [--base SHA] [--risk low|normal] [--min-trust 0-3] [--review RULE] [--credit handle|none] [--prior-art] [--brief-sha256 H] [--json]
+  Without --scope and --done-when an order for a --feature takes the paths of the feature as its scope and
+  the run that proves it as its done condition. Without --feature both are required.
   sommelier task list [--state S] [--mine] [--json]
   sommelier task show ID [--json]
   sommelier task cancel ID [--reason TEXT] [--json]
@@ -158,13 +160,17 @@ fn order_fields(a: &ParsedArgs) -> Result<Value, String> {
 
 /// One line with the order fields of a task row.
 fn order_line(t: &Value) -> String {
-    format!(
+    let mut line = format!(
         "risk={} min_trust={} review={} credit={}",
         t["risk"].as_str().unwrap_or("normal"),
         t["min_trust"].as_u64().unwrap_or(2),
         t["review"].as_str().unwrap_or("default"),
         t["credit"].as_str().unwrap_or("handle"),
-    )
+    );
+    if let Some(f) = t["feature"].as_str().filter(|f| !f.is_empty()) {
+        line.push_str(&format!(" feature={f}"));
+    }
+    line
 }
 
 fn slug_id(title: &str) -> String {
@@ -228,6 +234,7 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
             "min-trust",
             "review",
             "credit",
+            "feature",
             "url",
             "token",
             "token-file",
@@ -258,8 +265,18 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
     let opts = client_opts(&a)?;
     let kind = a.get("kind").ok_or("--kind is required")?;
     let title = a.get("title").ok_or("--title is required")?;
-    let scope = a.get("scope").ok_or("--scope is required")?;
-    let done_when = a.get("done-when").ok_or("--done-when is required")?;
+    let feature = a.get("feature").filter(|f| !f.is_empty());
+    // With a feature the hub fills a scope and a done condition that were not given.
+    let scope = match (a.get("scope"), feature) {
+        (Some(s), _) => Some(s),
+        (None, Some(_)) => None,
+        (None, None) => return Err("--scope is required (or name a --feature)".into()),
+    };
+    let done_when = match (a.get("done-when"), feature) {
+        (Some(d), _) => Some(d),
+        (None, Some(_)) => None,
+        (None, None) => return Err("--done-when is required (or name a --feature)".into()),
+    };
     let brief_path = a.get("brief").ok_or("--brief FILE is required")?;
     let id = a
         .get("id")
@@ -291,8 +308,6 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
         "id": id,
         "kind": kind,
         "title": title,
-        "scope": scope,
-        "done_when": done_when,
         "priority": a.get("priority").unwrap_or("normal"),
         "deps": a.all("after"),
         "branch": branch,
@@ -303,6 +318,15 @@ async fn cmd_add(raw: &[String]) -> Result<ExitCode, String> {
     });
     if let (Some(p), Some(o)) = (payload.as_object_mut(), order.as_object()) {
         p.extend(o.clone());
+    }
+    if let Some(scope) = scope {
+        payload["scope"] = json!(scope);
+    }
+    if let Some(done_when) = done_when {
+        payload["done_when"] = json!(done_when);
+    }
+    if let Some(feature) = feature {
+        payload["feature"] = json!(feature);
     }
     if let Some(size) = a.get("size") {
         payload["size"] = json!(size);
@@ -387,8 +411,13 @@ async fn cmd_list(raw: &[String]) -> Result<ExitCode, String> {
             outln!("no tasks");
         } else {
             for t in tasks {
+                let feature = t["feature"]
+                    .as_str()
+                    .filter(|f| !f.is_empty())
+                    .map(|f| format!(", feature {f}"))
+                    .unwrap_or_default();
                 outln!(
-                    "{} [{}] {} ({}, score {}, risk {}, min_trust {})",
+                    "{} [{}] {} ({}, score {}, risk {}, min_trust {}{})",
                     t["id"].as_str().unwrap_or("?"),
                     t["state"].as_str().unwrap_or("?"),
                     t["title"].as_str().unwrap_or(""),
@@ -396,6 +425,7 @@ async fn cmd_list(raw: &[String]) -> Result<ExitCode, String> {
                     t["score"].as_i64().unwrap_or(0),
                     t["risk"].as_str().unwrap_or("normal"),
                     t["min_trust"].as_u64().unwrap_or(2),
+                    feature,
                 );
             }
         }
