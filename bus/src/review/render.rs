@@ -67,3 +67,84 @@ pub fn diff_text(diff: &ParsedDiff) -> String {
     }
     out
 }
+
+/// The order text of a task for the reviewer: title, scope and done condition. When the order names a
+/// feature the text starts with the feature id, its title and its `how` from the feature map. Every
+/// piece passes through [`escape_line`] like the rest of the prompt. An order without a feature reads
+/// exactly as it always did.
+pub fn order_text(t: &crate::task::TaskRow, map: Option<&crate::feature::FeatureMap>) -> String {
+    let mut out = String::new();
+    if let Some(id) = t.feature.as_deref().filter(|f| !f.is_empty()) {
+        out.push_str(&format!("feature: {}", escape_line(id)));
+        if let Some(f) = map.and_then(|m| m.get(id)) {
+            out.push_str(&format!(" ({})", escape_line(&f.title)));
+            out.push('\n');
+            if let Some(how) = &f.how {
+                out.push_str(&format!("how to reach it: {}\n", escape_line(how)));
+            }
+        } else {
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!(
+        "task: {}\ntitle: {}\nscope: {}\ndone when: {}\n",
+        escape_line(&t.id),
+        escape_line(&t.title),
+        escape_line(&t.scope),
+        escape_line(&t.done_when)
+    ));
+    out
+}
+
+#[cfg(test)]
+mod order_text_tests {
+    use super::*;
+    use crate::feature::FeatureMap;
+    use crate::task::TaskRow;
+
+    fn map() -> FeatureMap {
+        FeatureMap::parse(
+            "version = 1\n[[area]]\nid = \"g\"\ntitle = \"G\"\n[[feature]]\nid = \"g.one\"\ntitle = \"Frames reach the window\"\narea = \"g\"\npaths = [\"a/**\"]\nhow = \"Start it.\"\n",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_order_without_a_feature_reads_as_before() {
+        let t = TaskRow {
+            id: "t1".into(),
+            title: "T".into(),
+            scope: "a/**".into(),
+            done_when: "done".into(),
+            ..TaskRow::default()
+        };
+        assert_eq!(
+            order_text(&t, None),
+            "task: t1\ntitle: T\nscope: a/**\ndone when: done\n"
+        );
+    }
+
+    #[test]
+    fn the_feature_comes_first_and_is_escaped() {
+        let t = TaskRow {
+            id: "t1".into(),
+            title: "T".into(),
+            feature: Some("g.one".into()),
+            ..TaskRow::default()
+        };
+        let text = order_text(&t, Some(&map()));
+        assert!(
+            text.starts_with(
+                "feature: g.one (Frames reach the window)\nhow to reach it: Start it.\ntask: t1\n"
+            ),
+            "{text}"
+        );
+        // An id that is not in the map (the map changed) is still shown, escaped, and nothing more.
+        let odd = TaskRow {
+            feature: Some("g.\u{202e}x".into()),
+            ..t
+        };
+        let text = order_text(&odd, Some(&map()));
+        assert!(text.starts_with("feature: g.\\u{202e}x\ntask:"), "{text}");
+    }
+}
