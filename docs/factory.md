@@ -740,6 +740,68 @@ F4.
 
 ---
 
+## Feature map
+
+The idea comes from a talk by the Grok bot team. A feature map is a sitemap of what the product can do from the
+user's point of view and how to reach it. It gives agents and people one vocabulary, and it lets an agent verify a
+change by exercising a feature instead of guessing. For Sommelier it also eases the bottleneck of 16.9: an order
+that names a feature gets its scope and its proof from the map and not from free text.
+
+**The file.** One file per project, `features.toml`, kept in the project repository. The hub reads it from the
+path in the `--factory` file, `[features] file = "<path>"`. Without that key the part is off and the hub behaves as
+before. The file is TOML and every table refuses unknown keys. `swarm/features.example.toml` is a complete example.
+
+```toml
+version = 1
+[[area]]                         # groups features, an epic for planning and the dashboard
+id = "graphics"
+title = "Graphics"
+[[feature]]
+id = "graphics.present"          # lower case, digits, `.` and `_`, 3 to 64 characters, starts with its area and a dot
+title = "Frames reach the window"
+area = "graphics"
+paths = ["crates/gpu/src/present/**"]   # the code that carries it, gate globs, at least one
+depends = ["graphics.device"]    # optional
+how = "Start the title and wait for the first frame."   # optional, one line
+[[feature.proof]]                # optional, the run that proves it
+profile = "title-a"
+scenario = "boot"
+milestone = "first_present"
+```
+
+The loader refuses a file with one line that names the entry. It checks that ids are unique and well formed, that
+every `area` and `depends` exists, that `depends` has no cycle, that the globs are plain relative paths for the
+gate matcher, that there are at most 2000 features and that `title` and `how` are plain text of at most 200
+characters. A proof may name a profile that the hub cannot see, because profiles live on tester machines.
+`sommelier feature check --profiles DIR` lists the proofs whose profile, scenario or milestone is not in DIR.
+The state of a feature is never in the file. It is derived.
+
+**Reload.** The hub reads the file at start and looks at its time stamp on every tick. A new file that fails the
+loader is not used: the hub keeps the old map and raises one alert, `FEATURES_INVALID`, with the first refusal line.
+A good file closes the alert.
+
+**Orders.** `sommelier task add --feature ID` needs a feature of the map. Without `--scope` the scope is the paths
+of the feature. Without `--done-when` and with proofs, the done condition names the runs, for example
+`proof: title-a boot first_present`. An explicit scope or done condition wins. The risk rule runs on the scope as
+before. A run order (`test.order`) may name a feature too.
+
+**Gate.** For an order that names a feature the gate `feature_scope` looks at every changed path. A path outside the
+feature and inside another feature raises the risk and names the other feature. A path inside no feature is a note.
+The gate `scope` stays the hard limit.
+
+**Matrix.** `/api/state` gains `features`. Per feature it gives the area, the title, the open orders (tasks and run
+orders) and the state for each machine key. The state is derived when the state is read, never stored. The cell of a
+proof is the matrix cell of its profile and scenario at the newest build. A feature `works` for a machine key when
+every proof works there, `fails` when any proof fails and is `unknown` otherwise.
+
+**Review.** The order text a reviewer sees starts with the feature id, its title and its `how`. They pass through
+the same escaping as all other text of the prompt.
+
+**Commands.** `sommelier feature list`, `show`, `check` and `touching`. `check` runs the loader offline and exits 3
+on a refusal.
+
+---
+
 ## 17. Decisions taken while building
 
 Taken while building the libraries of wave 1, from the workers' reports and two security reviews. Where an earlier
@@ -867,6 +929,9 @@ section differs, this section holds, and the earlier section was corrected where
 * The workflows were never run. `templates/workflows/README.md` lists 14 points to check against the live
   documentation before first use.
 * The `candidate` channel of 9.2 needs a second trigger in the release workflow. It is not built.
+
+* The feature map (section "Feature map") keeps its status out of the file. The state of a feature is derived from
+  matrix cells at read time. A hub whose `--factory` file has no `[features] file` adds nothing to `/api/state`.
 
 ### Repository hygiene
 

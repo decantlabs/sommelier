@@ -738,3 +738,34 @@ of tier 2 alone do not either.
 member's row `tier`, `reasons`, `missing` (what the next tier still needs) and `open_penalties` (`id` and `kind`,
 the ids that `stamp.clear` takes). `sommelier standing [member]` prints it, `standing grant|clear|revert|intent`
 sends the requests above.
+
+## 16. Feature map
+
+A hub whose `--factory` file has `[features] file = "<path>"` reads a feature file (`docs/factory.md`, section
+"Feature map") and checks its time stamp on every tick. Without the key none of the following exists.
+
+**`feature` on orders.** `task.add` takes an optional `feature`, the id of a feature of the map. An id that is not
+in the map, or a hub without a map, answers an error line. When `scope` is missing it becomes the paths of the
+feature, joined by commas. When `done_when` is missing and the feature has proofs it becomes
+`proof: <profile> <scenario> <milestone>` for each proof, joined by `, `. A given `scope` or `done_when` is kept.
+The task row in `task.add`, `task.show`, `task.list` and `/api/state` `tasks` has `feature` when it is set and no
+such key when it is not. A log line from before has none and replays to none.
+
+**`feature` on run orders.** `test.order` takes an optional `feature` with the same check, and answers it back.
+The first FACT `runorder/<id>` carries `"feature"` in its body. Later FACTs of the order do not repeat it.
+
+**`/api/state` `features`.** An array, in the order of the file, present only on a hub with a map:
+
+```json
+{"id": "graphics.present", "area": "graphics", "title": "Frames reach the window",
+ "open_orders": 2, "open_tasks": 1, "open_runs": 1,
+ "state": {"windows/rtx 4080": "works", "windows/rx 7900": "fails"}}
+```
+
+`open_tasks` counts orders of the task queue that are not closed or cancelled, `open_runs` counts open run orders.
+`state` maps a machine key to `works`, `fails` or `unknown`, derived from the cells of the proofs when the state is
+read. A feature without a proof, or whose proofs never ran, has an empty `state`.
+
+**Alert `FEATURES_INVALID`.** Key `map`, severity `warn`. It opens once when a new version of the file fails the
+loader, with the first refusal line in `text`, and the hub keeps the old map. It closes when the file is good again.
+The same refusal does not raise it twice.
