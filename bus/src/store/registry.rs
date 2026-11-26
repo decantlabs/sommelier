@@ -64,6 +64,7 @@ impl ModuleRegistry {
                 Box::new(crate::report::ReportModule),
                 Box::new(crate::intake::IntakeModule),
                 Box::new(crate::stamp::tier_table::TierModule),
+                Box::new(crate::feature::store::FeatureModule),
             ],
         }
     }

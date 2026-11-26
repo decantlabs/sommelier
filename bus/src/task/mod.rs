@@ -195,6 +195,11 @@ fn merge_task_fields(row: &mut TaskRow, src: &Value) {
     {
         row.credit = s;
     }
+    if let Some(s) = str_field(src, "feature")
+        && !s.is_empty()
+    {
+        row.feature = Some(s);
+    }
     if let Some(s) = str_field(src, "created_by") {
         row.created_by = s;
     }
@@ -371,11 +376,51 @@ pub fn build_task_api(
 pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     let now_sec = now_ms / 1000;
     let started = *HUB_START_SEC.get_or_init(|| now_sec);
-    hub.with_store(|store| {
-        reap_leases_and_offers(store.connection(), now_sec, started, LeaseTimers::default())
-            .unwrap_or_default()
-    })
-    .unwrap_or_default()
+    let mut msgs = hub
+        .with_store(|store| {
+            reap_leases_and_offers(store.connection(), now_sec, started, LeaseTimers::default())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    // The feature map: look at the file and raise or close FEATURES_INVALID. Nothing without a file.
+    msgs.extend(crate::feature::registry::on_tick(
+        &hub.config().data_dir,
+        now_ms,
+    ));
+    msgs
+}
+
+/// Applies the feature of a new order: the feature must exist in the map of the hub. A scope the caller
+/// did not give is the paths of the feature, a done condition the caller did not give names the runs that
+/// prove it. An explicit scope or done condition always wins.
+fn settle_feature(
+    row: &mut TaskRow,
+    body: &Value,
+    data_dir: &std::path::Path,
+) -> Result<(), String> {
+    let Some(id) = str_field(body, "feature").filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let map = crate::feature::registry::need(data_dir)?;
+    if map.get(&id).is_none() {
+        return Err(format!(
+            "feature `{}` is not in the feature map of this hub",
+            crate::feature::clip(&id)
+        ));
+    }
+    let changed = row.feature.as_deref() != Some(id.as_str());
+    let given = |f: &str| str_field(body, f).is_some_and(|s| !s.trim().is_empty());
+    if !given("scope") && (changed || row.scope.trim().is_empty()) {
+        row.scope = map.scope_text(&id);
+    }
+    if !given("done_when")
+        && (changed || row.done_when.trim().is_empty())
+        && let Some(d) = map.done_text(&id)
+    {
+        row.done_when = d;
+    }
+    row.feature = Some(id);
+    Ok(())
 }
 
 /// Decides the order fields of a new or replaced order after the body was merged. The risk is
@@ -472,6 +517,7 @@ pub fn on_op(
                 ..TaskRow::default()
             });
             merge_task_fields(&mut row, body);
+            settle_feature(&mut row, body, &ctx.config().data_dir)?;
             let notes = settle_order_fields(&mut row, body, &risk::default_hold_paths())?;
             if !row.brief_sha256.is_empty()
                 && (row.brief_sha256.len() != 64

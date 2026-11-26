@@ -1,0 +1,128 @@
+# Example feature map of a generic game development kit (GDK) layer.
+#
+# One file like this lives in the PROJECT repository, usually `features.toml` at its root. The hub reads
+# it from the path in the [features] table of the --factory file (see factory.example.toml).
+#
+# Every path, crate name, profile, scenario and milestone below is made up but plausible. Replace them
+# with the ones of your project. No game and no publisher is named here.
+#
+# Check a file offline, and its proofs against a folder of title profiles:
+#   sommelier feature check --file features.toml --profiles profiles/
+#
+# The status of a feature is not written here. The hub derives it from the matrix cells of its proofs.
+
+version = 1
+
+# An area groups features: an epic for planning and the dashboard.
+[[area]]
+id = "graphics"
+title = "Graphics"
+
+[[area]]
+id = "media"
+title = "Audio and input"
+
+[[area]]
+id = "platform"
+title = "Platform services"
+
+# A feature id is stable: lower case letters, digits, `_` and `.`, 3 to 64 characters, and it starts with
+# the id of its area and a dot. `paths` are gate globs of the code that carries the feature, at least one.
+# `depends` lists features that must work first. `how` says in one line how to reach the feature.
+# A `[[feature.proof]]` names the run that proves it: a title profile, a scenario of it and a milestone
+# of that scenario. Profiles live on tester machines, the hub does not need them.
+
+[[feature]]
+id = "graphics.device"
+title = "A graphics device starts"
+area = "graphics"
+paths = ["crates/gdk-gpu/src/device/**", "crates/gdk-gpu/src/adapter.rs"]
+how = "Start the title and wait for the device line in the log."
+
+[[feature.proof]]
+profile = "title-a"
+scenario = "boot"
+milestone = "device_created"
+
+[[feature]]
+id = "graphics.present"
+title = "Frames reach the window"
+area = "graphics"
+paths = ["crates/gdk-gpu/src/present/**"]
+depends = ["graphics.device"]
+how = "Start the title and wait for the first frame."
+
+[[feature.proof]]
+profile = "title-a"
+scenario = "boot"
+milestone = "first_present"
+
+[[feature]]
+id = "graphics.shader_translation"
+title = "Shaders are translated and compile"
+area = "graphics"
+paths = ["crates/gdk-shader/**", "tools/shader-cache/**"]
+depends = ["graphics.device"]
+how = "Start the title with an empty shader cache and wait for the menu to draw."
+
+[[feature.proof]]
+profile = "title-a"
+scenario = "boot"
+milestone = "shaders_ready"
+
+[[feature]]
+id = "graphics.texture_streaming"
+title = "Textures stream in while the scene runs"
+area = "graphics"
+paths = ["crates/gdk-gpu/src/texture/**", "crates/gdk-io/src/stream.rs"]
+depends = ["graphics.present", "platform.file_io"]
+how = "Load a scene and look at the first streamed texture."
+
+[[feature.proof]]
+profile = "title-a"
+scenario = "scene_load"
+milestone = "textures_resident"
+
+[[feature]]
+id = "media.audio_playback"
+title = "Sound plays without gaps"
+area = "media"
+paths = ["crates/gdk-audio/**"]
+how = "Start the title and listen to the menu music for ten seconds."
+
+[[feature.proof]]
+profile = "title-a"
+scenario = "boot"
+milestone = "audio_started"
+
+[[feature]]
+id = "media.input"
+title = "Keyboard and gamepad reach the title"
+area = "media"
+paths = ["crates/gdk-input/**"]
+how = "Press a key at the menu and watch the selection move."
+
+[[feature.proof]]
+profile = "title-a"
+scenario = "menu"
+milestone = "input_seen"
+
+[[feature]]
+id = "platform.file_io"
+title = "The title reads and writes its files"
+area = "platform"
+paths = ["crates/gdk-io/**"]
+how = "Start the title and wait for the content index to load."
+
+[[feature.proof]]
+profile = "title-a"
+scenario = "boot"
+milestone = "content_index"
+
+[[feature]]
+id = "platform.save_data"
+title = "Save data is written and read back"
+area = "platform"
+paths = ["crates/gdk-save/**"]
+depends = ["platform.file_io"]
+how = "Save at the menu, restart and load the save."

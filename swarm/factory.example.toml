@@ -66,6 +66,13 @@ order_ttl_secs = 604800
 # Most open orders at one time. Default 200.
 max_open_orders = 200
 
+[features]
+# The feature map: a file in the project repository that names what the product can do, which code
+# carries it and which run proves it. Orders, gates, the matrix and the review read it.
+# Without `file` the part is off. The hub rereads the file when its time stamp changes. A broken new
+# file keeps the old map and raises the alert FEATURES_INVALID once. See swarm/features.example.toml.
+# file = "/srv/project/features.toml"
+
 [door]
 # The front door. There is no `enabled`: a key left out keeps the default of the door.
 # A header that carries the client address behind a tunnel. Honoured only for a loopback peer.

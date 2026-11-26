@@ -7,6 +7,7 @@ pub mod alerts;
 pub mod doctor;
 pub mod drill;
 pub mod factory;
+pub mod feature;
 pub mod guide;
 pub mod handover;
 pub mod hello;
@@ -61,6 +62,7 @@ pub async fn dispatch(cmd: &str, args: &[String]) -> Option<Result<ExitCode, Str
         "verify" => Some(verify::run(args).await),
         "factory" | "op" => Some(factory::run(cmd, args).await),
         "test" => Some(test::run(args).await),
+        "feature" => Some(feature::run(args).await),
         "standing" => Some(standing::run(args).await),
         _ => None,
     }

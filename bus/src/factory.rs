@@ -26,6 +26,7 @@ pub struct FactoryFile {
     pub stamp: StampFile,
     pub test: TestFile,
     pub door: DoorFile,
+    pub features: FeaturesFile,
 }
 
 /// `[join]`: whether new keys may join. The proof of work comes from the policy.
@@ -97,6 +98,14 @@ pub struct TestFile {
     pub hand_hold_secs: Option<u64>,
     pub order_ttl_secs: Option<u64>,
     pub max_open_orders: Option<usize>,
+}
+
+/// `[features]`: the feature map. Without `file` the part is off.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeaturesFile {
+    /// The path of `features.toml` of the project. The hub rereads it when its time stamp changes.
+    pub file: Option<PathBuf>,
 }
 
 /// `[door]`: the front door. No `enabled`: every key left out keeps the default of the door.
@@ -180,6 +189,8 @@ pub struct Applied {
     pub stamp: bool,
     pub test: bool,
     pub door: bool,
+    /// The feature map is on: a file is named in `[features]`.
+    pub features: bool,
     /// Names of the parts that the file enables and a policy switch turned off.
     pub vetoed: Vec<&'static str>,
 }
@@ -204,7 +215,12 @@ impl Applied {
             one("test", self.test),
             one("door", self.door),
         ];
-        format!("factory: {}", parts.join(", "))
+        let mut line = format!("factory: {}", parts.join(", "));
+        // Named only when on, so the line of a hub without a feature file reads as before.
+        if self.features {
+            line.push_str(", features on");
+        }
+        line
     }
 }
 
@@ -407,6 +423,16 @@ pub fn apply(
     }
     door.secret_file = d.secret_file.clone();
     out.door = d.is_set();
+
+    // features: the file is read here and again whenever its time stamp changes. A file that is
+    // broken at start does not stop the hub: it starts without a map and raises FEATURES_INVALID.
+    match &file.features.file {
+        Some(path) => {
+            crate::feature::registry::configure(&cfg.data_dir, path);
+            out.features = true;
+        }
+        None => crate::feature::registry::clear(&cfg.data_dir),
+    }
     Ok(out)
 }
 
@@ -622,5 +648,45 @@ mod tests {
         apply(&mut cfg, &FactoryFile::default(), &rules, false).unwrap();
         assert_eq!(cfg.review.rule.reviewers[0], 2);
         assert_eq!(cfg.review.audit_share, 0.5);
+    }
+
+    #[test]
+    fn the_features_table_names_the_file_and_leaves_the_line_alone_when_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let map = dir.path().join("features.toml");
+        std::fs::write(
+            &map,
+            "version = 1
+[[area]]
+id = \"a\"
+title = \"A\"
+",
+        )
+        .unwrap();
+        let mut cfg = HubConfig::new(&data);
+        let off = apply(&mut cfg, &FactoryFile::default(), &defaults(), false).unwrap();
+        assert!(!off.features && !off.line().contains("features"));
+        assert!(!crate::feature::registry::is_on(&data));
+
+        let file = parse(&format!(
+            "[features]
+file = {:?}
+",
+            map.display().to_string()
+        ))
+        .unwrap();
+        let on = apply(&mut cfg, &file, &defaults(), false).unwrap();
+        assert!(on.features && on.line().ends_with(", features on"));
+        assert!(crate::feature::registry::is_on(&data));
+        assert!(
+            parse(
+                "[features]
+fiel = \"x\"
+"
+            )
+            .is_err()
+        );
+        crate::feature::registry::clear(&data);
     }
 }

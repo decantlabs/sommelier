@@ -6,7 +6,9 @@
 
 use super::diff::{ChangeKind, FileChange, FileMode, ParsedDiff};
 use super::glob::any_match;
-use super::{DeltaEntry, Finding, GateRules, NamedPattern, OrderView, Risk, Severity};
+use super::{
+    DeltaEntry, FeatureScope, Finding, GateRules, NamedPattern, OrderView, Risk, Severity,
+};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -535,6 +537,67 @@ pub fn scope(diff: &ParsedDiff, order: &OrderView) -> Vec<Finding> {
                 "scope",
                 Some(p),
                 format!("commit {n} touches a path outside the scope of the order"),
+            ));
+        }
+    }
+    out
+}
+
+/// Gate `feature_scope`: the order names a feature. A changed path outside the paths of that feature
+/// and inside the paths of another feature raises the risk and names the other feature. A changed path
+/// outside every feature is a note. The scope gate stays the hard limit.
+pub fn feature_scope(diff: &ParsedDiff, fs: &FeatureScope) -> Vec<Finding> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut paths: Vec<&str> = Vec::new();
+    for f in &diff.files {
+        for p in paths_of(f) {
+            if seen.insert(p) {
+                paths.push(p);
+            }
+        }
+    }
+    for (_, p) in commit_only_paths(diff) {
+        if seen.insert(p) {
+            paths.push(p);
+        }
+    }
+    let mut out = Vec::new();
+    for p in paths {
+        if any_match(&fs.paths, p, false) {
+            continue;
+        }
+        let owners: Vec<&str> = fs
+            .others
+            .iter()
+            .filter(|(_, globs)| any_match(globs, p, false))
+            .map(|(id, _)| id.as_str())
+            .collect();
+        if owners.is_empty() {
+            out.push(finding(
+                "feature_scope",
+                Severity::Note,
+                Some(p),
+                None,
+                "the path belongs to no feature of the map".into(),
+            ));
+        } else {
+            let shown: Vec<String> = owners.iter().take(3).map(|o| clip(o)).collect();
+            let more = owners.len().saturating_sub(3);
+            let tail = if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            };
+            out.push(finding(
+                "feature_scope",
+                Severity::Raise,
+                Some(p),
+                None,
+                format!(
+                    "the path is outside feature {} and inside feature {}{tail}",
+                    clip(&fs.feature),
+                    shown.join(", ")
+                ),
             ));
         }
     }
