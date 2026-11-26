@@ -93,7 +93,7 @@ $data = "$env:LOCALAPPDATA\sommelier"
 |---|---|---|---|
 | `orchestrator` | everything | every kind | The only role that may send `TASK`. May `RELEASE` a claim held by someone else. |
 | `member` | everything | every kind except `TASK` | Releases only its own claims. |
-| `observer` | everything | nothing | The only role whose token may travel in the URL (`?token=`), for plain WebSocket monitors and dashboards. |
+| `observer` | everything | nothing | Read-only role for monitors and dashboards. All clients authenticate via `Authorization: Bearer <token>` (or `POST /api/session` `HttpOnly` cookie in browsers); `?token=` is refused for all roles. |
 
 Give the owner's orchestrator session an `orchestrator` token. Give every contributor a `member` token. Use `observer` tokens for dashboards and for agents that should only watch.
 
@@ -105,7 +105,7 @@ Every role can read the whole log and can ask `sommelier who` and `sommelier cla
 * Every token in `tokens.json`. The owner can technically act as any member. Say so openly to the team.
 * Who is connected right now and in which mode: `sommelier who` (`listening` for a tail, `request` for a one shot command).
 * Connects and disconnects of listeners on the hub console.
-* Cloudflare sees the traffic in clear (TLS ends there) and the URL of each connection, including an observer token passed as `?token=`. Member and orchestrator tokens travel in the `Authorization` header, and the hub refuses them in the URL.
+* Cloudflare sees the traffic in clear (TLS ends there), while tokens stay out of URLs (`?token=` is refused with HTTP 401 for every role). CLI/service clients send tokens in the `Authorization: Bearer` header, and the web dashboard exchanges a token once via `POST /api/session` for an `HttpOnly; SameSite=Strict` cookie.
 * The hub stores no IP addresses. The client address it sees is always `127.0.0.1` (the tunnel).
 
 ## Reading the log

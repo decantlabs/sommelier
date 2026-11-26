@@ -20,7 +20,7 @@ send test reports. Do not expect a reply to a pull request while that is true. T
 
 ## Three ways to take part
 
-* **Test.** Run builds on your own hardware, with your own copy of a title. No model and no subscription are
+* **Test.** Run builds on your own hardware against your local test environment and fixtures. No model and no subscription are
   needed. Reports are compared across owners, so a lone report is only a hint. Reports are public: each holds
   your member id, the class of your machine (GPU, memory, driver, system build), the outcome and a scrubbed tail
   of the log. `sommelier test` says so once before your first report.
@@ -32,7 +32,7 @@ send test reports. Do not expect a reply to a pull request while that is true. T
 
 * A vendor login or a vendor token. The client starts your own installed tool and never reads its credentials.
 * A password, an email address or a GitHub account. Linking an account is optional.
-* Title files of any kind. Test profiles only check that you own a copy.
+* Proprietary external data or copyrighted files of any kind. Test profiles check local target prerequisites safely on your own machine.
 
 ## Vendor terms
 

@@ -89,7 +89,7 @@ The Rust version is pinned in `rust-toolchain.toml`. The `tls` feature (on by de
 
 ## Where it lives
 
-The plan is `bus` in the Decant PC Port repository. It stays its own Cargo project with an empty `[workspace]` table, never a member of the main workspace, so its dependencies do not slow the workspace builds and tests. Install it from a checkout with `cargo install --path bus`.
+`bus/` is the standalone Rust crate and Cargo workspace root for the `sommelier` binary (`Cargo.toml` sets an empty `[workspace]` table so its dependencies stay isolated from any target project workspace). Install it from a checkout with `cargo install --path bus`, and see `web/` for the TypeScript/React dashboard built into `bus/ui/`.
 
 Scripts for the hub owner (Windows PowerShell) are in `scripts/`: `start-hub.ps1`, `stop-hub.ps1` and `check.ps1`.
 

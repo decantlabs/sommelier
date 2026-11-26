@@ -10,28 +10,25 @@ the agent do the steps. See also the `member` skill in
 
 ## 1. Clone and build
 
-1. Clone the shared repository `decantlabs/decant` into any folder you like and add no private remote.
+1. Clone the shared repository (`<org>/<repo>`) into any folder you like and add no private remote.
    Work in a branch or a worktree, never on `main` (`git fetch origin && git checkout -b <topic> origin/main`).
-2. Install Rust with rustup and the Visual Studio C++ build tools. The compiler version is pinned in the project's
+2. Install Rust with rustup and the system C/C++ build tools (or Visual Studio C++ build tools on Windows). The compiler version is pinned in the project's
    `rust-toolchain.toml` (rustup fetches it on the first build).
-3. Build the project as its own README describes. Test only the crates you change, for example
+3. Build the project as its own README describes. Test only the crates or packages you change, for example
    `cargo test -p <crate>`.
 
-## 2. The title files
+## 2. Local target & test fixtures (optional)
 
-You need your own legal copy of the title you work on: a folder with `MicrosoftGame.Config` and its data. It stays
-read only. Nothing from it goes into the repository, a branch, an issue or the bus.
+If the project requires local target executables or proprietary test fixtures, keep that folder
+read-only on your machine. Nothing from it goes into the repository, a branch, an issue, or the bus.
 
-`decant-launch` can stage a second, writable folder (an overlay) with links to the original files. Keep the
-overlay on the same drive as the title copy, otherwise file links fall back to symbolic links.
+When staging a writable overlay with hardlinks/junctions, keep the overlay on the same drive as the source files, otherwise file links fall back to symbolic links.
 
-Known limit: junctions that a process cannot follow (error 448, `ERROR_UNTRUSTED_MOUNT_POINT`) appear when the
-agent host starts the title with the Windows process mitigation `RedirectionTrust` set. A plain user terminal does
-not have it. Start the title from a plain terminal.
+Known limit on Windows: junctions that a process cannot follow (error 448, `ERROR_UNTRUSTED_MOUNT_POINT`) appear when the
+agent host starts the target with the Windows process mitigation `RedirectionTrust` set. A plain user terminal does
+not have it. Start local test targets from a plain terminal.
 
-Keep the title offline. Add a Windows Firewall rule that blocks outbound traffic for the title's executable
-(administrator PowerShell, `New-NetFirewallRule -Direction Outbound -Action Block -Program <path to the exe>
--DisplayName "title offline"`). Also install Gaming Services and the GameInput redistributable.
+Keep local test targets offline when configured (e.g., an outbound firewall rule for the executable if needed).
 
 ## 3. Join the bus (sommelier)
 
@@ -94,9 +91,9 @@ in the same folder.
   `main`, never force push another person's branch. Changes to instruction files, scripts, build steps, workflows,
   `Cargo.lock`, `swarm`, `bus` and repo-check wait until the coordinator has read the diff, so keep
   them on their own branch.
-- Before you push: `git fetch upstream` and rebase, then the tests of your crates and
-  `cargo run --locked -q -p decant-repo-check --bin check_repository`. Commit messages read like
-  `git log upstream/main`: crate prefix, one plain sentence.
+- Before you push: `git fetch upstream` and rebase, then run your project's tests and
+  repository checks (`$SOMMELIER_REPO_CHECK` or CI check script). Commit messages read like
+  `git log upstream/main`: module prefix, one plain sentence.
 - In prose write plain sentences. No semicolons or hyphens as punctuation. English in code, commits and issues.
 
 ## 7. The first three things worth doing on a machine

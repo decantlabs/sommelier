@@ -1,8 +1,8 @@
 # Swarm harness
 
-The scripts that let one coordinator run many AI agents on this repository without them
-stepping on each other. It grew on 24 Nov 2026, when up to 20 agents worked at once. It needs
-Git Bash on Windows today (it uses `tasklist`, `taskkill` and PowerShell for the game window).
+The scripts that let one coordinator run many AI agents on a repository without them
+stepping on each other. Built alongside `bus/` for multi-agent worktree orchestration, batch landing,
+watchdog monitoring, and optional local test-runner locking. On Windows, scripts use Git Bash, `tasklist`, `taskkill`, and PowerShell.
 
 The rules and scheduling logic of the coordinator are in [COORDINATOR.md](COORDINATOR.md), so that any
 participant can run it. The rules every worker reads are in [RULES.md](RULES.md). The raw notes of the first evening,
@@ -32,13 +32,13 @@ folder: `SOMMELIER_ORCH_TOKEN` only names the file that holds the orchestrator's
 
 A red main stops all landings, so its fix goes first.
 
-## One game run at a time
+## One target run at a time
 
-`run-title.sh <worktree> <seconds> <label> [VAR=value ...]` runs the title once. It takes a ticket in
+`run-title.sh <worktree> <seconds> <label> [VAR=value ...]` runs the configured target executable once. It takes a ticket in
 `$SOMMELIER_RUNS/.queue`, waits for the lock folder `$SOMMELIER_RUNS/.lock`, runs, takes window screenshots
 with `shot.ps1`, and collects log, pictures and a `summary.txt` in `$SOMMELIER_RUNS/<time>-<label>/`. The
-owner of the machine can hold the queue with `$SOMMELIER_RUNS/.pause` or slow the title down with
-`$SOMMELIER_RUNS/.gentle`. The title stays offline.
+owner of the machine can hold the queue with `$SOMMELIER_RUNS/.pause` or throttle runs with
+`$SOMMELIER_RUNS/.gentle`. The target stays offline.
 
 ## Watchdog
 

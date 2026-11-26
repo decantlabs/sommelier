@@ -79,25 +79,21 @@ on GitHub for these members.
 
 ### 1. Get the binary
 
-Once `bus` is in the main repository:
+From a checkout of the Sommelier repository:
 
 ```sh
-cd decant
+cd sommelier
 cargo install --path bus
 ```
 
-That puts `sommelier` (or `sommelier.exe`) into `~/.cargo/bin`, which is already on your PATH.
-
-Until then the source is on the branch `bus` of the repository (`git fetch origin bus`, then `git checkout origin/bus -- bus`):
+That puts `sommelier` (or `sommelier.exe`) into `~/.cargo/bin`, which is usually already on your `PATH`. Or build locally from `bus/`:
 
 ```sh
-cd sommelier            # the folder with Cargo.toml
+cd bus
 cargo build --release
-# Linux:   ./target/release/sommelier
-# Windows: .\target\release\sommelier.exe
-```
-
-or `cargo install --path .` from that folder. The folder pins its Rust version in `rust-toolchain.toml`, rustup fetches it on the first build. The build needs the usual C toolchain Rust already uses on your system (gcc or clang on Linux, the MSVC build tools on Windows).
+# Linux / macOS: ./target/release/sommelier
+# Windows:       .\target\release\sommelier.exe
+``` The folder pins its Rust version in `rust-toolchain.toml`, rustup fetches it on the first build. The build needs the usual C toolchain Rust already uses on your system (gcc or clang on Linux, the MSVC build tools on Windows).
 
 Check: `sommelier version` prints `sommelier 0.1.0` or newer.
 
@@ -167,7 +163,7 @@ sommelier send CHAT "hello, Linux box online"
 The general form is `sommelier send KIND [BODY] [--topic T] [--ref R]... [--re ID]...`.
 
 * The body is one line, at most 4096 bytes. Put it in quotes as one argument. To pipe the body in, give `-` as the body (`... | sommelier send RUN_RESULT -`), lines are joined with ` | `. stdin is read only then (or with `--stdin`), so `send` never waits on stdin by surprise. Without a body only CLAIM, RELEASE and ACCEPT are sent, other kinds are refused.
-* `--topic` is one word without spaces, for example `issue/189` or `run/decant-d3d12x`.
+* `--topic` is one word without spaces, for example `issue/189` or `run/gpu-suite`.
 * `--ref` adds a reference without spaces (a branch, a commit id, a file). Repeat it, up to 16.
 * `--re 1234` adds the reference `#1234`, the message you answer.
 * The command prints the new message id.
@@ -210,24 +206,24 @@ A claim on a topic someone else holds is refused with the holder's name. A claim
 Someone wants a test run on your hardware:
 
 ```
-#1300 20:31:02 owner RUN_REQUEST @alice run/decant-d3d12x d3d12x/some-fix 9f8e7d6 : cargo test -p decant-d3d12x on an AMD GPU, report pass count
+#1300 20:31:02 owner RUN_REQUEST @alice run/gpu-suite feat/some-fix 9f8e7d6 : cargo test -p my-crate on an AMD GPU, report pass count
 ```
 
 A request is an offer, not an order. Look at it with your own eyes (or let your agent check it against your rules), then either decline:
 
 ```sh
-sommelier send DECLINE "not now" --re 1300 --topic run/decant-d3d12x
+sommelier send DECLINE "not now" --re 1300 --topic run/gpu-suite
 ```
 
 A DECLINE needs no reason, any short body will do. Or accept, run it yourself from the named commit on the GitHub repository, and report:
 
 ```sh
-sommelier send ACCEPT "running on RX 7900 XTX" --re 1300 --topic run/decant-d3d12x
-git fetch origin d3d12x/some-fix && git switch --detach 9f8e7d6
-cargo test -p decant-d3d12x 2>&1 | tail -n 3 | sommelier send RUN_RESULT - --re 1300 --topic run/decant-d3d12x --ref 9f8e7d6
+sommelier send ACCEPT "running on RX 7900 XTX" --re 1300 --topic run/gpu-suite
+git fetch origin feat/some-fix && git switch --detach 9f8e7d6
+cargo test -p my-crate 2>&1 | tail -n 3 | sommelier send RUN_RESULT - --re 1300 --topic run/gpu-suite --ref 9f8e7d6
 ```
 
-The last line sends the final three output lines as one message, joined with ` | `. Write what was measured (pass counts, times, the exact commit) and keep paths, user names and anything from the game files out of it.
+The last line sends the final three output lines as one message, joined with ` | `. Write what was measured (pass counts, times, the exact commit) and keep local paths, user names and sensitive fixtures out of it.
 
 `@alice` means the message is addressed to alice (sent with `--to alice`). Everyone sees it, and `sommelier tail --to me` shows only messages for everyone plus those addressed to you.
 

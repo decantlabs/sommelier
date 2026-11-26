@@ -64,7 +64,7 @@ Principles, on top of CP section 1:
 
 ## 2. Threat model
 
-What is protected, in this order: users who run Decant (a bad commit runs on their PC beside a game), testers'
+What is protected, in this order: downstream users of the target project, testers'
 machines, members' machines and vendor accounts, main and the release channel, maintainer attention, the budget.
 
 | Adversary | Wants | Main guard |
@@ -90,7 +90,7 @@ revert. A compromise of GitHub or of a vendor is outside this design.
 ```
  member machines (anyone)                 hub server (fixed price)                 GitHub (public)
 +--------------------------+   wss    +------------------------------+        +--------------------------+
-| sommelier agent          |<-------->| sommelier serve              |  API   | decant: main, releases   |
+| sommelier agent          |<-------->| sommelier serve              |  API   | target repo: main, rels  |
 |  key, local limits       |  through |  log, tables, tick (CP 2)    |------->| workflow factory-verify  |
 |  admit() runs locally    |  Cloud-  |  intake: bundles by hash     | start, |  no secrets, no rights   |
 |  sandboxed worker        |  flare   |  static gates (no build)     | read   | workflow factory-batch   |
@@ -352,7 +352,7 @@ report as the resume note.
 
 ### 8.3 S2 clean build
 
-A workflow `factory-verify` in the Decant repository, started by the hub with the hash of the submission.
+A workflow `factory-verify` in the target project repository, started by the hub with the hash of the submission.
 
 * The workflow file comes from main. A patch cannot change what checks it, because `.github/**` is a hold path.
 * The job has no permissions and no secrets. It fetches the bundle from the hub by its hash, checks the hash,
@@ -459,9 +459,9 @@ profile, scenario) is checked on the client with the rules the hub uses before i
 
 ### 9.3 Title profiles and reports
 
-A title profile is a public file in the Decant repository: the fingerprint of the executable, the scenario, the
-milestones to look for. The client checks the local title against it. The factory never distributes title files,
-and the tester states that the copy is their own.
+A run profile is a public file in the target repository: the fingerprint of the test target executable, the scenario, the
+milestones to look for. The client checks the local target against it. The factory never distributes proprietary target files,
+and the tester states that any local test fixtures are their own.
 
 A report holds: member, signature, build commit, profile, machine class (GPU, memory, driver, operating system
 build), scenario, the metric columns of the run script, the class of the first error, and a scrubbed log excerpt
@@ -492,7 +492,7 @@ GitHub stays, in the roles it is good at.
 
 | Role | How |
 |------|-----|
-| Public source and history | `decantlabs/decant`, main written only by the lander |
+| Public source and history | `<org>/<repo>`, main written only by the lander |
 | The second lock | a ruleset on main: the check `factory-batch` is required, nobody pushes past it |
 | Clean build and release | the three workflows of sections 8 and 9. `.github/**` is a hold path |
 | Tester builds | Releases, with attestations |
@@ -600,17 +600,17 @@ store and write only their result to the log.
 
 Others may run sommelier for their own projects. The licence allows it, and every further project tests the
 factory itself. Today the split is not clean yet: the Rust hub is nearly generic (a few class names such as
-`game_run` are fixed in code), while `swarm/` and the shipped policy are written for Decant. The target:
+`game_run` are fixed in code), while `swarm/` and the shipped policy still carry examples from the initial project profile. The target:
 
 | Lives in sommelier (generic) | Lives in the project's own repository (profile) |
 |------------------------------|--------------------------------------------------|
 | hub, client, protocol, identity, tiers, stamps, intake, static gates, review assignment, lander core, test client | the policy file, hold paths, order kinds and their checks |
 | workflow templates | the workflows themselves, the build and test commands of the lander and the verifier |
-| the run order mechanism with `needs` | what a run is: for Decant the title profiles, the run script, the GPU gate |
+| the run order mechanism with `needs` | what a run is: the target profiles, the run script, and any hardware gates |
 | launcher hooks per vendor | project rules of the guide (`guide.<role>.rules`) |
 
 Each project runs its own hub with its own log, keys and maintainers. Nothing is shared between hubs in the
-first version (section 14). Decant is the first profile and the test of whether the split holds.
+first version (section 14). The initial project profile serves as the test of whether the split holds.
 
 Policy additions (schema version 3, outline):
 

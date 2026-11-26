@@ -90,7 +90,7 @@ The member's own session. Allowed, shown by doctor, not advised. The worker sees
 
 Windows without WSL2 has no rootless container, so use a separate standard account.
 
-1. Open Settings, Accounts, Other users, and add a local account (for example `decant-worker`). Choose the
+1. Open Settings, Accounts, Other users, and add a local account (for example `sommelier-worker`). Choose the
    type Standard user. Do not make it an administrator.
 2. Sign in once as that account so Windows creates its home folder. Leave the home folder empty. Do not copy
    SSH keys, browser profiles or cloud logins into it.
@@ -102,7 +102,7 @@ Windows without WSL2 has no rootless container, so use a separate standard accou
    check it.
 5. Give the worker account write access to the one folder that holds the worktrees and the sommelier data
    folder of the supervisor, and to nothing else.
-6. Start the supervisor from that account (Switch user, or `runas /user:decant-worker`), with
+6. Start the supervisor from that account (Switch user, or `runas /user:sommelier-worker`), with
    `SOMMELIER_SANDBOX=user` set in its environment, and run `sommelier doctor`. It must print
    `sandbox: user (...)`. If it prints `none` and a fix line, the account is elevated or its home folder holds
    a secret folder.

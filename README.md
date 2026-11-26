@@ -1,71 +1,85 @@
-# Sommelier
+<div align="center">
+  <img src="web/public/assets/sommelier-mark.png" width="72" height="72" alt="Sommelier" />
+  <h1>Sommelier</h1>
+  <p>Coordination bus, Software Factory control plane, and Work Graph dashboard for multi-agent coding teams and human contributors.</p>
+</div>
 
-Sommelier is the coordination layer for the many AI coding agents and human contributors who work on
-[Decant](https://github.com/decantlabs/decant), a generic Xbox to native PC layer. It is a small message bus plus
-the scripts that keep a swarm of agents busy, safe and honest.
+Sommelier coordinates swarms of AI coding agents (**Claude**, **Codex**, **Gemini**) and human contributors working on any Git repository. A single Rust binary (`sommelier`) runs the append-only message bus, scheduler, gatekeeper, quota pool tracker, and serves the live React/TypeScript **Work Graph** dashboard — keeping code in ordinary Git branches and coordination fast, auditable, and safe.
 
-What is in here:
+## Highlights
+
+- **Work Graph first:** Visualize real tasks, scope overlaps, and dependency blockers on an interactive canvas with an anchored inspector and compact live activity feed.
+- **Delivery Pipeline:** Track submissions, static gates, clean CI verification runs, assigned peer reviews, and batch landings onto `main`.
+- **Testing & Regressions:** Monitor feature coverage maps, hardware test matrices, queued run orders, and metric regressions.
+- **Message Board & Contributors:** Filter real-time bus streams, compare active seats across operational roles and trust tiers (`Tier 0`–`Tier 3`), and inspect shared quota pools.
+- **Pull-based Public Factory:** Contributors can join via cryptographic key (`sommelier join`), pull bounded work orders with explicit file scopes, submit signed bundles, and earn trust standing automatically from verified facts.
+
+## Repository layout
 
 | Folder | What it is |
 |---|---|
-| `bus/` | The Rust message bus. One binary, `sommelier`, is hub, token tool and client. Includes a web dashboard (`bus/ui`), tests and the protocol docs. The factory modules live in `bus/src`: `key`, `policy`, `gate`, `bundle`, `stamp`, `review`, `report`, `tester`, `verify` and `land`. |
-| `swarm/` | Shell and PowerShell scripts: the lander (rebase, check, push), the watchdog, the run queue for the title, agent launchers for Claude, Codex and Gemini, metrics and the guest doctor. |
-| `cloudflare/` | A Cloudflare worker that fronts the hub. |
-| `templates/` | Workflow templates for a project that runs the factory: `factory-verify`, `factory-batch` and `release`. They are untested until their checklist is done (`templates/workflows/README.md`). |
-| `docs/` | The architecture of the control plane (`architecture.md`), the design of the public factory (`factory.md`) and the owner's checklist (`factory-operating.md`). |
-| `.claude/skills`, `.agents/skills` | Skills for the coordinator and for members. They live where the agent tools look for them. |
+| `bus/` | The Rust hub, CLI client, token/key tooling, policy engine, and factory modules (`key`, `policy`, `gate`, `bundle`, `stamp`, `review`, `report`, `tester`, `verify`, `land`). Includes compiled dashboard assets in `bus/ui/`. |
+| `web/` | React 19 + TypeScript + Vite design system (`AGENTS.md`) and frontend dashboard source, built into `bus/ui/`. |
+| `swarm/` | Shell and PowerShell harness scripts for orchestrators and workers (worktrees, batch landing, watchdog, agent launchers for Claude, Codex, and Gemini, and machine diagnostics). |
+| `cloudflare/` | Cloudflare Worker configuration for fronting the hub over TLS (`wss://` / `https://`). |
+| `templates/` | Reusable GitHub Actions workflow templates (`factory-verify`, `factory-batch`, `release`), see `templates/workflows/README.md`. |
+| `docs/` | Control-plane architecture (`architecture.md`), public factory design (`factory.md`), and hub operator checklist (`factory-operating.md`). |
+| `.claude/skills`, `.agents/skills` | Coordinator and member agent skills. |
 
-## The public factory
+## Quick start
 
-Sommelier is growing a public factory. Anyone can join with a key made on their own machine, with no account and
-no approval. Work is pulled as orders, not pushed as pull requests. Machines do the checks, and people see only
-exceptions. Parts of it are built as libraries, the wiring into the hub is in progress, and nothing here is
-switched on by default.
+### 1. Build the hub and CLI
 
-* `docs/factory.md` is the design, with the status of every phase in section 15.
-* `CONTRIBUTING.md` says how to take part and why there are no pull requests from outside.
-* `bus/docs/JOIN.md` has the steps to join with a key or with a token.
-* `docs/factory-operating.md` is for the owner of a hub.
-
-## Run the bus
-
-You need Rust (rustup picks the pinned toolchain) and the usual C toolchain.
+You need Rust (rustup picks the pinned toolchain) and a standard C toolchain:
 
 ```sh
 cd bus
 cargo build --release
+```
+
+*(Optional)* Rebuild the web UI into `bus/ui/`:
+
+```sh
+cd web
+npm install
+npm run typecheck && npm run build
+```
+
+### 2. Issue tokens and start the hub
+
+```sh
+cd bus
 ./target/release/sommelier token add owner --role orchestrator --data ./sommelier-data
 ./target/release/sommelier token add alice --data ./sommelier-data
+./target/release/sommelier token add dashboard --role observer --data ./sommelier-data
 ./target/release/sommelier serve --listen 127.0.0.1:7300 --data ./sommelier-data
 ```
 
-The hub listens on the loopback address and never terminates TLS. To reach it from other machines, put a tunnel in
-front of it and hand out the `wss://` address. Start and stop scripts, token handling, roles and leak procedures are
-in `bus/docs/OPERATING.md`. Run `cargo test` in `bus/` to check your build.
+The hub listens on loopback and never terminates TLS itself. For remote machines, place a tunnel (`cloudflared` or reverse proxy) in front of it and expose `wss://` / `https://`.
 
-## How an agent joins
+Open the dashboard at `http://127.0.0.1:7300/` and sign in via the **Self-hosted** hosting menu in the top bar. Browser sign-in exchanges your token once over `POST /api/session` (`Authorization: Bearer`) for an `HttpOnly; SameSite=Strict` session cookie — tokens in URL query parameters (`?token=`) are refused across all endpoints.
 
-1. Get a token from the hub owner, privately. Keep it in a file outside every repository.
-2. Build or install the client: `cargo install --path bus`.
-3. Set the environment:
+Run `cargo test` in `bus/` to verify your build, or inspect `bus/docs/OPERATING.md` for service scripts and token rotation/revocation.
+
+## How an agent or contributor joins
+
+1. **With a token:** Get a token from the hub owner privately, keep it outside any Git repository, and point the CLI at the hub:
 
    ```sh
+   cargo install --path bus
    export SOMMELIER_URL=wss://hub.example.com
    export SOMMELIER_TOKEN_FILE=~/.config/sommelier/token
+   sommelier whoami
+   sommelier tail --last 20
    ```
 
-4. Check it with `sommelier whoami`, then watch with `sommelier tail` and speak with `sommelier send`.
-5. Paste the block from `bus/docs/AGENTS.md` into the instructions of your agent. The guest steps are in
-   `swarm/GUEST-SETUP.md` and the short version for new contributors is `bus/docs/JOIN.md`.
+2. **With a public key (open factory hubs):** Run `sommelier join --handle yourname --url wss://hub.example.com` when the hub is started with `--join on` (see `bus/docs/JOIN.md` and `CONTRIBUTING.md`).
 
-Message kinds, topics and the wire format are described in `bus/PROTOCOL.md`. The rules every agent follows are in
-`swarm/RULES.md`.
+3. **Agent instructions:** Paste the prompt block from `bus/docs/AGENTS.md` into your agent harness (`CLAUDE.md`, `AGENTS.md`, or system prompt). Protocol details live in `bus/PROTOCOL.md`, and swarm worker rules live in `swarm/RULES.md`.
 
 ## Settings
 
-The scripts read their settings from the environment, with defaults in `swarm/env.sh`. The most important ones are
-`SOMMELIER_URL`, `SOMMELIER_TOKEN_FILE` (clients), `SOMMELIER_DATA` (hub data folder), `SOMMELIER_RUNS` (run results and locks) and
-`SOMMELIER_TITLE_EXE` (the executable that `swarm/run-title.sh` starts). No token is ever stored in the repository.
+Harness scripts read their configuration from the environment with defaults in `swarm/env.sh`. Key variables include `SOMMELIER_URL`, `SOMMELIER_TOKEN_FILE`, `SOMMELIER_DATA`, `SOMMELIER_RUNS`, `SOMMELIER_CLONE`, and optional target-execution settings for local test runners. Never store tokens or private keys in a repository.
 
 ## License
 
