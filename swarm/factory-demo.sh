@@ -218,23 +218,36 @@ wait_for "the landing" "order t1 .* state landed"
 wait_for "the landed stamp" "landed=1"
 show
 
-step "the test network: a run order, three testers answer with report.send"
+step "the test network: a run order, three testers on THIS machine answer with report.send"
 ORDER=$(owner op test.order "{\"build\":\"$BASE\",\"channel\":\"main\",\"profile\":\"demo\",\"scenario\":\"boot\",\"wanted\":3}")
 RUN=$(printf '%s' "$ORDER" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 echo "run order $RUN"
 NOW=$(date +%s)
+MACHINE='{"os":"windows","os_build":"26100","gpu":"RTX 4080","gpu_memory_mb":16384,"driver":"552.22","memory_mb":32768}'
 # The testers get their tokens only now, so they are no candidates for the review above.
 for name in alice bob dave; do
   "$BIN" token add "$name" --role member --data "$HUB" 2>/dev/null >"$TMP/$name.token"
 done
 sleep 3 # the hub reads new tokens every two seconds
 for name in alice bob dave; do
-  REPORT="{\"report\":{\"v\":1,\"run\":\"$RUN\",\"member\":\"$name\",\"build\":\"$BASE\",\"channel\":\"main\",\"profile\":\"demo\",\"scenario\":\"boot\",\"machine\":{\"os\":\"windows\",\"os_build\":\"26100\",\"gpu\":\"RTX 4080\",\"gpu_memory_mb\":16384,\"driver\":\"552.22\",\"memory_mb\":32768},\"outcome\":\"works\",\"first_error\":null,\"metrics\":{},\"secs_alive\":60,\"log_excerpt\":\"1 swapchain created\\n\",\"at\":$NOW}}"
-  SOMMELIER_URL=$URL SOMMELIER_TOKEN=$(cat "$TMP/$name.token") "$BIN" op report.send "$REPORT" >/dev/null
+  as_tester() { SOMMELIER_URL=$URL SOMMELIER_TOKEN=$(cat "$TMP/$name.token") "$BIN" "$@"; }
+  # A report counts only for an order the hub handed to this tester for this machine.
+  as_tester op test.next "{\"machine\":$MACHINE,\"profiles\":[\"demo\"]}" >/dev/null
+  REPORT="{\"report\":{\"v\":1,\"run\":\"$RUN\",\"member\":\"$name\",\"build\":\"$BASE\",\"channel\":\"main\",\"profile\":\"demo\",\"scenario\":\"boot\",\"machine\":$MACHINE,\"outcome\":\"works\",\"first_error\":null,\"metrics\":{},\"secs_alive\":60,\"log_excerpt\":\"1 swapchain created\n\",\"at\":$NOW}}"
+  as_tester op report.send "$REPORT" >/dev/null
   echo "$name reported works"
 done
-wait_for "the order to settle" "$RUN settled"
-wait_for "run_agreed" "run_agreed=1"
+sleep 3
+show
+echo
+echo "Three testers on one machine are one owner: the front door keeps no address blocks in this demo, so"
+echo "every report is a hint, the order does not settle and nobody gets run_agreed. On a real hub with the"
+echo "door on, three testers in three different address blocks settle it. This is the guard against one person"
+echo "with many keys."
+if "$BIN" factory status --data "$HUB" | grep -q "$RUN settled"; then
+  echo "factory-demo: the order settled from one machine, that must not happen" >&2
+  exit 1
+fi
 
 step "the end: what the hub holds"
 show
