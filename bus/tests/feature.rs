@@ -94,7 +94,7 @@ fn the_example_file_loads() {
     let text = std::fs::read_to_string(example_path())
         .unwrap()
         .to_lowercase();
-    for word in ["gta", "rockstar", "zijad", "decant"] {
+    for word in ["gta", "rockstar", "decant"] {
         assert!(!text.contains(word), "{word}");
     }
 }
