@@ -1175,7 +1175,7 @@ fn templates_hold_no_personal_data() {
     for f in WORKFLOWS.iter().chain(["README.md"].iter()) {
         let t = template(f);
         assert!(
-            !t.contains("C:\\") && !t.contains("/Users/") && !t.contains("zijad"),
+            !t.contains("C:\\") && !t.contains("/Users/") && !t.contains("/home/"),
             "{f}"
         );
         assert!(!t.contains(FAKE_TOKEN));
