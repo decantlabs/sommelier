@@ -371,11 +371,18 @@ pub fn build_task_api(
 pub fn on_tick(hub: &Hub, now_ms: u64) -> Vec<Message> {
     let now_sec = now_ms / 1000;
     let started = *HUB_START_SEC.get_or_init(|| now_sec);
-    hub.with_store(|store| {
-        reap_leases_and_offers(store.connection(), now_sec, started, LeaseTimers::default())
-            .unwrap_or_default()
-    })
-    .unwrap_or_default()
+    let mut msgs = hub
+        .with_store(|store| {
+            reap_leases_and_offers(store.connection(), now_sec, started, LeaseTimers::default())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    // The feature map: look at the file and raise or close FEATURES_INVALID. Nothing without a file.
+    msgs.extend(crate::feature::registry::on_tick(
+        &hub.config().data_dir,
+        now_ms,
+    ));
+    msgs
 }
 
 /// Decides the order fields of a new or replaced order after the body was merged. The risk is
