@@ -15,7 +15,7 @@
 //! that are encoded. The stages that must catch these are the clean build without secrets (S2) and the
 //! assigned review (S3).
 //!
-//! The entry point is [`check`]. Each gate is its own function in [`gates`], so a caller or a test can
+//! The entry point is [`check`], or [`check_with_feature`] for an order that names a feature. Each gate is its own function in [`gates`], so a caller or a test can
 //! run one alone. A finding never repeats a secret it found, it names the pattern only.
 
 pub mod diff;
@@ -58,6 +58,17 @@ pub struct OrderView {
     pub risk: Risk,
     /// Tier of the author, 0 to 3.
     pub tier: u8,
+}
+
+/// What the gate `feature_scope` needs when the order names a feature of the feature map.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureScope {
+    /// Id of the feature the order names.
+    pub feature: String,
+    /// The paths of that feature.
+    pub paths: Vec<String>,
+    /// Id and paths of every other feature of the map.
+    pub others: Vec<(String, Vec<String>)>,
 }
 
 /// How serious a finding is.
@@ -111,6 +122,17 @@ pub struct GateReport {
 
 /// Runs all thirteen gates in the order of the design and sums them up.
 pub fn check(diff: &ParsedDiff, order: &OrderView, rules: &GateRules) -> GateReport {
+    check_with_feature(diff, order, rules, None)
+}
+
+/// Like [`check`], and when the order names a feature also the gate `feature_scope` (it raises, never
+/// blocks). Without a feature the report is the same as [`check`] gives.
+pub fn check_with_feature(
+    diff: &ParsedDiff,
+    order: &OrderView,
+    rules: &GateRules,
+    feature: Option<&FeatureScope>,
+) -> GateReport {
     // A path that is too long or too deep stops the run before any other gate reads the paths.
     let limits = gates::path_limits(diff);
     if !limits.is_empty() {
@@ -133,6 +155,9 @@ pub fn check(diff: &ParsedDiff, order: &OrderView, rules: &GateRules) -> GateRep
         gates::authors(diff, rules),
         gates::paths_with(diff, rules),
         gates::scope(diff, order),
+        feature
+            .map(|f| gates::feature_scope(diff, f))
+            .unwrap_or_default(),
         gates::hold_paths(diff, order, rules),
         gates::entry_kinds(diff),
         gates::size(diff, order, rules),
