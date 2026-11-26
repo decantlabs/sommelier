@@ -3,16 +3,26 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark light">
 <meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#162235" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#101826" media="(prefers-color-scheme: dark)">
-<title>sommelier</title>
+<meta name="theme-color" content="#090a0d" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<title>sommelier — software factory</title>
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="style.css?v=2026-11-26-impeccable1">
+<link rel="stylesheet" href="style.css?v=2026-11-26-factory1">
 </head>
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-grid" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2"/><rect x="2" y="9" width="5" height="5" rx="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2"/></symbol>
+  <symbol id="i-graph" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="2"/><circle cx="12.5" cy="4" r="2"/><circle cx="12.5" cy="12" r="2"/><path d="M5.4 7.2 10.6 4.8M5.4 8.8l5.2 2.4"/></symbol>
+  <symbol id="i-users" viewBox="0 0 16 16"><circle cx="6" cy="5.5" r="2.2"/><path d="M2 13c.5-2.1 2-3.2 4-3.2s3.5 1.1 4 3.2"/><circle cx="11.5" cy="6" r="1.7"/><path d="M11.2 10c1.5.2 2.5 1.1 2.8 3"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 16 16"><path d="M8 2 14 5.2 8 8.4 2 5.2Z"/><path d="M2 8.2 8 11.4 14 8.2M2 11l6 3.2 6-3.2"/></symbol>
+  <symbol id="i-gauge" viewBox="0 0 16 16"><path d="M2.5 11.5a6 6 0 1 1 11 0"/><path d="M8 9.5 11 6.5"/><circle cx="8" cy="10.5" r="1"/></symbol>
+  <symbol id="i-git-merge" viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.75"/><circle cx="4.5" cy="12.5" r="1.75"/><circle cx="11.5" cy="8.5" r="1.75"/><path d="M4.5 5.25v5.5M4.5 5.5c0 2.2 2.5 3 5.25 3"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 16 16"><path d="M1.5 8h2.5l1.8-4.5 3 9 1.7-4.5h4"/></symbol>
+  <symbol id="i-bookmark" viewBox="0 0 16 16"><path d="M4 2.5h8v11l-4-2.8-4 2.8Z"/></symbol>
+  <symbol id="i-panel-right" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M10.5 2.5v11"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 16 16"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></symbol>
   <symbol id="i-branch" viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.75"/><circle cx="4.5" cy="12.5" r="1.75"/><circle cx="11.5" cy="5" r="1.75"/><path d="M4.5 5.25v5.5M11.5 6.75c0 3-7 2.25-7 4"/></symbol>
   <symbol id="i-commit" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.75"/><path d="M1 8h4.25M10.75 8H15"/></symbol>
   <symbol id="i-link" viewBox="0 0 16 16"><path d="M6.5 4.5h-2a3.5 3.5 0 0 0 0 7h2M9.5 4.5h2a3.5 3.5 0 0 1 0 7h-2M5.5 8h5"/></symbol>
@@ -27,40 +37,23 @@
   <symbol id="i-monitor" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="8.5" rx="1.2"/><path d="M5.5 13.5h5M8 11v2.5"/></symbol>
 </svg>
 
-<header class="bar" id="bar">
-  <div class="stale-banner" id="stale-banner" role="alert" hidden></div>
-  <div class="bar-in">
-    <a class="mark" href="#roster" aria-label="sommelier, back to the top">
-      <svg class="mark-glyph" viewBox="0 0 28 12" aria-hidden="true"><path d="M1 6h26"/><circle cx="5" cy="6" r="3"/><circle cx="14" cy="6" r="3"/><circle cx="23" cy="6" r="3"/></svg>
-      <span class="mark-word">sommelier</span>
-    </a>
-    <p class="pulse" id="pulse" aria-live="polite"></p>
-    <div class="bar-actions">
-      <div class="conn" id="conn" role="status">
-        <span class="conn-dot" aria-hidden="true"></span>
-        <span class="conn-text" id="conn-text">not connected</span>
-      </div>
-      <button class="btn btn-shell" id="theme-toggle" type="button" title="Theme: system" aria-label="Cycle color theme (system, dark, light)">
-        <svg class="ic" aria-hidden="true"><use href="#i-monitor"/></svg><span class="theme-lbl">Auto</span>
-      </button>
-      <button class="btn btn-shell" id="forget" type="button" hidden>
-        <svg class="ic" aria-hidden="true"><use href="#i-key"/></svg><span>Forget token</span>
-      </button>
-    </div>
-  </div>
-  <nav class="jump" aria-label="Sections">
-    <a href="#roster" data-jump-tab="people">People</a><a href="#views" data-jump-tab="tasks">Control plane</a><a href="#ledger" data-jump-tab="ledger">Claims &amp; runs</a><a href="#feed">Feed</a>
-  </nav>
-</header>
-
 <main id="app">
   <section class="gate" id="gate" hidden aria-labelledby="gate-h">
-    <div class="gate-card">
-      <div class="gate-head">
-        <svg class="gate-glyph" viewBox="0 0 120 24" aria-hidden="true"><path d="M2 12h116"/><circle cx="14" cy="12" r="5"/><circle cx="46" cy="12" r="5"/><circle cx="78" cy="12" r="5"/><circle cx="106" cy="12" r="5" class="hollow"/></svg>
-        <h1 id="gate-h">Watch the bus</h1>
-        <p>Paste an <strong>observer token</strong>. It can only read, which is why the hub accepts it from a browser. Member and orchestrator tokens are refused here on purpose.</p>
+    <div class="gate-top">
+      <div class="seg-ctrl" role="group" aria-label="Theme">
+        <button type="button" class="seg-btn" data-set-theme="system">Auto</button>
+        <button type="button" class="seg-btn" data-set-theme="light">Light</button>
+        <button type="button" class="seg-btn" data-set-theme="dark">Dark</button>
       </div>
+    </div>
+    <div class="gate-card">
+      <div class="gate-brand">
+        <svg class="mark-glyph" viewBox="0 0 28 12" aria-hidden="true"><path d="M1 6h26"/><circle cx="5" cy="6" r="3"/><circle cx="14" cy="6" r="3"/><circle cx="23" cy="6" r="3"/></svg>
+        <span class="mark-word">sommelier</span>
+        <span class="gate-tag">factory</span>
+      </div>
+      <h1 id="gate-h">Connect to the bus</h1>
+      <p>Enter an <strong>observer token</strong> to monitor the fleet, feature map, control plane, and live message stream. Read-only access; member and orchestrator tokens are refused here.</p>
       <form id="gate-form" autocomplete="off">
         <label for="gate-token">Observer token</label>
         <div class="gate-row">
@@ -68,73 +61,151 @@
           <button class="btn btn-primary" type="submit">Connect</button>
         </div>
         <p class="gate-err" id="gate-err" role="alert" hidden></p>
-        <p class="gate-note">Kept in this browser only, never in the address bar. Ask the hub owner for one: <code>sommelier token add &lt;name&gt; --role observer</code></p>
+        <p class="gate-note">Stored locally in this browser only. Generate one with: <code>sommelier token add &lt;name&gt; --role observer</code></p>
         <details class="gate-hub">
-          <summary>Hub address</summary>
+          <summary>Custom hub address</summary>
           <div class="gate-row">
             <input id="gate-hub" type="text" spellcheck="false" autocapitalize="off" placeholder="wss://hub.example.com">
           </div>
-          <p class="gate-note">Leave empty to use the server this page came from.</p>
+          <p class="gate-note">Leave empty to connect to the origin serving this page.</p>
         </details>
       </form>
     </div>
   </section>
 
-  <div class="board" id="board" data-tab="overview" hidden>
-    <div class="triage" id="triage" role="region" aria-label="Active anomalies" hidden></div>
-
-    <div class="ws-tabs-wrap">
-      <div class="ws-tabs" id="ws-tabs" role="tablist" aria-label="Workspace views">
-        <button class="ws-tab" type="button" role="tab" id="tab-overview" data-tab="overview" aria-selected="true">Overview</button>
-        <button class="ws-tab" type="button" role="tab" id="tab-people" data-tab="people" aria-selected="false">People <span class="tab-n" id="tn-people"></span></button>
-        <button class="ws-tab" type="button" role="tab" id="tab-tasks" data-tab="tasks" aria-selected="false">Tasks <span class="tab-n" id="tn-tasks"></span></button>
-        <button class="ws-tab" type="button" role="tab" id="tab-pools" data-tab="pools" aria-selected="false">Pools <span class="tab-n" id="tn-pools"></span></button>
-        <button class="ws-tab" type="button" role="tab" id="tab-landing" data-tab="landing" aria-selected="false">Landing <span class="tab-n" id="tn-landing"></span></button>
-        <button class="ws-tab" type="button" role="tab" id="tab-runs" data-tab="runs" aria-selected="false">Runs <span class="tab-n" id="tn-runs"></span></button>
-        <button class="ws-tab" type="button" role="tab" id="tab-branches" data-tab="branches" aria-selected="false">Branches <span class="tab-n" id="tn-branches"></span></button>
-        <button class="ws-tab" type="button" role="tab" id="tab-metrics" data-tab="metrics" aria-selected="false">Metrics <span class="tab-n" id="tn-metrics"></span></button>
-        <button class="ws-tab" type="button" role="tab" id="tab-ledger" data-tab="ledger" aria-selected="false">Claims &amp; runs <span class="tab-n" id="tn-ledger"></span></button>
+  <div class="shell" id="board" data-tab="overview" data-feed="open" hidden>
+    <div class="rail-backdrop" id="rail-backdrop" hidden></div>
+    <aside class="rail" id="rail" aria-label="Primary navigation">
+      <div class="rail-head">
+        <a class="mark" href="#roster" data-jump-tab="overview" aria-label="sommelier overview">
+          <svg class="mark-glyph" viewBox="0 0 28 12" aria-hidden="true"><path d="M1 6h26"/><circle cx="5" cy="6" r="3"/><circle cx="14" cy="6" r="3"/><circle cx="23" cy="6" r="3"/></svg>
+          <span class="mark-word">sommelier</span>
+        </a>
+        <div class="conn" id="conn" role="status">
+          <span class="conn-dot" aria-hidden="true"></span>
+          <span class="conn-text" id="conn-text">not connected</span>
+        </div>
       </div>
+
+      <nav class="rail-nav" id="ws-tabs" role="tablist" aria-label="Factory views">
+        <div class="rail-group">
+          <span class="rail-label">Factory</span>
+          <button class="nav-item" type="button" role="tab" id="tab-overview" data-tab="overview" aria-selected="true">
+            <svg class="ic" aria-hidden="true"><use href="#i-grid"/></svg><span>Overview</span>
+          </button>
+          <button class="nav-item" type="button" role="tab" id="tab-features" data-tab="features" aria-selected="false">
+            <svg class="ic" aria-hidden="true"><use href="#i-graph"/></svg><span>Feature Map</span><span class="tab-n" id="tn-features"></span>
+          </button>
+          <button class="nav-item" type="button" role="tab" id="tab-people" data-tab="people" aria-selected="false">
+            <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span>Fleet</span><span class="tab-n" id="tn-people"></span>
+          </button>
+        </div>
+
+        <div class="rail-group">
+          <span class="rail-label">Control plane</span>
+          <button class="nav-item" type="button" role="tab" id="tab-tasks" data-tab="tasks" aria-selected="false">
+            <svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg><span>Orders</span><span class="tab-n" id="tn-tasks"></span>
+          </button>
+          <button class="nav-item" type="button" role="tab" id="tab-pools" data-tab="pools" aria-selected="false">
+            <svg class="ic" aria-hidden="true"><use href="#i-gauge"/></svg><span>Quota Pools</span><span class="tab-n" id="tn-pools"></span>
+          </button>
+          <button class="nav-item" type="button" role="tab" id="tab-delivery" data-tab="delivery" aria-selected="false">
+            <svg class="ic" aria-hidden="true"><use href="#i-git-merge"/></svg><span>Delivery</span><span class="tab-n" id="tn-delivery"></span>
+          </button>
+          <button class="nav-item" type="button" role="tab" id="tab-quality" data-tab="quality" aria-selected="false">
+            <svg class="ic" aria-hidden="true"><use href="#i-activity"/></svg><span>Quality</span><span class="tab-n" id="tn-quality"></span>
+          </button>
+          <button class="nav-item" type="button" role="tab" id="tab-ledger" data-tab="ledger" aria-selected="false">
+            <svg class="ic" aria-hidden="true"><use href="#i-bookmark"/></svg><span>Claims &amp; Runs</span><span class="tab-n" id="tn-ledger"></span>
+          </button>
+        </div>
+      </nav>
+
+      <div class="rail-foot">
+        <div class="seg-ctrl seg-full" role="group" aria-label="Color theme">
+          <button type="button" class="seg-btn" data-set-theme="system">Auto</button>
+          <button type="button" class="seg-btn" data-set-theme="light">Light</button>
+          <button type="button" class="seg-btn" data-set-theme="dark">Dark</button>
+        </div>
+        <button class="btn btn-quiet btn-full" id="forget" type="button" hidden>
+          <svg class="ic" aria-hidden="true"><use href="#i-key"/></svg><span>Forget token</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="stage">
+      <div class="stale-banner" id="stale-banner" role="alert" hidden></div>
+      <header class="topbar" id="bar">
+        <div class="topbar-left">
+          <button class="btn btn-quiet icon-btn" id="nav-toggle" type="button" aria-label="Open navigation">
+            <svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg>
+          </button>
+          <h1 class="view-title" id="view-title">Factory Overview</h1>
+        </div>
+        <p class="pulse" id="pulse" aria-live="polite"></p>
+        <div class="topbar-right">
+          <button class="btn btn-quiet" id="feed-toggle" type="button" aria-expanded="true" aria-controls="feed">
+            <svg class="ic" aria-hidden="true"><use href="#i-panel-right"/></svg><span>Live Feed</span><span class="tab-n" id="feed-badge"></span>
+          </button>
+        </div>
+      </header>
+
+      <div class="stage-body">
+        <div class="triage" id="triage" role="region" aria-label="Active anomalies" hidden></div>
+        <section class="kpi-grid" id="overview-kpis" aria-label="Factory metrics"></section>
+
+        <section class="roster" id="roster" aria-labelledby="roster-h">
+          <h2 class="sec-h" id="roster-h">Fleet &amp; participants</h2>
+          <div id="people"></div>
+        </section>
+
+        <section class="overview-snap" id="overview-snap" aria-label="Control plane summary"></section>
+
+        <section class="views" id="views" aria-label="Control plane views">
+          <div class="view-slot" id="view-features"></div>
+          <div class="view-slot" id="view-tasks"></div>
+          <div class="view-slot" id="view-pools"></div>
+          <div class="view-slot" id="view-landing"></div>
+          <div class="view-slot" id="view-branches"></div>
+          <div class="view-slot" id="view-runs"></div>
+          <div class="view-slot" id="view-metrics"></div>
+        </section>
+
+        <section class="ledger" id="ledger" aria-label="Claims and run requests">
+          <div class="panel">
+            <h2 class="panel-h">Claims <span class="count" id="claims-n"></span></h2>
+            <ul class="claims" id="claims"></ul>
+          </div>
+          <div class="panel">
+            <h2 class="panel-h">Run requests <span class="count" id="runs-n"></span></h2>
+            <ul class="runs" id="runs"></ul>
+          </div>
+        </section>
+      </div>
+
+      <nav class="mob-dock" aria-label="Quick navigation">
+        <button type="button" data-jump-tab="overview"><svg class="ic" aria-hidden="true"><use href="#i-grid"/></svg><span>Overview</span></button>
+        <button type="button" data-jump-tab="features"><svg class="ic" aria-hidden="true"><use href="#i-graph"/></svg><span>Features</span></button>
+        <button type="button" data-jump-tab="people"><svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span>Fleet</span></button>
+        <button type="button" data-jump-tab="pools"><svg class="ic" aria-hidden="true"><use href="#i-gauge"/></svg><span>Pools</span></button>
+        <button type="button" id="mob-feed-btn"><svg class="ic" aria-hidden="true"><use href="#i-panel-right"/></svg><span>Feed</span></button>
+      </nav>
     </div>
 
-    <div class="workspace">
-      <section class="roster" id="roster" aria-labelledby="roster-h">
-        <h2 class="sr" id="roster-h">Participants and their agents</h2>
-        <div id="people"></div>
-      </section>
-
-      <section class="views" id="views" aria-label="Control plane views">
-        <div class="view-slot" id="view-tasks"></div>
-        <div class="view-slot" id="view-pools"></div>
-        <div class="view-slot" id="view-landing"></div>
-        <div class="view-slot" id="view-runs"></div>
-        <div class="view-slot" id="view-branches"></div>
-        <div class="view-slot" id="view-metrics"></div>
-      </section>
-
-      <section class="ledger" id="ledger" aria-label="Claims and run requests">
-        <div class="panel">
-          <h2 class="panel-h">Claims <span class="count" id="claims-n"></span></h2>
-          <ul class="claims" id="claims"></ul>
-        </div>
-        <div class="panel">
-          <h2 class="panel-h">Run requests <span class="count" id="runs-n"></span></h2>
-          <ul class="runs" id="runs"></ul>
-        </div>
-      </section>
-    </div>
-
-    <section class="feed" id="feed" aria-labelledby="feed-h">
+    <aside class="feed" id="feed" aria-labelledby="feed-h">
       <div class="feed-head">
-        <h2 class="panel-h" id="feed-h">Feed <span class="count" id="feed-n"></span></h2>
+        <div class="feed-title-row">
+          <h2 class="panel-h" id="feed-h">Live Feed <span class="count" id="feed-n"></span></h2>
+          <button type="button" class="btn btn-quiet icon-btn" id="feed-close" aria-label="Hide feed"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
         <div class="filters" id="filters">
-          <div class="kinds" id="kinds" role="group" aria-label="Kinds"></div>
+          <div class="kinds" id="kinds" role="group" aria-label="Message kinds"></div>
           <div class="filter-row">
             <label class="fld"><span class="sr">Participant</span>
               <select id="f-from"><option value="">Everyone</option></select>
             </label>
             <label class="fld fld-grow"><span class="sr">Topic</span>
-              <input id="f-topic" type="search" placeholder="Topic, like issue/194 or issue/*" spellcheck="false" autocapitalize="off">
+              <input id="f-topic" type="search" placeholder="Topic or feature…" spellcheck="false" autocapitalize="off">
             </label>
             <button class="btn btn-quiet" id="f-clear" type="button" hidden>Clear</button>
           </div>
@@ -142,11 +213,11 @@
       </div>
       <ol class="msgs" id="msgs" aria-live="off"></ol>
       <p class="empty" id="feed-empty" hidden></p>
-    </section>
+    </aside>
   </div>
 </main>
 
-<script type="module" src="views/index.js?v=2026-11-26-impeccable1"></script>
-<script src="app.js?v=2026-11-26-impeccable1"></script>
+<script type="module" src="views/index.js?v=2026-11-26-factory1"></script>
+<script src="app.js?v=2026-11-26-factory1"></script>
 </body>
 </html>

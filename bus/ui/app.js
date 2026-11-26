@@ -35,7 +35,18 @@
   const FILTER_KEY = "sommelier.filters";
   const TAB_KEY = "sommelier.tab";
   const THEME_KEY = "sommelier.theme";
-  const VALID_TABS = new Set(["overview", "people", "tasks", "pools", "landing", "runs", "branches", "metrics", "ledger"]);
+  const FEED_KEY = "sommelier.feed";
+  const VALID_TABS = new Set(["overview", "features", "people", "tasks", "pools", "delivery", "quality", "ledger"]);
+  const TAB_TITLES = {
+    overview: "Factory Overview",
+    features: "Feature Map",
+    people: "Fleet & Participants",
+    tasks: "Orders & Tasks",
+    pools: "Quota Pools",
+    delivery: "Delivery & Branches",
+    quality: "Quality & Metrics",
+    ledger: "Claims & Run Requests",
+  };
 
   const KINDS = ["READY", "LANDED", "FIX", "STUCK", "FINDING", "TASK", "ACCEPT", "DECLINE",
     "RUN_REQUEST", "RUN_RESULT", "CHAT", "HELLO", "CLAIM", "RELEASE", "STATUS", "POLICY", "ALERT", "FACT", "OFFER", "TASK_UPDATE"];
@@ -101,7 +112,10 @@
     feedEmpty: $("feed-empty"), kinds: $("kinds"), fFrom: $("f-from"), fTopic: $("f-topic"),
     fClear: $("f-clear"), pulse: $("pulse"), conn: $("conn"), connText: $("conn-text"),
     forget: $("forget"), bar: $("bar"), staleBanner: $("stale-banner"), views: $("views"),
-    triage: $("triage"), wsTabs: $("ws-tabs"), themeToggle: $("theme-toggle"),
+    triage: $("triage"), wsTabs: $("ws-tabs"), viewTitle: $("view-title"),
+    overviewKpis: $("overview-kpis"), overviewSnap: $("overview-snap"),
+    feedToggle: $("feed-toggle"), feedClose: $("feed-close"), feedBadge: $("feed-badge"),
+    mobFeedBtn: $("mob-feed-btn"), navToggle: $("nav-toggle"), railBackdrop: $("rail-backdrop"),
     board: $("board"),
   };
 
@@ -133,6 +147,10 @@
           viewsModule = mod;
           if (mod && typeof mod.renderViews === "function") {
             mod.renderViews(S.snapshot || viewState, el.views);
+            renderOverviewSnap();
+            renderKpis();
+            renderTriage();
+            updateTabCounts();
           }
         })
         .catch(() => {});
@@ -557,8 +575,10 @@
     raf = 0;
     renderStaleBanner();
     renderTriage();
+    renderKpis();
     renderPeople();
     invokeRenderViews();
+    renderOverviewSnap();
     renderLedger();
     updateTabCounts();
     flushFeed();
@@ -1148,6 +1168,7 @@
     const token = load(TOKEN_KEY);
     if (!token) return showGate();
     el.gate.hidden = true; el.board.hidden = false; el.forget.hidden = false;
+    invokeRenderViews();
     schedule();
     if (!S.opened && !S.msgs.size) {
       setConn("connecting", "connecting");
@@ -1254,9 +1275,11 @@
     clearTimeout(retryTimer);
     if (ws) { const w = ws; ws = null; try { w.close(); } catch (_) { /* closed */ } }
     S.failures = 0; backoff = 1000;
-    if (el.wsTabs) {
+    start();
+  });
+  if (el.wsTabs) {
     el.wsTabs.addEventListener("click", (e) => {
-      const btn = e.target.closest(".ws-tab[data-tab]");
+      const btn = e.target.closest(".nav-item[data-tab]");
       if (btn) setTab(btn.dataset.tab);
     });
   }
@@ -1266,9 +1289,7 @@
   });
   setTab(load(TAB_KEY) || "overview");
   initTheme();
-
   start();
-  });
   el.forget.addEventListener("click", forget);
 
   el.kinds.addEventListener("click", (e) => {
@@ -1290,7 +1311,7 @@
 
   document.addEventListener("click", (e) => {
     const topic = e.target.closest("[data-topic]");
-    if (topic) { S.filters.topic = topic.dataset.topic; el.fTopic.value = S.filters.topic; saveFilters(); applyFilters(); $("feed").scrollIntoView({ behavior: "smooth", block: "start" }); return; }
+    if (topic) { S.filters.topic = topic.dataset.topic; el.fTopic.value = S.filters.topic; saveFilters(); applyFilters(); setFeedOpen(true); $("feed").scrollIntoView({ behavior: "smooth", block: "start" }); return; }
     if (e.target.closest("[data-clear]")) { clearFilters(); return; }
     const jump = e.target.closest("[data-jump]");
     if (jump) {
@@ -1334,6 +1355,14 @@
       }
     }
     const snap = S.snapshot || {};
+    if (viewsModule && typeof viewsModule.normalizeFeatures === "function") {
+      const norm = viewsModule.normalizeFeatures(snap);
+      for (const f of norm.features) {
+        if (f.agg === "fails") {
+          items.push({ cls: "", tab: "features", text: `feature failing: ${f.id}` });
+        }
+      }
+    }
     for (const p of Array.isArray(snap.pools) ? snap.pools : []) {
       const pst = String(p.state || "").toLowerCase();
       if (pst === "drain" || pst === "throttled" || pst === "closed") {
@@ -1343,7 +1372,7 @@
     const checks = snap.regress && Array.isArray(snap.regress.checks) ? snap.regress.checks : [];
     for (const c of checks) {
       if (c && c.status === "regression_confirmed") {
-        items.push({ cls: "", tab: "metrics", text: `regression: ${c.metric || "metric"} (+${Number(c.worse_pct || 0).toFixed(1)}%)` });
+        items.push({ cls: "", tab: "quality", text: `regression: ${c.metric || "metric"} (+${Number(c.worse_pct || 0).toFixed(1)}%)` });
       }
     }
     if (!items.length) {
@@ -1357,13 +1386,77 @@
       (items.length > 6 ? `<span class="count">+${items.length - 6} more</span>` : "");
   }
 
+  function renderKpis() {
+    if (!el.overviewKpis) return;
+    const snap = S.snapshot || {};
+    const mem = [...S.members.values()];
+    const online = mem.filter(present).length;
+    let running = 0, blocked = 0;
+    for (const a of S.agents.values()) {
+      const m = S.members.get(a.owner);
+      if (!m) continue;
+      const st = agentState(a, m);
+      if (st === "running") running++;
+      if (st === "blocked" || st === "suspect" || st === "starved") blocked++;
+    }
+    const norm = (viewsModule && typeof viewsModule.normalizeFeatures === "function")
+      ? viewsModule.normalizeFeatures(snap) : { features: [] };
+    const worksF = norm.features.filter((f) => f.agg === "works").length;
+    const failsF = norm.features.filter((f) => f.agg === "fails").length;
+    const tasks = Array.isArray(snap.tasks) ? snap.tasks : [];
+    const openTasks = tasks.filter((t) => t && t.state !== "closed" && t.state !== "cancelled").length;
+    const pools = Array.isArray(snap.pools) ? snap.pools : [];
+    const drainPools = pools.filter((p) => p && (p.state === "drain" || p.state === "throttled" || p.state === "closed")).length;
+
+    el.overviewKpis.innerHTML = `
+      <button type="button" class="kpi-card ${blocked ? "is-bad" : running ? "is-good" : ""}" data-jump-tab="people">
+        <span class="kpi-top"><span>Active Fleet</span><svg class="ic" aria-hidden="true"><use href="#i-users"/></svg></span>
+        <span class="kpi-val">${running} running</span>
+        <span class="kpi-sub">${online}/${mem.length} participants${blocked ? ` · ${blocked} blocked` : ""}</span>
+      </button>
+      <button type="button" class="kpi-card ${failsF ? "is-bad" : worksF ? "is-good" : ""}" data-jump-tab="features">
+        <span class="kpi-top"><span>Feature Map</span><svg class="ic" aria-hidden="true"><use href="#i-graph"/></svg></span>
+        <span class="kpi-val">${norm.features.length ? `${worksF}/${norm.features.length}` : "—"}</span>
+        <span class="kpi-sub">${norm.features.length ? (failsF ? `${failsF} failing` : "all proven green") : "no features.toml"}</span>
+      </button>
+      <button type="button" class="kpi-card" data-jump-tab="tasks">
+        <span class="kpi-top"><span>Open Orders</span><svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg></span>
+        <span class="kpi-val">${openTasks}</span>
+        <span class="kpi-sub">${tasks.length} total tasks</span>
+      </button>
+      <button type="button" class="kpi-card ${drainPools ? "is-bad" : ""}" data-jump-tab="pools">
+        <span class="kpi-top"><span>Quota Pools</span><svg class="ic" aria-hidden="true"><use href="#i-gauge"/></svg></span>
+        <span class="kpi-val">${pools.length}</span>
+        <span class="kpi-sub">${drainPools ? `${drainPools} throttled/drain` : "all healthy"}</span>
+      </button>
+    `;
+  }
+
+  function renderOverviewSnap() {
+    if (!el.overviewSnap) return;
+    const snap = S.snapshot || {};
+    const featHtml = (viewsModule && typeof viewsModule.renderFeaturesSummary === "function")
+      ? viewsModule.renderFeaturesSummary(snap)
+      : `<section class="panel snap-card"><h2 class="panel-h">Feature map</h2><p class="empty">Loading…</p></section>`;
+    const pools = Array.isArray(snap.pools) ? snap.pools : [];
+    const claims = [...S.claims.values()].filter((c) => !S.roster || S.roster.has(c.holder));
+    const rightHtml = `<section class="panel snap-card">
+      <div class="snap-head"><h2 class="panel-h">Pools &amp; claims</h2><button type="button" class="btn btn-quiet" data-jump-tab="pools">Pools →</button></div>
+      <div class="snap-list">
+        ${pools.slice(0, 3).map((p) => `<div class="snap-row"><span><code>${esc(p.pool)}</code></span><span class="state ${p.state === "open" ? "st-result" : "st-open"}">${esc(p.state)} · ${Number(p.used_pct || 0).toFixed(0)}%</span></div>`).join("") || `<p class="empty">No quota pools reported.</p>`}
+        ${claims.slice(0, 2).map((c) => `<div class="snap-row"><span><code>${esc(c.topic)}</code></span><span class="count">${esc(c.holder)}</span></div>`).join("")}
+      </div>
+    </section>`;
+    el.overviewSnap.innerHTML = featHtml + rightHtml;
+  }
+
   function updateTabCounts() {
     if (!el.wsTabs) return;
     const snap = S.snapshot || {};
     const setBadge = (id, count, alert) => {
       const n = $(id);
       if (n) n.textContent = count > 0 ? String(count) : "";
-      const btn = n ? n.closest(".ws-tab") : null;
+      const btn = n ? n.closest(".nav-item") : null;
       if (btn) btn.classList.toggle("has-alert", Boolean(alert));
     };
     let peopleAlert = false;
@@ -1373,6 +1466,8 @@
       const st = agentState(a, m);
       if (st === "blocked" || st === "suspect" || st === "starved") { peopleAlert = true; break; }
     }
+    const norm = (viewsModule && typeof viewsModule.normalizeFeatures === "function")
+      ? viewsModule.normalizeFeatures(snap) : { features: [] };
     const tasks = Array.isArray(snap.tasks) ? snap.tasks : [];
     const pools = Array.isArray(snap.pools) ? snap.pools : [];
     const landing = Array.isArray(snap.landing) ? snap.landing : [];
@@ -1382,65 +1477,78 @@
     const claimsCount = [...S.claims.values()].filter((c) => !S.roster || S.roster.has(c.holder)).length;
     const openRunsCount = [...S.asks.values()].filter((a) => a.msg.kind === "RUN_REQUEST" && isOpenRun(a)).length;
 
+    setBadge("tn-features", norm.features.length, norm.features.some((f) => f.agg === "fails"));
     setBadge("tn-people", S.members.size, peopleAlert);
     setBadge("tn-tasks", tasks.length, tasks.some((t) => t && t.state === "stuck"));
     setBadge("tn-pools", pools.length, pools.some((p) => p && (p.state === "drain" || p.state === "throttled" || p.state === "closed")));
-    setBadge("tn-landing", landing.length, landing.some((l) => l && (l.state === "failed" || l.state === "conflict")));
-    setBadge("tn-runs", runs.length, runs.some((r) => r && (r.outcome === "fail" || r.outcome === "error")));
-    setBadge("tn-branches", branches.length, branches.some((b) => b && b.state === "orphan"));
-    setBadge("tn-metrics", checks.length, checks.some((c) => c && c.status === "regression_confirmed"));
+    setBadge("tn-delivery", landing.length + branches.length, landing.some((l) => l && (l.state === "failed" || l.state === "conflict")) || branches.some((b) => b && b.state === "orphan"));
+    setBadge("tn-quality", runs.length + checks.length, runs.some((r) => r && (r.outcome === "fail" || r.outcome === "error")) || checks.some((c) => c && c.status === "regression_confirmed"));
     setBadge("tn-ledger", claimsCount + openRunsCount, false);
+    if (el.feedBadge) el.feedBadge.textContent = feedNodes.size ? String(feedNodes.size) : "";
   }
 
   function setTab(tab) {
     const next = VALID_TABS.has(tab) ? tab : "overview";
-    if (el.board) el.board.dataset.tab = next;
+    if (el.board) {
+      el.board.dataset.tab = next;
+      el.board.classList.remove("nav-open");
+    }
+    if (el.railBackdrop) el.railBackdrop.hidden = true;
+    if (el.viewTitle) el.viewTitle.textContent = TAB_TITLES[next] || "Factory Overview";
     store(TAB_KEY, next);
     if (el.wsTabs) {
-      for (const btn of el.wsTabs.querySelectorAll(".ws-tab")) {
+      for (const btn of el.wsTabs.querySelectorAll(".nav-item[data-tab]")) {
         btn.setAttribute("aria-selected", String(btn.dataset.tab === next));
       }
     }
+    for (const mb of document.querySelectorAll(".mob-dock [data-jump-tab]")) {
+      mb.classList.toggle("is-on", mb.dataset.jumpTab === next);
+    }
+  }
+
+  function setFeedOpen(open) {
+    const state = open ? "open" : "closed";
+    if (el.board) el.board.dataset.feed = state;
+    if (el.feedToggle) el.feedToggle.setAttribute("aria-expanded", String(open));
+    store(FEED_KEY, state);
   }
 
   function applyTheme(mode) {
     const m = mode === "dark" || mode === "light" ? mode : "system";
     if (m === "system") delete document.documentElement.dataset.theme;
     else document.documentElement.dataset.theme = m;
-    if (!el.themeToggle) return;
-    const icon = m === "dark" ? "#i-moon" : m === "light" ? "#i-sun" : "#i-monitor";
-    const lbl = m === "dark" ? "Dark" : m === "light" ? "Light" : "Auto";
-    const use = el.themeToggle.querySelector("use");
-    const span = el.themeToggle.querySelector(".theme-lbl");
-    if (use) use.setAttribute("href", icon);
-    if (span) span.textContent = lbl;
-    el.themeToggle.title = `Theme: ${m}`;
+    for (const btn of document.querySelectorAll("[data-set-theme]")) {
+      const on = btn.dataset.setTheme === m;
+      btn.classList.toggle("is-on", on);
+      btn.setAttribute("aria-pressed", String(on));
+    }
   }
 
   function initTheme() {
     applyTheme(load(THEME_KEY) || "system");
-    if (el.themeToggle) {
-      el.themeToggle.addEventListener("click", () => {
-        const cur = load(THEME_KEY) || "system";
-        const next = cur === "system" ? "dark" : cur === "dark" ? "light" : "system";
-        store(THEME_KEY, next === "system" ? null : next);
-        applyTheme(next);
-      });
-    }
+    document.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-set-theme]");
+      if (!btn) return;
+      const next = btn.dataset.setTheme;
+      store(THEME_KEY, next === "system" ? null : next);
+      applyTheme(next);
+    });
   }
 
-  // Keep sticky offsets right when the bar wraps. On a phone only the section
-  // switcher stays on screen: the name, numbers and connection row scroll away.
-  const phone = matchMedia("(max-width: 640px)");
-  const sizeBar = () => {
-    const inner = el.bar.querySelector(".bar-in");
-    const lift = phone.matches ? inner.offsetHeight : 0;
-    el.bar.style.top = -lift + "px";
-    document.documentElement.style.setProperty("--bar-h", (el.bar.offsetHeight - lift) + "px");
-  };
-  phone.addEventListener("change", sizeBar);
-  if ("ResizeObserver" in window) new ResizeObserver(sizeBar).observe(el.bar); else addEventListener("resize", sizeBar);
-  sizeBar();
+  if (el.feedToggle) el.feedToggle.addEventListener("click", () => setFeedOpen(el.board.dataset.feed !== "open"));
+  if (el.feedClose) el.feedClose.addEventListener("click", () => setFeedOpen(false));
+  if (el.mobFeedBtn) el.mobFeedBtn.addEventListener("click", () => setFeedOpen(el.board.dataset.feed !== "open"));
+  if (el.navToggle) el.navToggle.addEventListener("click", () => {
+    const open = el.board.classList.toggle("nav-open");
+    if (el.railBackdrop) el.railBackdrop.hidden = !open;
+  });
+  if (el.railBackdrop) el.railBackdrop.addEventListener("click", () => {
+    el.board.classList.remove("nav-open");
+    el.railBackdrop.hidden = true;
+  });
+
+  const savedFeed = load(FEED_KEY);
+  setFeedOpen(savedFeed ? savedFeed === "open" : window.innerWidth > 1200);
 
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {

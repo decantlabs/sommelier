@@ -1,6 +1,7 @@
-// Dashboard extension views registry (steps 8, 9, and 10).
+// Dashboard extension views registry.
 "use strict";
 
+import { renderFeatures, renderFeaturesSummary, wireFeaturesEvents, normalizeFeatures } from "./features.js";
 import { renderTasks } from "./tasks.js";
 import { renderPools } from "./pools.js";
 import { renderLanding } from "./landing.js";
@@ -9,6 +10,9 @@ import { renderBranches } from "./branches.js";
 import { renderMetrics } from "./metrics.js";
 
 export {
+  renderFeatures,
+  renderFeaturesSummary,
+  normalizeFeatures,
   renderTasks,
   renderPools,
   renderLanding,
@@ -24,6 +28,7 @@ function isSlotEmpty(html) {
 export function renderViews(state, root) {
   const s = state || {};
   const parts = {
+    features: renderFeatures(s) || "",
     tasks: renderTasks(s) || "",
     pools: renderPools(s) || "",
     landing: renderLanding(s) || "",
@@ -34,6 +39,7 @@ export function renderViews(state, root) {
   const doc = (root && root.ownerDocument) ? root.ownerDocument : (typeof document !== "undefined" ? document : null);
   if (doc && typeof doc.getElementById === "function") {
     const slots = [
+      ["view-features", parts.features],
       ["view-tasks", parts.tasks],
       ["view-pools", parts.pools],
       ["view-landing", parts.landing],
@@ -47,6 +53,7 @@ export function renderViews(state, root) {
       if (node) {
         node.innerHTML = html;
         node.classList.toggle("is-empty", isSlotEmpty(html));
+        if (id === "view-features") wireFeaturesEvents(node);
         updatedSlot = true;
       }
     }

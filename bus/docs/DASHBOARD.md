@@ -14,11 +14,11 @@ http://127.0.0.1:7300/                on the hub machine
 ```
 
 No build step and nothing from outside: `ui/index.html`, `ui/style.css`,
-`ui/app.js`, `ui/views/*.js` and `ui/assets/favicon.svg` are everything. The page works in current
-Chrome, Edge and Firefox, on a desktop and on a phone, light or dark by the system
-setting (with a manual theme toggle in the top bar).
+`ui/app.js`, `ui/views/*.js`, `ui/assets/fonts/*.woff2` and `ui/assets/favicon.svg` are everything. The page works in current
+Chrome, Edge and Firefox, on a desktop and on a phone, dark or light by the system
+setting (with a three-way Auto / Light / Dark switcher in the sidebar).
 
-A workspace tab bar switches between **Overview** (participants, active Control Plane views, and Claims & runs) and focused views for **People**, **Tasks**, **Pools**, **Landing**, **Runs**, **Branches**, **Metrics**, and **Claims & runs**, while an anomaly triage strip appears above the tabs whenever workers are blocked/suspect, pools are draining, or a regression is confirmed.
+The left navigation rail switches between **Overview**, **Feature Map** (interactive dependency graph and area proof matrix from `features.toml`), **Fleet**, **Orders**, **Quota Pools**, **Delivery** (landing queue and branches), **Quality** (runs and regression metrics), and **Claims & Runs**, while an anomaly triage strip surfaces blocked/suspect workers, draining pools, failing features, and confirmed regressions alongside a collapsible Live Feed pane.
 
 ## Auth
 

@@ -26,7 +26,7 @@ export function renderTasks(state) {
   const offers = Array.isArray(state.offers) ? state.offers : [];
 
   if (!tasks.length && !leases.length && !offers.length) {
-    return `<section class="panel tasks-panel"><h2 class="panel-h">Tasks</h2><p class="empty">No tasks in queue. Tasks enter here when work orders are queued.</p></section>`;
+    return `<section class="panel tasks-panel"><h2 class="panel-h">Orders &amp; tasks</h2><p class="empty">No tasks in queue. Tasks enter here when work orders are queued.</p></section>`;
   }
 
   const activeLeaseByTask = new Map();
@@ -40,6 +40,7 @@ export function renderTasks(state) {
     const lease = activeLeaseByTask.get(t.id);
     const holder = lease ? `${esc(lease.owner)}/${esc(lease.worker || "-")}${lease.state === "suspect" ? " (suspect)" : ""}` : "unleased";
     const score = t.score != null ? `score ${esc(t.score)}` : "";
+    const feat = t.feature ? `<span class="chip chip-feat"><span>${esc(t.feature)}</span></span>` : "";
     const cp = t.latest_checkpoint && t.latest_checkpoint.note
       ? `<div class="task-cp">cp #${esc(t.latest_checkpoint.seq)}: ${esc(t.latest_checkpoint.note)}</div>`
       : "";
@@ -49,6 +50,7 @@ export function renderTasks(state) {
         ${stateBadge(t.state)}
       </div>
       <div class="cp-row-meta">
+        ${feat}
         <span class="chip"><span>${esc(t.kind || "fix")} · ${esc(t.priority || "normal")}</span></span>
         <span class="t-meta">attempt ${esc(t.attempt || 1)}${score ? " · " + score : ""} · ${holder}</span>
       </div>
@@ -62,7 +64,7 @@ export function renderTasks(state) {
   )).join("");
 
   return `<section class="panel tasks-panel">
-    <h2 class="panel-h">Tasks <span class="count">${tasks.length}</span></h2>
+    <h2 class="panel-h">Orders &amp; tasks <span class="count">${tasks.length}</span></h2>
     <ul class="tasks-list">${rows}</ul>
     ${offerRows ? `<h3 class="panel-sub">Open offers <span class="count">${openOffers.length}</span></h3><ul class="offers-list">${offerRows}</ul>` : ""}
   </section>`;
