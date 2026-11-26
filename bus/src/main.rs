@@ -61,6 +61,8 @@ ALERTS & EXCEPTIONS
 
 BACKLOG, WORK & LANDING
   sommelier task add --kind K --title T --scope G --done-when D --brief FILE [--priority P] [--after ID] [--json]
+  sommelier task add --kind K --title T --feature ID --brief FILE   (scope and done condition from the feature map)
+  sommelier feature list [--area A] | show ID | check [--file F] [--profiles DIR] | touching PATH... [--json]
   sommelier task list [--state S] [--mine] | show ID | cancel ID | requeue ID | import-board FILE [--json]
   sommelier next [--wait SECS] [--class C] [--peek] | work ID | checkpoint ID --file F | done ID ... | stuck ID --why TEXT
   sommelier decline ID --why TEXT | ask --task ID TEXT | offers [--top N]
@@ -1150,6 +1152,7 @@ unless --kind STATUS or --all is given.
         "verify" => return Some(sommelier::cli::verify::help().to_owned()),
         "factory" | "op" => return Some(sommelier::cli::factory::help().to_owned()),
         "test" => return Some(sommelier::cli::test::help().to_owned()),
+        "feature" => return Some(sommelier::cli::feature::help().to_owned()),
         "standing" => return Some(sommelier::cli::standing::help().to_owned()),
         "who" => ("sommelier who [--json]", "Lists open connections: name, role, listening or request.\n", true),
         "whoami" => ("sommelier whoami [--json]", "Shows your name, role and the newest message id.\n", true),
@@ -1184,7 +1187,7 @@ unless --kind STATUS or --all is given.
             true,
         ),
         "task" => (
-            "sommelier task add --kind K --title T --scope G --done-when D --brief FILE [--id ID] [--priority P] [--after ID] [--branch B] [--accepts C] [--prior-art] [--json] | list [--state S] [--mine] | show ID | cancel ID [--reason TEXT] | requeue ID [--reason TEXT] [--note TEXT] | import-board FILE [--dry-run]",
+            "sommelier task add --kind K --title T --scope G --done-when D --brief FILE [--id ID] [--priority P] [--after ID] [--branch B] [--accepts C] [--feature ID] [--prior-art] [--json] | list [--state S] [--mine] | show ID | cancel ID [--reason TEXT] | requeue ID [--reason TEXT] [--note TEXT] | import-board FILE [--dry-run]",
             "Manages the task backlog in state.db and uploads task briefs by SHA-256.\n",
             true,
         ),
