@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::config::{GateDone, IntakeConfig};
 use super::facts::{SubRow, fact, one_line, query_by_states, requeue_message, submission_fact};
-use crate::gate::{Finding, GateReport, OrderView, Risk, Severity, check};
+use crate::gate::{Finding, GateReport, OrderView, Risk, Severity};
 use crate::hub::Hub;
 use crate::msg::Message;
 use crate::task::query_task;
@@ -27,6 +27,8 @@ const BODY_BUDGET: usize = 3800;
 struct Job {
     row: SubRow,
     scope: Vec<String>,
+    /// The paths of the feature the order names, read from the feature map when the job was made.
+    feature: Option<crate::gate::FeatureScope>,
 }
 
 fn parse_risk(word: &str) -> Risk {
@@ -65,7 +67,8 @@ fn run_gate(cfg: &IntakeConfig, dir: &Path, job: &Job) -> GateDone {
         risk,
         tier: row.tier.clamp(0, 3) as u8,
     };
-    let report = check(&diff, &order, &cfg.gate_rules);
+    let report =
+        crate::gate::check_with_feature(&diff, &order, &cfg.gate_rules, job.feature.as_ref());
     let stored = serde_json::to_vec(&diff)
         .map_err(|e| e.to_string())
         .and_then(|b| {
@@ -254,12 +257,20 @@ fn start(hub: &Hub) {
             query_by_states(conn, &["received"])
                 .into_iter()
                 .map(|row| {
-                    let scope = query_task(conn, &row.task)
-                        .ok()
-                        .flatten()
+                    let task = query_task(conn, &row.task).ok().flatten();
+                    let scope = task
+                        .as_ref()
                         .map(|t| split_csv(&t.scope).into_iter().map(str::to_owned).collect())
                         .unwrap_or_default();
-                    Job { row, scope }
+                    let feature = task.and_then(|t| t.feature).and_then(|id| {
+                        crate::feature::registry::current(&hub.config().data_dir)
+                            .and_then(|m| m.gate_scope(&id))
+                    });
+                    Job {
+                        row,
+                        scope,
+                        feature,
+                    }
                 })
                 .collect()
         })
