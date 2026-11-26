@@ -34,18 +34,20 @@
   const HUB_KEY = "sommelier.hub";
   const FILTER_KEY = "sommelier.filters";
   const TAB_KEY = "sommelier.tab";
+  const PIPE_KEY = "sommelier.pipe";
   const THEME_KEY = "sommelier.theme";
   const FEED_KEY = "sommelier.feed";
-  const VALID_TABS = new Set(["overview", "features", "people", "tasks", "pools", "delivery", "quality", "ledger"]);
-  const TAB_TITLES = {
-    overview: "Factory Overview",
-    features: "Feature Map",
-    people: "Fleet & Participants",
-    tasks: "Orders & Tasks",
-    pools: "Quota Pools",
-    delivery: "Delivery & Branches",
-    quality: "Quality & Metrics",
-    ledger: "Claims & Run Requests",
+  const VALID_TABS = new Set(["overview", "features", "people", "pipeline", "pools"]);
+  const PIPE_STAGES = new Set(["all", "orders", "delivery", "quality", "claims"]);
+  const LEGACY_TAB = {
+    tasks: ["pipeline", "orders"],
+    delivery: ["pipeline", "delivery"],
+    quality: ["pipeline", "quality"],
+    ledger: ["pipeline", "claims"],
+    landing: ["pipeline", "delivery"],
+    branches: ["pipeline", "delivery"],
+    runs: ["pipeline", "quality"],
+    metrics: ["pipeline", "quality"],
   };
 
   const KINDS = ["READY", "LANDED", "FIX", "STUCK", "FINDING", "TASK", "ACCEPT", "DECLINE",
@@ -112,11 +114,11 @@
     feedEmpty: $("feed-empty"), kinds: $("kinds"), fFrom: $("f-from"), fTopic: $("f-topic"),
     fClear: $("f-clear"), pulse: $("pulse"), conn: $("conn"), connText: $("conn-text"),
     forget: $("forget"), bar: $("bar"), staleBanner: $("stale-banner"), views: $("views"),
-    triage: $("triage"), wsTabs: $("ws-tabs"), viewTitle: $("view-title"),
+    triage: $("triage"), wsTabs: $("ws-tabs"), alertsPill: $("alerts-pill"), alertsCount: $("alerts-count"),
     overviewKpis: $("overview-kpis"), overviewSnap: $("overview-snap"),
+    pipelineSub: $("pipeline-sub"), themeToggle: $("theme-toggle"),
     feedToggle: $("feed-toggle"), feedClose: $("feed-close"), feedBadge: $("feed-badge"),
-    mobFeedBtn: $("mob-feed-btn"), navToggle: $("nav-toggle"), railBackdrop: $("rail-backdrop"),
-    board: $("board"),
+    mobFeedBtn: $("mob-feed-btn"), board: $("board"),
   };
 
   let viewsModule = null;
@@ -591,17 +593,17 @@
       rank(a) - rank(b) || (b.online - a.online) || a.name.localeCompare(b.name));
   }
 
-  // One line in the card: OS and GPU. The rest of the machine sits behind the toggle.
   function rigHtml(h) {
-    if (!h) return `<p class="rig-none">No HELLO yet, so the machine is unknown.</p>`;
+    if (!h) return `<div class="rig-chips"><span class="rig-none">No HELLO yet</span></div>`;
     const labels = { os: "OS", gpu: "GPU", cpu: "CPU", ram: "RAM", agent: "Agent", capacity: "Capacity" };
-    const cell = (k) => `<div><dt>${labels[k]}</dt><dd>${esc(h.rig[k])}</dd></div>`;
-    const top = ["os", "gpu"].filter((k) => h.rig[k]).map(cell);
-    const more = CORE.filter((k) => h.rig[k] && k !== "os" && k !== "gpu").map(cell)
+    const pills = ["os", "gpu"].filter((k) => h.rig[k]).map((k) => `<span class="rig-pill">${esc(h.rig[k])}</span>`);
+    const more = CORE.filter((k) => h.rig[k] && k !== "os" && k !== "gpu")
+      .map((k) => `<div><dt>${labels[k]}</dt><dd>${esc(h.rig[k])}</dd></div>`)
       .concat(Object.keys(h.rig).filter((k) => !CORE.includes(k)).map((k) => `<div><dt>${esc(k)}</dt><dd>${esc(h.rig[k])}</dd></div>`));
-    if (!top.length && !more.length) return `<p class="rig-raw">${esc(h.raw)}</p>`;
-    return `<dl class="rig">${top.join("")}</dl>` + (more.length || h.extra.length
-      ? `<details class="rig-more"><summary>More from the HELLO</summary><dl class="rig">${more.join("")}</dl>${h.extra.length ? `<p>${esc(h.extra.join(", "))}</p>` : ""}</details>` : "");
+    if (!pills.length && !more.length) return `<div class="rig-chips"><span class="rig-pill">${esc(h.raw)}</span></div>`;
+    const moreHtml = more.length || h.extra.length
+      ? `<details class="rig-more"><summary>+${more.length + h.extra.length} specs</summary><dl class="rig">${more.join("")}</dl>${h.extra.length ? `<p>${esc(h.extra.join(", "))}</p>` : ""}</details>` : "";
+    return `<div class="rig-chips">${pills.join("")}${moreHtml}</div>`;
   }
   function presenceHtml(m) {
     if (!S.whoKnown) {
@@ -753,55 +755,41 @@
   }
 
   function workersHtml(m, list) {
-    const groups = { blocked: [], suspect: [], running: [], starved: [], idle: [], own: [], stale: [], offline: [], done: [] };
+    const order = { blocked: 0, suspect: 1, starved: 2, running: 3, idle: 4, own: 5, stale: 6, offline: 7, done: 8 };
+    const active = [];
+    const done = [];
     for (const a of list) {
       const st = agentState(a, m);
-      (groups[st] || groups.running).push(a);
+      if (st === "done") done.push({ a, st });
+      else active.push({ a, st });
     }
-    for (const g of Object.values(groups)) g.sort((x, y) => y.ts - x.ts || x.agent.localeCompare(y.agent));
-    const tally = [
-      groups.running.length ? `<span class="t-run"><b>${groups.running.length}</b>running</span>` : "",
-      groups.suspect.length ? `<span class="t-block"><b>${groups.suspect.length}</b>suspect</span>` : "",
-      groups.blocked.length ? `<span class="t-block"><b>${groups.blocked.length}</b>blocked</span>` : "",
-      groups.starved.length ? `<span class="t-block"><b>${groups.starved.length}</b>starved</span>` : "",
-      groups.idle.length ? `<span><b>${groups.idle.length}</b>idle</span>` : "",
-      groups.own.length ? `<span><b>${groups.own.length}</b>own</span>` : "",
-      groups.stale.length ? `<span><b>${groups.stale.length}</b>quiet</span>` : "",
-      groups.done.length ? `<span><b>${groups.done.length}</b>done</span>` : "",
-    ].join("");
-    const body = STATES.filter((s) => groups[s].length).map((s) => {
-      const rows = groups[s].map((a) => agentHtml(a, s)).join("");
-      const hint = s === "stale" ? `<span class="hint">no STATUS for ${STALE_MIN} min${S.whoKnown && !present(m) ? " or owner offline" : ""}</span>` : "";
-      const head = `<span>${GROUP_LABEL[s]}</span><span class="n">${groups[s].length}</span>${hint}`;
-      if (s === "done") {
-        return `<details class="grp grp-done done-fold" data-owner="${esc(m.name)}"${doneOpen.has(m.name) ? " open" : ""}>
-          <summary class="grp-h">${head}<svg class="ic" aria-hidden="true"><use href="#i-chev"/></svg></summary>
-          <ul class="agents">${rows}</ul></details>`;
-      }
-      return `<div class="grp grp-${s}"><h4 class="grp-h">${head}</h4><ul class="agents">${rows}</ul></div>`;
-    }).join("");
-    return `<section class="workers"><h4 class="workers-h"><span>Workers</span><span class="n">${list.length}</span><span class="tally">${tally}</span></h4>
-      <div class="line">${body}</div></section>`;
+    active.sort((x, y) => (order[x.st] ?? 9) - (order[y.st] ?? 9) || y.a.ts - x.a.ts || x.a.agent.localeCompare(y.a.agent));
+    done.sort((x, y) => y.a.ts - x.a.ts || x.a.agent.localeCompare(y.a.agent));
+
+    const activeRows = active.map(({ a, st }) => agentHtml(a, st)).join("");
+    const doneRows = done.map(({ a, st }) => agentHtml(a, st)).join("");
+    const doneFold = done.length
+      ? `<details class="done-fold" data-owner="${esc(m.name)}"${doneOpen.has(m.name) ? " open" : ""}>
+          <summary><svg class="ic" aria-hidden="true"><use href="#i-chev"/></svg><span>${done.length} completed</span></summary>
+          <ul class="wrk-list">${doneRows}</ul>
+        </details>` : "";
+    return `${activeRows ? `<ul class="wrk-list">${activeRows}</ul>` : ""}${doneFold}`;
   }
 
   function renderPeople() {
     const list = sortedMembers();
     if (!list.length) {
       el.people.innerHTML = S.opened
-        ? `<div class="person person-empty"><svg viewBox="0 0 120 24" aria-hidden="true"><path d="M2 12h116"/><circle cx="14" cy="12" r="5"/><circle cx="46" cy="12" r="5"/><circle cx="78" cy="12" r="5"/><circle cx="106" cy="12" r="5"/></svg><h3>Nobody on the bus yet</h3><p>A participant appears here with its first message and its machine with a <strong>HELLO</strong>. What it works on comes from its claims, accepts and reports, and workers it runs show up with a <strong>STATUS</strong> on topic <code>agent/&lt;name&gt;</code>.</p></div>`
+        ? `<div class="person person-empty"><h3>Nobody on the bus yet</h3><p>A participant appears here with its first message and its machine with a <strong>HELLO</strong>. Workers show up with a <strong>STATUS</strong> on topic <code>agent/&lt;name&gt;</code>.</p></div>`
         : skeleton(2);
       return;
     }
-    // keep open folds across renders
     doneOpen = new Set([...el.people.querySelectorAll("details.done-fold[open]")].map((d) => d.dataset.owner));
     const openRig = new Set([...el.people.querySelectorAll("details.rig-more[open]")].map((d) => d.closest(".person").dataset.name));
 
     const acts = new Map(list.map((m) => [m.name, activity(m)]));
-    // Token holders who never showed up get one quiet line, not an empty card.
     const seen = (m) => m.online || m.hello || m.lastMsg || acts.get(m.name).own || acts.get(m.name).workers.length;
     const dormant = list.filter((m) => !seen(m));
-    // Every participant first, side by side, so everyone's state is in view at once.
-    // A long worker list gets its own full width section below the cards.
     const shown = list.filter(seen);
     const off = (m) => (S.whoKnown && !present(m) ? " is-off" : "");
     const cards = shown.map((m) => {
@@ -810,19 +798,31 @@
       const n = act.workers.length;
       const crewLink = n > CREW_INLINE
         ? `<a class="crew-link" href="#crew-${esc(m.name)}">${n} workers, ${act.workers.filter((w) => agentState(w, m) === "running").length} running<svg class="ic" aria-hidden="true"><use href="#i-arrow"/></svg></a>` : "";
+      const repSub = act.report && h.src !== "report"
+        ? `<div class="focus-sub"><span class="m-kind ${kindCls(act.report.kind)}">${esc(act.report.kind)}</span><span>${esc(firstPart(act.report.body))}</span></div>` : "";
+      const askSub = act.waiting.length
+        ? `<div class="focus-sub"><span>Asked: ${esc(act.waiting[0].msg.topic || "#" + act.waiting[0].msg.id)}</span></div>` : "";
+      const focus = `<div class="focus-strip">
+        <div class="focus-top">
+          <span class="focus-state n-${h.st}">${esc(h.word)}${h.topic ? ` <span class="focus-topic">${esc(h.topic)}</span>` : ""}</span>
+          ${h.ts ? `<time class="age" data-ago="${h.ts}" data-short="1">${ago(h.ts)}</time>` : ""}
+        </div>
+        ${h.text ? `<p class="focus-text">${esc(h.text)}</p>` : ""}
+        ${askSub}${repSub}
+      </div>`;
       return `<article class="person${off(m)} ${hueOf(m.name)}" data-name="${esc(m.name)}">
-        <header class="person-h">
-          <div class="who"><h3>${esc(m.name)}</h3><span class="role">${esc(m.role)}</span>${presenceHtml(m)}</div>
-          <div class="rig-slot">${rigHtml(m.hello)}</div>
+        <header class="st-head">
+          <div class="st-id"><h3>${esc(m.name)}</h3><span class="role">${esc(m.role)}</span></div>
+          ${presenceHtml(m)}
         </header>
-        ${nowHtml(h)}
-        ${actsHtml(act, h) || '<div class="acts-none"></div>'}
-        <div class="pfoot">${n && n <= CREW_INLINE ? workersHtml(m, act.workers) : ""}${crewLink}</div>
+        ${rigHtml(m.hello)}
+        ${focus}
+        ${n && n <= CREW_INLINE ? workersHtml(m, act.workers) : ""}${crewLink}
       </article>`;
     });
     const crews = shown.filter((m) => acts.get(m.name).workers.length > CREW_INLINE).map((m) =>
       `<article class="person crew${off(m)} ${hueOf(m.name)}" id="crew-${esc(m.name)}" data-name="${esc(m.name)}">
-        <h3 class="crew-h">${esc(m.name)}<span>workers</span></h3>
+        <header class="st-head"><div class="st-id"><h3>${esc(m.name)}</h3><span class="role">workers</span></div></header>
         ${workersHtml(m, acts.get(m.name).workers)}
       </article>`);
     el.people.innerHTML = cards.join("") + crews.join("") + (dormant.length
@@ -1343,6 +1343,7 @@
     ag.classList.toggle("open", openAgents.has(k));
   }
 
+  let triageManual = null;
   function renderTriage() {
     if (!el.triage) return;
     const items = [];
@@ -1375,7 +1376,12 @@
         items.push({ cls: "", tab: "quality", text: `regression: ${c.metric || "metric"} (+${Number(c.worse_pct || 0).toFixed(1)}%)` });
       }
     }
-    if (!items.length) {
+    if (el.alertsPill) {
+      el.alertsPill.hidden = !items.length;
+      if (el.alertsCount) el.alertsCount.textContent = `${items.length} ${items.length === 1 ? "alert" : "alerts"}`;
+    }
+    const showBar = items.length > 0 && (triageManual !== null ? triageManual : el.board?.dataset.tab === "overview");
+    if (!showBar) {
       el.triage.hidden = true;
       el.triage.innerHTML = "";
       return;
@@ -1403,31 +1409,36 @@
       ? viewsModule.normalizeFeatures(snap) : { features: [] };
     const worksF = norm.features.filter((f) => f.agg === "works").length;
     const failsF = norm.features.filter((f) => f.agg === "fails").length;
+    const totalF = Math.max(1, norm.features.length);
+    const wPct = norm.features.length ? (worksF / totalF) * 100 : 0;
+    const fPct = norm.features.length ? (failsF / totalF) * 100 : 0;
     const tasks = Array.isArray(snap.tasks) ? snap.tasks : [];
     const openTasks = tasks.filter((t) => t && t.state !== "closed" && t.state !== "cancelled").length;
+    const landing = Array.isArray(snap.landing) ? snap.landing : [];
     const pools = Array.isArray(snap.pools) ? snap.pools : [];
     const drainPools = pools.filter((p) => p && (p.state === "drain" || p.state === "throttled" || p.state === "closed")).length;
 
     el.overviewKpis.innerHTML = `
-      <button type="button" class="kpi-card ${blocked ? "is-bad" : running ? "is-good" : ""}" data-jump-tab="people">
-        <span class="kpi-top"><span>Active Fleet</span><svg class="ic" aria-hidden="true"><use href="#i-users"/></svg></span>
-        <span class="kpi-val">${running} running</span>
-        <span class="kpi-sub">${online}/${mem.length} participants${blocked ? ` · ${blocked} blocked` : ""}</span>
+      <button type="button" class="tp-cell ${blocked ? "is-bad" : running ? "is-good" : ""}" data-jump-tab="people">
+        <span class="tp-top"><span>Active Fleet</span><svg class="ic" aria-hidden="true"><use href="#i-users"/></svg></span>
+        <span class="tp-val">${running} running</span>
+        <span class="tp-sub">${online}/${mem.length} online${blocked ? ` · ${blocked} blocked` : ""}</span>
       </button>
-      <button type="button" class="kpi-card ${failsF ? "is-bad" : worksF ? "is-good" : ""}" data-jump-tab="features">
-        <span class="kpi-top"><span>Feature Map</span><svg class="ic" aria-hidden="true"><use href="#i-graph"/></svg></span>
-        <span class="kpi-val">${norm.features.length ? `${worksF}/${norm.features.length}` : "—"}</span>
-        <span class="kpi-sub">${norm.features.length ? (failsF ? `${failsF} failing` : "all proven green") : "no features.toml"}</span>
+      <button type="button" class="tp-cell ${failsF ? "is-bad" : worksF ? "is-good" : ""}" data-jump-tab="features">
+        <span class="tp-top"><span>Feature Map</span><svg class="ic" aria-hidden="true"><use href="#i-graph"/></svg></span>
+        <span class="tp-val">${norm.features.length ? `${worksF}/${norm.features.length}` : "—"}</span>
+        <span class="tp-sub">${norm.features.length ? (failsF ? `${failsF} failing` : "all proven green") : "no features.toml"}</span>
+        ${norm.features.length ? `<svg class="tp-bar" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true"><rect x="0" y="0" width="100" height="4" class="f-bar-track"/><rect x="0" y="0" width="${wPct.toFixed(1)}" height="4" class="f-bar-works"/><rect x="${wPct.toFixed(1)}" y="0" width="${fPct.toFixed(1)}" height="4" class="f-bar-fails"/></svg>` : ""}
       </button>
-      <button type="button" class="kpi-card" data-jump-tab="tasks">
-        <span class="kpi-top"><span>Open Orders</span><svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg></span>
-        <span class="kpi-val">${openTasks}</span>
-        <span class="kpi-sub">${tasks.length} total tasks</span>
+      <button type="button" class="tp-cell" data-jump-tab="pipeline">
+        <span class="tp-top"><span>Pipeline</span><svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg></span>
+        <span class="tp-val">${openTasks} open</span>
+        <span class="tp-sub">${tasks.length} orders · ${landing.length} landing</span>
       </button>
-      <button type="button" class="kpi-card ${drainPools ? "is-bad" : ""}" data-jump-tab="pools">
-        <span class="kpi-top"><span>Quota Pools</span><svg class="ic" aria-hidden="true"><use href="#i-gauge"/></svg></span>
-        <span class="kpi-val">${pools.length}</span>
-        <span class="kpi-sub">${drainPools ? `${drainPools} throttled/drain` : "all healthy"}</span>
+      <button type="button" class="tp-cell ${drainPools ? "is-bad" : ""}" data-jump-tab="pools">
+        <span class="tp-top"><span>Quota Fuel</span><svg class="ic" aria-hidden="true"><use href="#i-gauge"/></svg></span>
+        <span class="tp-val">${pools.length} pools</span>
+        <span class="tp-sub">${drainPools ? `${drainPools} throttled/drain` : "all healthy"}</span>
       </button>
     `;
   }
@@ -1441,7 +1452,7 @@
     const pools = Array.isArray(snap.pools) ? snap.pools : [];
     const claims = [...S.claims.values()].filter((c) => !S.roster || S.roster.has(c.holder));
     const rightHtml = `<section class="panel snap-card">
-      <div class="snap-head"><h2 class="panel-h">Pools &amp; claims</h2><button type="button" class="btn btn-quiet" data-jump-tab="pools">Pools →</button></div>
+      <div class="snap-head"><h2 class="panel-h">Quota &amp; claims</h2><button type="button" class="btn btn-ghost" data-jump-tab="pools">Pools →</button></div>
       <div class="snap-list">
         ${pools.slice(0, 3).map((p) => `<div class="snap-row"><span><code>${esc(p.pool)}</code></span><span class="state ${p.state === "open" ? "st-result" : "st-open"}">${esc(p.state)} · ${Number(p.used_pct || 0).toFixed(0)}%</span></div>`).join("") || `<p class="empty">No quota pools reported.</p>`}
         ${claims.slice(0, 2).map((c) => `<div class="snap-row"><span><code>${esc(c.topic)}</code></span><span class="count">${esc(c.holder)}</span></div>`).join("")}
@@ -1451,12 +1462,11 @@
   }
 
   function updateTabCounts() {
-    if (!el.wsTabs) return;
     const snap = S.snapshot || {};
     const setBadge = (id, count, alert) => {
       const n = $(id);
       if (n) n.textContent = count > 0 ? String(count) : "";
-      const btn = n ? n.closest(".nav-item") : null;
+      const btn = n ? n.closest(".nav-btn") : null;
       if (btn) btn.classList.toggle("has-alert", Boolean(alert));
     };
     let peopleAlert = false;
@@ -1477,33 +1487,57 @@
     const claimsCount = [...S.claims.values()].filter((c) => !S.roster || S.roster.has(c.holder)).length;
     const openRunsCount = [...S.asks.values()].filter((a) => a.msg.kind === "RUN_REQUEST" && isOpenRun(a)).length;
 
+    const pipeAlert = tasks.some((t) => t && t.state === "stuck")
+      || landing.some((l) => l && (l.state === "failed" || l.state === "conflict"))
+      || runs.some((r) => r && (r.outcome === "fail" || r.outcome === "error"))
+      || checks.some((c) => c && c.status === "regression_confirmed");
+    const pipeCount = tasks.length + landing.length + branches.length + runs.length + checks.length + claimsCount + openRunsCount;
+
     setBadge("tn-features", norm.features.length, norm.features.some((f) => f.agg === "fails"));
     setBadge("tn-people", S.members.size, peopleAlert);
-    setBadge("tn-tasks", tasks.length, tasks.some((t) => t && t.state === "stuck"));
+    setBadge("tn-pipeline", pipeCount, pipeAlert);
     setBadge("tn-pools", pools.length, pools.some((p) => p && (p.state === "drain" || p.state === "throttled" || p.state === "closed")));
-    setBadge("tn-delivery", landing.length + branches.length, landing.some((l) => l && (l.state === "failed" || l.state === "conflict")) || branches.some((b) => b && b.state === "orphan"));
-    setBadge("tn-quality", runs.length + checks.length, runs.some((r) => r && (r.outcome === "fail" || r.outcome === "error")) || checks.some((c) => c && c.status === "regression_confirmed"));
-    setBadge("tn-ledger", claimsCount + openRunsCount, false);
+
+    const setPipeN = (id, count) => { const n = $(id); if (n) n.textContent = count > 0 ? String(count) : ""; };
+    setPipeN("pn-orders", tasks.length);
+    setPipeN("pn-delivery", landing.length + branches.length);
+    setPipeN("pn-quality", runs.length + checks.length);
+    setPipeN("pn-claims", claimsCount + openRunsCount);
     if (el.feedBadge) el.feedBadge.textContent = feedNodes.size ? String(feedNodes.size) : "";
   }
 
-  function setTab(tab) {
-    const next = VALID_TABS.has(tab) ? tab : "overview";
-    if (el.board) {
-      el.board.dataset.tab = next;
-      el.board.classList.remove("nav-open");
+  function setPipeStage(stage) {
+    const next = PIPE_STAGES.has(stage) ? stage : "all";
+    if (el.board) el.board.dataset.pipe = next;
+    store(PIPE_KEY, next);
+    if (el.pipelineSub) {
+      for (const btn of el.pipelineSub.querySelectorAll(".pipe-btn[data-pipe-stage]")) {
+        const on = btn.dataset.pipeStage === next;
+        btn.classList.toggle("is-on", on);
+        btn.setAttribute("aria-selected", String(on));
+      }
     }
-    if (el.railBackdrop) el.railBackdrop.hidden = true;
-    if (el.viewTitle) el.viewTitle.textContent = TAB_TITLES[next] || "Factory Overview";
+  }
+
+  function setTab(tab) {
+    let next = tab;
+    if (LEGACY_TAB[tab]) {
+      const [mappedTab, mappedStage] = LEGACY_TAB[tab];
+      next = mappedTab;
+      setPipeStage(mappedStage);
+    }
+    if (!VALID_TABS.has(next)) next = "overview";
+    if (el.board) el.board.dataset.tab = next;
     store(TAB_KEY, next);
     if (el.wsTabs) {
-      for (const btn of el.wsTabs.querySelectorAll(".nav-item[data-tab]")) {
+      for (const btn of el.wsTabs.querySelectorAll(".nav-btn[data-tab]")) {
         btn.setAttribute("aria-selected", String(btn.dataset.tab === next));
       }
     }
     for (const mb of document.querySelectorAll(".mob-dock [data-jump-tab]")) {
       mb.classList.toggle("is-on", mb.dataset.jumpTab === next);
     }
+    renderTriage();
   }
 
   function setFeedOpen(open) {
@@ -1522,10 +1556,24 @@
       btn.classList.toggle("is-on", on);
       btn.setAttribute("aria-pressed", String(on));
     }
+    if (el.themeToggle) {
+      const icon = m === "dark" ? "#i-moon" : m === "light" ? "#i-sun" : "#i-monitor";
+      const use = el.themeToggle.querySelector("use");
+      if (use) use.setAttribute("href", icon);
+      el.themeToggle.title = `Theme: ${m}`;
+    }
   }
 
   function initTheme() {
     applyTheme(load(THEME_KEY) || "system");
+    if (el.themeToggle) {
+      el.themeToggle.addEventListener("click", () => {
+        const cur = load(THEME_KEY) || "system";
+        const next = cur === "system" ? "dark" : cur === "dark" ? "light" : "system";
+        store(THEME_KEY, next === "system" ? null : next);
+        applyTheme(next);
+      });
+    }
     document.addEventListener("click", (e) => {
       const btn = e.target.closest("[data-set-theme]");
       if (!btn) return;
@@ -1535,17 +1583,23 @@
     });
   }
 
+  if (el.alertsPill) {
+    el.alertsPill.addEventListener("click", () => {
+      const cur = el.triage && !el.triage.hidden;
+      triageManual = !cur;
+      el.alertsPill.setAttribute("aria-expanded", String(!cur));
+      renderTriage();
+    });
+  }
+  if (el.pipelineSub) {
+    el.pipelineSub.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-pipe-stage]");
+      if (btn) setPipeStage(btn.dataset.pipeStage);
+    });
+  }
   if (el.feedToggle) el.feedToggle.addEventListener("click", () => setFeedOpen(el.board.dataset.feed !== "open"));
   if (el.feedClose) el.feedClose.addEventListener("click", () => setFeedOpen(false));
   if (el.mobFeedBtn) el.mobFeedBtn.addEventListener("click", () => setFeedOpen(el.board.dataset.feed !== "open"));
-  if (el.navToggle) el.navToggle.addEventListener("click", () => {
-    const open = el.board.classList.toggle("nav-open");
-    if (el.railBackdrop) el.railBackdrop.hidden = !open;
-  });
-  if (el.railBackdrop) el.railBackdrop.addEventListener("click", () => {
-    el.board.classList.remove("nav-open");
-    el.railBackdrop.hidden = true;
-  });
 
   const savedFeed = load(FEED_KEY);
   setFeedOpen(savedFeed ? savedFeed === "open" : window.innerWidth > 1200);
@@ -1560,7 +1614,7 @@
 
   if (el.wsTabs) {
     el.wsTabs.addEventListener("click", (e) => {
-      const btn = e.target.closest(".ws-tab[data-tab]");
+      const btn = e.target.closest(".nav-btn[data-tab]");
       if (btn) setTab(btn.dataset.tab);
     });
   }
@@ -1568,8 +1622,8 @@
     const jt = e.target.closest("[data-jump-tab]");
     if (jt) setTab(jt.dataset.jumpTab);
   });
+  setPipeStage(load(PIPE_KEY) || "all");
   setTab(load(TAB_KEY) || "overview");
   initTheme();
-
   start();
 })();

@@ -118,9 +118,9 @@ function collectChain(features, startId) {
 function computeGraphLayout(features, areas) {
   const byId = new Map(features.map((f) => [f.id, f]));
   const hasAnyEdges = features.some((f) => f.depends.some((d) => byId.has(d)));
-  const NODE_W = 248;
-  const NODE_H = 86;
-  const COL_GAP = 72;
+  const NODE_W = 264;
+  const NODE_H = 92;
+  const COL_GAP = 76;
   const ROW_GAP = 16;
   const PAD_X = 24;
   const PAD_Y = 24;
@@ -470,7 +470,7 @@ export function renderFeaturesSummary(state) {
   const { areas, features } = normalizeFeatures(state);
   if (!features.length) {
     return `<section class="panel snap-card">
-      <div class="snap-head"><h2 class="panel-h">Feature map</h2><button type="button" class="btn btn-quiet" data-jump-tab="features">Open</button></div>
+      <div class="snap-head"><h2 class="panel-h">Feature map</h2><button type="button" class="btn btn-ghost" data-jump-tab="features">Open</button></div>
       <p class="empty">No <code>features.toml</code> configured yet.</p>
     </section>`;
   }
@@ -493,7 +493,7 @@ export function renderFeaturesSummary(state) {
   return `<section class="panel snap-card">
     <div class="snap-head">
       <h2 class="panel-h">Feature map <span class="count">${worksN}/${features.length} works${failsN ? ` · ${failsN} fails` : ""}</span></h2>
-      <button type="button" class="btn btn-quiet" data-jump-tab="features">Graph →</button>
+      <button type="button" class="btn btn-ghost" data-jump-tab="features">Graph →</button>
     </div>
     <ul class="snap-area-list">${rows}</ul>
   </section>`;
