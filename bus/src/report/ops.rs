@@ -5,7 +5,7 @@
 //!
 //! Requests:
 //!
-//! * `test.order` (orchestrator): creates a run order. `test.close` (orchestrator): closes one.
+//! * `test.order` (orchestrator): creates a run order, which may name a `feature` of the feature map. `test.close` (orchestrator): closes one.
 //! * `test.next` (any member, tier 0 too): the best open order for a machine, or none.
 //! * `report.send` (any member): a signed report for an open order.
 //!
@@ -161,6 +161,21 @@ fn order(
     let profile = text(body, "profile")?.to_owned();
     let scenario = text(body, "scenario")?.to_owned();
     check_order_fields(&build, &channel, &profile, &scenario, &cfg.limits.channels)?;
+    // The feature of the order, when it names one: it must be in the feature map of this hub.
+    let feature = match body.get("feature") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(f)) if !f.is_empty() => {
+            let map = crate::feature::registry::need(&ctx.config().data_dir)?;
+            if map.get(f).is_none() {
+                return Err(format!(
+                    "feature `{}` is not in the feature map of this hub",
+                    crate::feature::clip(f)
+                ));
+            }
+            Some(f.clone())
+        }
+        Some(_) => return Err("`feature` is the id of a feature, as text".into()),
+    };
     let needs = match body.get("needs") {
         None | Some(Value::Null) => Needs::default(),
         Some(v) => Needs::from_json(v)?,
@@ -209,14 +224,23 @@ fn order(
         created_at: ctx.now_ms / 1000,
         msg_id: 0,
     };
+    // The feature rides in the first FACT only. Later FACTs of the order change its state, not its text.
+    let mut fact: Value =
+        serde_json::from_str(&row.fact_body("open")).map_err(|e| e.to_string())?;
+    if let (Some(f), Some(obj)) = (&feature, fact.as_object_mut()) {
+        obj.insert("feature".into(), json!(f));
+    }
     let msg_id = ctx.emit(hub_fact(
         format!("runorder/{id}"),
-        row.fact_body("open"),
+        fact.to_string(),
         ctx.now_ms,
     ))?;
     let mut out = Map::new();
     out.insert("id".into(), json!(id));
     out.insert("msg".into(), json!(msg_id));
+    if let Some(f) = feature {
+        out.insert("feature".into(), json!(f));
+    }
     Ok(out)
 }
 
