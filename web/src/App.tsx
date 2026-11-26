@@ -12,16 +12,17 @@ import {
 } from "@phosphor-icons/react";
 import { initialTasks } from "./api/demo";
 import { useSommelierData } from "./api/client";
-import type { AccessRole } from "./api/types";
+import type { AccessRole, AgentProvider } from "./api/types";
 import { Button, DefinitionList, ProviderMark } from "./components";
 import WorkGraphView from "./views/WorkGraphView";
 import PipelineView from "./views/PipelineView";
+import LoopsView from "./views/LoopsView";
 import TestingView from "./views/TestingView";
 import MessageBoardView from "./views/MessageBoardView";
 import ContributorsView from "./views/ContributorsView";
 
-export type Tab = "Graph" | "Pipeline" | "Testing" | "Message board" | "Contributors";
-const tabs: Tab[] = ["Graph", "Pipeline", "Testing", "Message board", "Contributors"];
+export type Tab = "Graph" | "Loops" | "Pipeline" | "Testing" | "Message board" | "Contributors";
+const tabs: Tab[] = ["Graph", "Loops", "Pipeline", "Testing", "Message board", "Contributors"];
 const roles: AccessRole[] = ["Orchestrator", "Member", "Observer", "Public"];
 
 function initialsFor(name: string): string {
@@ -37,6 +38,7 @@ export function App() {
   const { snapshot, source, identity, effectiveRole, lastError, clearError } = data;
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>("SOM-142");
+  const [selectedLoopTask, setSelectedLoopTask] = useState<string | null>(null);
   const [selectedSubmissionTask, setSelectedSubmissionTask] = useState<string | null>(null);
   const [evidenceTaskId, setEvidenceTaskId] = useState<string>("SOM-138");
   const [scope, setScope] = useState("");
@@ -57,7 +59,7 @@ export function App() {
 
   // When switching from demo to a live hub, auto-select the first relevant task if SOM-142 isn't present.
   useEffect(() => {
-    if (selectedTaskId && snapshot.tasks.some((t) => t.id === selectedTaskId)) return;
+    if (selectedTaskId === null || snapshot.tasks.some((t) => t.id === selectedTaskId)) return;
     if (snapshot.tasks.length > 0) {
       const firstRelevant =
         snapshot.tasks.find((t) => Boolean(t.conflict)) ?? snapshot.tasks[0];
@@ -77,12 +79,13 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [clearError, lastError]);
 
-  const communityProviders = [...new Set(snapshot.contributors.map(({ provider }) => provider))];
-  const runningAgentCount = snapshot.contributors.filter(
-    ({ state }) => state.toLowerCase() === "running",
-  ).length;
-
-  const currentUser = source === "live" && identity ? identity.name : "mira";
+  const agents = snapshot.agentMachines.flatMap(({ agents }) => agents);
+  const communityProviders = [...new Set(agents.map(({ provider }) => provider)
+    .filter((provider): provider is AgentProvider => Boolean(provider)))];
+  const runningAgentCount = agents.filter(({ state }) => state.toLowerCase() === "running").length;
+  const currentUser = source === "live" ? identity?.name ?? "" : "mira";
+  const canRunLocally = (effectiveRole === "Member" || effectiveRole === "Orchestrator")
+    && (identity?.tier === undefined || identity.tier >= 1);
   const recipientNames = snapshot.contributors
     .map((c) => c.name)
     .filter((name) => name !== currentUser);
@@ -223,7 +226,7 @@ export function App() {
               aria-current={tab === entry ? "page" : undefined}
               onClick={() => go(entry)}
             >
-              {entry}
+              {entry === "Graph" ? "Work Graph" : entry}
             </button>
           ))}
         </nav>
@@ -403,6 +406,7 @@ export function App() {
             onMessages={openMessages}
             onInspectBrief={inspectBrief}
             onOpenSubmission={openSubmission}
+            onOpenLoop={(taskId) => { setSelectedLoopTask(taskId); go("Loops"); }}
             submissions={snapshot.submissions}
             alerts={snapshot.alerts}
             scheduler={snapshot.scheduler}
@@ -428,6 +432,13 @@ export function App() {
           />
         </div>
       ) : null}
+
+      {tab === "Loops" && (
+        <div className="view">
+          <LoopsView tasks={snapshot.tasks} submissions={snapshot.submissions}
+            initialTaskId={selectedLoopTask} attempts={snapshot.workAttempts} onTask={openTask} onPipeline={openSubmission} />
+        </div>
+      )}
 
       {tab === "Pipeline" && (
         <div className="view">
@@ -476,6 +487,10 @@ export function App() {
         <div className="view">
           <ContributorsView
             contributors={snapshot.contributors}
+            agentMachines={snapshot.agentMachines}
+            tasks={snapshot.tasks}
+            currentUser={currentUser}
+            canRunLocally={canRunLocally}
             pools={snapshot.pools}
             roleLeases={snapshot.roleLeases}
             onOpenTask={openTask}

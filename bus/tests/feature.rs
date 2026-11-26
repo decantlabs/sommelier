@@ -631,6 +631,11 @@ fn a_run_order_may_name_a_feature_and_it_must_exist() {
     assert_eq!(row["open_orders"], 1);
     assert_eq!(row["area"], "graphics");
     assert_eq!(row["title"], "Frames reach the window");
+    assert_eq!(row["area_title"], "Graphics");
+    assert_eq!(row["depends"], json!(["graphics.device"]));
+    assert_eq!(row["proofs"][0]["profile"], "title-a");
+    assert_eq!(row["proofs"][0]["scenario"], "boot");
+    assert_eq!(row["proofs"][0]["milestone"], "first_present");
     assert_eq!(feature_row(&st, "graphics.device")["open_orders"], 0);
     // An open task counts too, a cancelled one does not.
     f.add("t1", json!({"feature": "graphics.present"})).unwrap();

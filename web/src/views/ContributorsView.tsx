@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import {
+  ArrowRight,
   BookOpen,
   CaretDown,
   CaretRight,
   Circuitry,
-  Desktop,
   Info,
   Key,
   ShieldCheck,
@@ -12,21 +12,22 @@ import {
   Users,
 } from "@phosphor-icons/react";
 import { access, seats, stateLayers } from "../api/demo";
-import type { Contributor, QuotaPool, RoleLease } from "../api/types";
+import type { AgentMachine, Contributor, QuotaPool, RoleLease, WorkTask } from "../api/types";
 import {
   Avatar,
+  Button,
   DefinitionList,
   InspectorPanel,
   InspectorSection,
   MeterBar,
-  ProviderLabel,
   SegmentedControl,
   StatusLabel,
   agentStateTone,
 } from "../components";
+import AgentNetwork from "./AgentNetwork";
 import "./contributors.css";
 
-type SubView = "roster" | "pools" | "roles";
+type SubView = "agents" | "roster" | "pools" | "roles";
 
 function RoleGuide() {
   const [section, setSection] = useState<"Access" | "Seats" | "States">("Access");
@@ -79,17 +80,26 @@ function RoleGuide() {
 
 export default function ContributorsView({
   contributors,
+  agentMachines,
+  tasks,
+  currentUser,
+  canRunLocally,
   pools,
   roleLeases,
   onOpenTask,
 }: {
   contributors: Contributor[];
+  agentMachines: AgentMachine[];
+  tasks: WorkTask[];
+  currentUser: string;
+  canRunLocally: boolean;
   pools: QuotaPool[];
   roleLeases: RoleLease[];
   onOpenTask: (taskId: string) => void;
 }) {
-  const [subView, setSubView] = useState<SubView>("roster");
-  const [selectedName, setSelectedName] = useState(contributors[0]?.name ?? "");
+  const [subView, setSubView] = useState<SubView>("agents");
+  const [focusNetworkOwner, setFocusNetworkOwner] = useState(false);
+  const [selectedName, setSelectedName] = useState(() => contributors.find(({ name }) => name === currentUser)?.name ?? contributors[0]?.name ?? "");
 
   useEffect(() => {
     if (selectedName && contributors.some((c) => c.name === selectedName)) return;
@@ -97,9 +107,11 @@ export default function ContributorsView({
   }, [contributors, selectedName]);
 
   const selected = contributors.find(({ name }) => name === selectedName) ?? contributors[0];
+  const selectedMachines = agentMachines.filter(({ owner }) => owner === selected?.name);
+  const selectedAgents = selectedMachines.flatMap(({ agents }) => agents);
 
   return (
-    <section className="ct-view" aria-labelledby="ct-title">
+    <section className={`ct-view ${subView === "agents" ? "is-network" : ""}`} aria-labelledby="ct-title">
       <header className="ct-view-header">
         <div>
           <h1 id="ct-title">Contributors</h1>
@@ -110,8 +122,9 @@ export default function ContributorsView({
             ariaLabel="Contributors section"
             size="sm"
             value={subView}
-            onChange={setSubView}
+            onChange={(next) => { setFocusNetworkOwner(false); setSubView(next); }}
             options={[
+              { value: "agents", label: "Network" },
               { value: "roster", label: "Roster" },
               { value: "pools", label: `Quota pools (${pools.length})` },
               { value: "roles", label: `Role leases (${roleLeases.length})` },
@@ -122,6 +135,12 @@ export default function ContributorsView({
           </span>
         </div>
       </header>
+
+      {subView === "agents" && (
+        <AgentNetwork contributors={contributors} machines={agentMachines} tasks={tasks}
+          selectedOwner={selected?.name ?? ""} onSelectOwner={setSelectedName}
+          canRunLocally={canRunLocally} initialFocus={focusNetworkOwner} onOpenTask={onOpenTask} />
+      )}
 
       {subView === "roster" &&
         (!selected ? (
@@ -150,7 +169,6 @@ export default function ContributorsView({
                           <strong>{participant.name}</strong>
                           <small className="ct-roster-caption">
                             <span>{participant.role}</span>
-                            <ProviderLabel provider={participant.provider} size={13} />
                           </small>
                         </span>
                       </span>
@@ -211,30 +229,13 @@ export default function ContributorsView({
               </InspectorSection>
 
               <InspectorSection title="Agent capacity" icon={<Circuitry size={17} />}>
-                <DefinitionList
-                  items={[
-                    {
-                      label: "Subscription",
-                      value: <ProviderLabel provider={selected.provider} suffix=" · personal" />,
-                    },
-                    {
-                      label: "Machine",
-                      value: (
-                        <span className="ct-machine">
-                          <Desktop size={15} />
-                          {selected.machine}
-                        </span>
-                      ),
-                    },
-                    {
-                      label: "Assignment",
-                      value: selected.mode === "Auto" ? "Auto · direct lease" : "Own · offers",
-                    },
-                  ]}
-                />
-                <p className="ct-capacity-note">
-                  <Info size={15} /> {selected.detail}
-                </p>
+                <DefinitionList items={[
+                  { label: "Machines", value: selectedMachines.length },
+                  { label: "Reported agents", value: selectedAgents.length },
+                ]} />
+                <Button variant="link" className="ct-agent-map-link" onClick={() => { setFocusNetworkOwner(true); setSubView("agents"); }}>
+                  View in network <ArrowRight size={15} />
+                </Button>
               </InspectorSection>
 
               {(selected.stamps?.length || selected.missingTier?.length || selected.openPenalties?.length) ? (
@@ -323,7 +324,7 @@ export default function ContributorsView({
         </div>
       )}
 
-      <RoleGuide />
+      {subView !== "agents" && <RoleGuide />}
     </section>
   );
 }

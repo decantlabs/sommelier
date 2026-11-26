@@ -1,0 +1,57 @@
+.loop-workspace { display: grid; grid-template-columns: minmax(220px, 29%) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+.loop-queue { background: var(--color-panel); border: 1px solid var(--color-line); border-radius: var(--radius-panel); }
+.loop-queue ul, .loop-attempts { list-style: none; padding: 0; margin: 0; }
+.loop-queue li + li { border-top: 1px solid var(--color-line); }
+.loop-queue li button {
+  display: flex; align-items: start; justify-content: space-between; text-align: left;
+  gap: var(--space-3); padding: var(--space-3); width: 100%; border-left: 2px solid transparent;
+}
+.loop-queue li button:hover { background: var(--color-surface-hover-wash); }
+.loop-queue li button[aria-pressed="true"] { background: var(--color-surface-card-selected); border-left-color: var(--color-accent); }
+.loop-row-title { display: grid; gap: 4px; min-width: 0; }
+.loop-row-title code, .loop-diagram-head code { font-size: var(--text-sm); color: var(--color-text-muted); }
+.loop-row-title strong { font-size: var(--text-md); font-weight: 550; overflow-wrap: anywhere; }
+.loop-queue .ui-status-dot { padding-top: 3px; }
+.loop-more { padding: var(--space-3); border-top: 1px solid var(--color-line); }
+.loop-detail { min-width: 0; display: grid; gap: var(--space-4); }
+.loop-diagram {
+  padding: clamp(16px, 3vw, 28px); border: 1px solid var(--color-line); border-radius: var(--radius-card);
+  background: radial-gradient(var(--color-canvas-dot) 1px, transparent 1px) var(--color-canvas) 0 0 / 18px 18px;
+}
+.loop-diagram-head, .loop-diagram-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); flex-wrap: wrap; }
+.loop-diagram h2 { margin: var(--space-3) 0 var(--space-1); font-size: var(--text-heading); letter-spacing: var(--tracking-title); overflow-wrap: anywhere; }
+.loop-diagram > p { color: var(--color-text-secondary); margin: 0; }
+.loop-stages {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); list-style: none;
+  padding: 0; margin: var(--space-6) 0 var(--space-4);
+}
+.loop-stages li { color: var(--color-text-muted); display: grid; justify-items: center; align-content: start; gap: var(--space-1); position: relative; text-align: center; }
+.loop-stages li + li::before {
+  content: ""; position: absolute; left: calc(-50% + 16px); right: calc(50% + 16px); top: 16px;
+  border-top: 1px solid var(--color-line-edge); pointer-events: none;
+}
+.loop-stage-mark {
+  display: grid; place-items: center; width: 33px; height: 33px; border-radius: 50%;
+  background: var(--color-surface); border: 1px solid var(--color-line-card);
+}
+.loop-stages strong { color: var(--color-text); font-weight: 560; }
+.loop-stages small { font-size: var(--text-xs); }
+.loop-stages [data-stage="active"] .loop-stage-mark { border-color: var(--color-accent-line); color: var(--color-accent); }
+.loop-stages [data-stage="pass"] .loop-stage-mark { border-color: var(--color-good-line); color: var(--color-good); }
+.loop-stages [data-stage="fail"] .loop-stage-mark { border-color: var(--color-danger-line); color: var(--color-danger); }
+.loop-diagram > .loop-feedback {
+  margin: 0 0 var(--space-3); padding: var(--space-2); border: 1px dashed var(--color-warning-line);
+  background: var(--color-canvas); color: var(--color-warning); border-radius: var(--radius-sm);
+  display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm);
+}
+.loop-feedback svg { flex: none; }
+.loop-diagram-actions { border-top: 1px solid var(--color-line); padding-top: var(--space-2); }
+.loop-sidecars { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+.loop-done { margin: 0 0 var(--space-3); color: var(--color-text-secondary); line-height: 1.45; overflow-wrap: anywhere; }
+.loop-done:last-child { margin-bottom: 0; }
+.loop-attempts li { display: grid; justify-items: start; gap: var(--space-1); }
+.loop-attempts li + li { border-top: 1px solid var(--color-line); margin-top: var(--space-3); padding-top: var(--space-3); }
+.loop-attempts small { color: var(--color-text-muted); overflow-wrap: anywhere; }
+
+@media (max-width: 800px) { .loop-workspace { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .loop-sidecars { grid-template-columns: 1fr; } }

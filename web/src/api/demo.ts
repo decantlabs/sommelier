@@ -1,4 +1,6 @@
 import type {
+  AgentMachine,
+  AgentProvider,
   BusMessage,
   Contributor,
   FactorySnapshot,
@@ -272,12 +274,68 @@ export const stateLayers: [string, readonly string[]][] = [
   ["Scheduler", ["Off", "Shadow", "Enforce"]],
 ];
 
+const demoNames = [
+  "ari", "bea", "cal", "dev", "eli", "fin", "gia", "hal", "ida", "jay", "kai", "lux",
+  "max", "nia", "ollie", "pat", "quin", "rae", "sid", "teo", "uma", "val", "wyn", "zed",
+];
+const demoProviders: AgentProvider[] = ["Claude", "Codex", "Gemini"];
+const demoCommunity: Contributor[] = demoNames.map((name, index) => ({
+  name, initials: name.slice(0, 2).toUpperCase(), role: "Member",
+  seat: "Worker", tier: index % 3 === 0 ? "1" : "2",
+  provider: demoProviders[index % demoProviders.length],
+  machine: index % 2 ? "workstation" : "desktop",
+  mode: "Auto", state: index % 4 === 0 ? "Idle" : "Running",
+  detail: "Demo participant.",
+}));
+const demoMachines: AgentMachine[] = demoCommunity.map(({ name, machine, provider }, index) => ({
+  owner: name, name: machine, slots: 2,
+  agents: index % 8 === 0 ? [] : [{
+    name: "worker-01", provider, mode: "Auto",
+    state: index % 7 === 0 ? "Suspect" : index % 4 === 0 ? "Idle" : "Running",
+    lastStatus: index % 7 === 0 ? "3m ago" : "22s ago",
+  }],
+}));
+
 export const initialDemoSnapshot: FactorySnapshot = {
   hubId: 4188,
   asOf: "19:42:18",
   tasks: initialTasks,
   messages: initialMessages,
-  contributors: participants,
+  contributors: [...participants, ...demoCommunity],
+  workAttempts: [
+    { taskId: "SOM-142", number: 1, leaseState: "expired", owner: "mira", worker: "worker-01", endReason: "Heartbeat timed out", checkpoint: "4c9e2a1" },
+    { taskId: "SOM-136", number: 1, leaseState: "active", owner: "leo", worker: "worker-02" },
+    { taskId: "SOM-130", number: 1, leaseState: "completed", owner: "mira", worker: "worker-01", checkpoint: "f3a9e7c" },
+  ],
+  agentMachines: [
+    {
+      owner: "mira", name: "studio", slots: 3,
+      agents: [
+        { name: "coord", state: "Running", provider: "Claude", model: "Sonnet", agentClass: "claude_strong", mode: "Auto", lastStatus: "8s ago", statusDetail: "Triaging factory alerts and review handoffs." },
+        { name: "worker-01", state: "Idle", provider: "Codex", agentClass: "codex", mode: "Auto", lastStatus: "34s ago", statusDetail: "Waiting for a matching lease." },
+      ],
+    },
+    {
+      owner: "mira", name: "workstation", slots: 2,
+      agents: [
+        { name: "test-worker", state: "Suspect", provider: "Gemini", agentClass: "gemini", mode: "Auto", lastStatus: "3m ago", reason: "The expected heartbeat is late." },
+      ],
+    },
+    {
+      owner: "leo", name: "mac-mini", slots: 2,
+      agents: [
+        { name: "worker-02", state: "Running", provider: "Codex", agentClass: "codex", mode: "Auto", taskId: "SOM-136", branch: "codex/som-136", lastStatus: "12s ago", statusDetail: "Recovering the expired lease." },
+      ],
+    },
+    {
+      owner: "nora", name: "workstation", slots: 2,
+      agents: [
+        { name: "guest-lead", state: "Own", provider: "Gemini", agentClass: "gemini", mode: "Own", lastStatus: "49s ago", statusDetail: "Watching for work offers." },
+      ],
+    },
+    { owner: "sam", name: "studio", slots: 1, agents: [] },
+    ...demoMachines,
+  ],
   submissions: [
     {
       sha256: "8af39d2c4e17b09a8f12c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0",
@@ -469,10 +527,11 @@ export const initialDemoSnapshot: FactorySnapshot = {
       paths: ["crates/runtime/src/present/**"],
       depends: ["bus.timestamps"],
       how: "Start title-a boot scenario and wait for first_present.",
+      proofs: [{ profile: "title-a", scenario: "boot", milestone: "first_present" }],
       openOrders: 1,
       openTasks: 0,
       openRuns: 1,
-      states: { "windows/rtx-4080": "works", "linux/rx-7800": "broken" },
+      states: { "windows/rtx 4080": "works", "linux/rx 7800": "broken" },
     },
   ],
   matrix: [

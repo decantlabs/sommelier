@@ -77,7 +77,7 @@ export type Contributor = {
   role: "Orchestrator" | "Member" | "Observer";
   seat: string;
   tier: string;
-  provider: AgentProvider;
+  provider?: AgentProvider;
   machine: string;
   mode: "Auto" | "Own";
   state: string;
@@ -88,6 +88,27 @@ export type Contributor = {
   stamps?: StampEntry[];
   missingTier?: string[];
   openPenalties?: { id: number; kind: string }[];
+};
+
+export type AgentInstance = {
+  name: string;
+  state: string;
+  provider?: AgentProvider;
+  model?: string;
+  agentClass?: string;
+  mode?: "Auto" | "Own";
+  taskId?: string;
+  branch?: string;
+  lastStatus?: string;
+  statusDetail?: string;
+  reason?: string;
+};
+
+export type AgentMachine = {
+  owner: string;
+  name?: string;
+  slots?: number;
+  agents: AgentInstance[];
 };
 
 export type SubmissionState =
@@ -162,6 +183,8 @@ export type BatchItem = {
   note?: string;
 };
 
+export type FeatureProof = { profile: string; scenario: string; milestone: string };
+
 export type FeatureItem = {
   id: string;
   area: string;
@@ -170,6 +193,7 @@ export type FeatureItem = {
   paths: string[];
   depends: string[];
   how?: string;
+  proofs?: FeatureProof[];
   openOrders: number;
   openTasks: number;
   openRuns: number;
@@ -178,13 +202,13 @@ export type FeatureItem = {
 
 export type MatrixCell = {
   profile: string;
-  scenario: string;
+  scenario?: string;
   machineKey: string;
   outcome: "works" | "broken" | "flaky" | "pending";
   reports: number;
   quorum: number;
   build: string;
-  channel: string;
+  channel?: string;
 };
 
 export type RunOrderItem = {
@@ -278,12 +302,24 @@ export type ClaimItem = {
   since: string;
 };
 
+export type WorkAttempt = {
+  taskId: string;
+  number: number;
+  leaseState?: string;
+  owner?: string;
+  worker?: string;
+  endReason?: string;
+  checkpoint?: string;
+};
+
 export type FactorySnapshot = {
   hubId: number;
   asOf: string;
   tasks: WorkTask[];
   messages: BusMessage[];
   contributors: Contributor[];
+  agentMachines: AgentMachine[];
+  workAttempts: WorkAttempt[];
   submissions: SubmissionItem[];
   submissionCounts?: Record<string, number>;
   reviews: ReviewItem[];
