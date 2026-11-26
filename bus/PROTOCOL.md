@@ -18,10 +18,9 @@ wss://hub.example.com/?<query>   through a tunnel (TLS ends at the tunnel)
 
 The path is ignored. Authentication happens in the HTTP upgrade request:
 
-* `Authorization: Bearer <token>`: the normal way, works for every role.
-* `?token=<token>` in the query: accepted **for observer tokens only**, for
-  clients that cannot set headers. A member or orchestrator token in the URL is
-  refused with HTTP 401, because URLs end up in proxy and tunnel logs.
+* `Authorization: Bearer <token>`: the standard mechanism for all clients, works for every role.
+* Same-origin `HttpOnly; SameSite=Strict` session cookie (`sommelier_session`), established via `POST /api/session`, for browser dashboard clients.
+* Tokens in URL query parameters (`?token=...`) are **always refused** with HTTP 401 for all roles (URLs end up in browser history, proxy logs, and tunnel logs).
 
 A missing, unknown or revoked token gets HTTP 401 with a one line text body
 and no upgrade. A malformed query gets HTTP 400.
@@ -30,7 +29,6 @@ Query parameters (all optional, values percent encoded):
 
 | name     | meaning |
 |----------|---------|
-| `token`  | observer token, see above |
 | `since`  | replay stored messages with `id >= since` before the live stream |
 | `last`   | replay the last N stored messages that match the filters |
 | `live`   | `0` means no live stream: the connection only answers requests |
@@ -301,11 +299,17 @@ Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'
 So the page can load only its own scripts and styles (no inline code) and can
 connect only back to its own host.
 
+### Browser sessions (`/api/session`)
+
+Browser clients exchange a token once without placing it in URLs:
+
+* `POST /api/session` with `Authorization: Bearer <token>`: validates the token and sets an `HttpOnly; SameSite=Strict; Path=/` session cookie (`sommelier_session`).
+* `GET /api/session`: verifies whether the caller holds a valid bearer token or session cookie (`{"ok": true, "authenticated": true, "name": "...", "role": "..."}`).
+* `DELETE /api/session`: revokes the active session and clears the cookie (`Max-Age=0`).
+
 ### GET /api/state
 
-The token goes in `Authorization: Bearer <token>`, or for observer tokens only
-in `?token=`, as for the WebSocket. Without a valid token: 401 with
-`{"error":"..."}`. With one: a JSON snapshot, `Cache-Control: no-store`:
+Authentication uses `Authorization: Bearer <token>`, `Authorization: SommelierKey ...`, or the `sommelier_session` cookie (plus optional unauthenticated access when `public_read` is enabled). Any `?token=` query parameter is refused with HTTP 401. Without valid credentials: 401 with `{"error":"..."}`. With them: a JSON snapshot, `Cache-Control: no-store`:
 
 ```json
 {

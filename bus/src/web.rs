@@ -17,8 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
-use crate::hub::Hub;
-use crate::proto::percent_decode;
+use crate::hub::{Hub, SESSION_TTL_SECS};
 
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = crate::brief::MAX_BRIEF_BYTES;
@@ -251,21 +250,105 @@ fn ui_file(ui: &Path, url_path: &str) -> Option<PathBuf> {
     (real.starts_with(&root) && md.is_file() && md.len() <= MAX_FILE).then_some(real)
 }
 
-fn extract_token(head: &Head) -> (Option<String>, Option<String>) {
-    let query_token = head
-        .query
-        .as_deref()
-        .unwrap_or("")
-        .split('&')
-        .filter_map(|kv| kv.split_once('='))
-        .find(|(k, _)| *k == "token")
-        .and_then(|(_, v)| percent_decode(v).ok());
-    let header = head
-        .headers
+pub(crate) const QUERY_TOKEN_ERR: &str =
+    "tokens in URL query parameters are not allowed, send Authorization: Bearer <token> or sign in via POST /api/session";
+pub(crate) const SESSION_COOKIE: &str = "sommelier_session";
+
+pub(crate) fn has_query_token(query: Option<&str>) -> bool {
+    query.unwrap_or("").split('&').any(|kv| {
+        let key = kv.split_once('=').map_or(kv, |(k, _)| k);
+        key == "token"
+    })
+}
+
+pub(crate) fn extract_session_cookie(cookie_header: Option<&str>) -> Option<String> {
+    cookie_header?
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(k, _)| k.trim() == SESSION_COOKIE)
+        .map(|(_, v)| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+pub(crate) fn same_origin_ok(host: Option<&str>, origin: Option<&str>) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    let Some(host) = host else {
+        return false;
+    };
+    let rest = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"));
+    match rest {
+        Some(o_host) => o_host.trim_end_matches('/').eq_ignore_ascii_case(host.trim()),
+        None => false,
+    }
+}
+
+fn is_https(head: &Head) -> bool {
+    head.headers
+        .get("x-forwarded-proto")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"))
+        || head
+            .headers
+            .get("forwarded")
+            .is_some_and(|v| v.to_ascii_lowercase().contains("proto=https"))
+}
+
+fn session_cookie_header(value: &str, max_age: u64, secure: bool) -> String {
+    let mut s = format!(
+        "{SESSION_COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}"
+    );
+    if secure {
+        s.push_str("; Secure");
+    }
+    s
+}
+
+fn extract_bearer(head: &Head) -> Option<String> {
+    head.headers
         .get("authorization")
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|v| v.trim().to_owned());
-    (header, query_token)
+        .map(|v| v.trim().to_owned())
+}
+
+fn authenticate_request(
+    hub: &Arc<Hub>,
+    head: &Head,
+    allow_key: bool,
+) -> Result<(crate::tokens::Member, bool), (u16, String)> {
+    if let Some(raw) = head.headers.get("authorization") {
+        if allow_key && raw.starts_with("SommelierKey ") {
+            return hub
+                .check_auth(Some(raw))
+                .map(|(m, c)| {
+                    let public_view = hub.credential_is_public(&m.name, &c);
+                    (m, public_view)
+                })
+                .map_err(|(code, msg)| (code.as_u16(), msg));
+        }
+        return hub
+            .check_token(extract_bearer(head))
+            .map(|(m, _)| (m, false))
+            .map_err(|(code, msg)| (code.as_u16(), msg));
+    }
+    if let Some(sid) = extract_session_cookie(head.headers.get("cookie").map(String::as_str)) {
+        let host = head.headers.get("host").map(String::as_str);
+        let origin = head.headers.get("origin").map(String::as_str);
+        if !same_origin_ok(host, origin) {
+            return Err((403, "cross-origin request refused".into()));
+        }
+        return hub
+            .lookup_session(&sid)
+            .map(|(m, _)| (m, false))
+            .map_err(|(code, msg)| (code.as_u16(), msg));
+    }
+    Err((
+        401,
+        "missing token: send `Authorization: Bearer <token>` or sign in via POST /api/session"
+            .into(),
+    ))
 }
 
 fn key_reply(r: Result<serde_json::Value, (u16, String)>) -> Reply {
@@ -282,6 +365,12 @@ async fn route(
     ip: IpAddr,
     signed_in: Option<crate::tokens::Member>,
 ) -> Reply {
+    if head.path.starts_with("/api/") && has_query_token(head.query.as_deref()) {
+        return Reply::json(
+            401,
+            &serde_json::json!({ "ok": false, "error": QUERY_TOKEN_ERR }),
+        );
+    }
     // Two doors without a token: a nonce, and the join of a new key (see PROTOCOL.md, Key members).
     match (head.path.as_str(), head.method.as_str()) {
         ("/api/challenge", "GET" | "HEAD") => return key_reply(hub.challenge()),
@@ -296,6 +385,71 @@ async fn route(
             r.extra.push(("Allow", allow.into()));
             return r;
         }
+        ("/api/session", "POST") => {
+            return match hub.create_session(extract_bearer(head)) {
+                Ok((sid, member)) => {
+                    let mut r = Reply::json(
+                        200,
+                        &serde_json::json!({
+                            "ok": true,
+                            "name": member.name,
+                            "role": member.role.as_str(),
+                        }),
+                    );
+                    r.extra.push((
+                        "Set-Cookie",
+                        session_cookie_header(&sid, SESSION_TTL_SECS, is_https(head)),
+                    ));
+                    r
+                }
+                Err((code, msg)) => {
+                    Reply::json(code.as_u16(), &serde_json::json!({ "ok": false, "error": msg }))
+                }
+            };
+        }
+        ("/api/session", "DELETE") => {
+            let host = head.headers.get("host").map(String::as_str);
+            let origin = head.headers.get("origin").map(String::as_str);
+            if !same_origin_ok(host, origin) {
+                return Reply::json(
+                    403,
+                    &serde_json::json!({ "ok": false, "error": "cross-origin request refused" }),
+                );
+            }
+            if let Some(sid) =
+                extract_session_cookie(head.headers.get("cookie").map(String::as_str))
+            {
+                hub.delete_session(&sid);
+            }
+            let mut r = Reply::json(200, &serde_json::json!({ "ok": true }));
+            r.extra.push((
+                "Set-Cookie",
+                session_cookie_header("", 0, is_https(head)),
+            ));
+            return r;
+        }
+        ("/api/session", "GET" | "HEAD") => {
+            return match authenticate_request(hub, head, false) {
+                Ok((m, _)) => Reply::json(
+                    200,
+                    &serde_json::json!({
+                        "ok": true,
+                        "authenticated": true,
+                        "name": m.name,
+                        "role": m.role.as_str(),
+                    }),
+                ),
+                Err((code, msg)) => Reply::json(
+                    code,
+                    &serde_json::json!({ "ok": false, "authenticated": false, "error": msg }),
+                ),
+            };
+        }
+        ("/api/session", _) => {
+            let mut r = Reply::text(405, "only GET, HEAD, POST, DELETE");
+            r.extra.push(("Allow", "GET, HEAD, POST, DELETE".into()));
+            return r;
+        }
         _ => {}
     }
     // The intake: a submission is signed in with a token or a key, the runner reads the bundle and
@@ -308,7 +462,7 @@ async fn route(
         let mut caller = signed_in;
         if head.path.starts_with("/api/submit/") && caller.is_none() {
             let auth = head.headers.get("authorization").map(String::as_str);
-            match hub.check_auth(auth, None) {
+            match hub.check_auth(auth) {
                 Ok((m, _)) => caller = Some(m),
                 Err((code, msg)) => {
                     return Reply::json(
@@ -339,19 +493,13 @@ async fn route(
         || (head.path.starts_with("/api/")
             && !matches!(head.path.as_str(), "/api/state" | "/api/policy"))
     {
-        let (header, query_token) = extract_token(head);
         // A key member reads the brief of its order too, so the briefs accept a key as well as a token.
-        let checked = if head.path == "/api/brief" || head.path.starts_with("/api/brief/") {
-            let auth = head.headers.get("authorization").map(String::as_str);
-            hub.check_auth(auth, query_token).map(|(m, _)| m)
-        } else {
-            hub.check_token(header, query_token).map(|(m, _)| m)
-        };
-        let caller = match checked {
-            Ok(m) => Some(m),
+        let is_brief = head.path == "/api/brief" || head.path.starts_with("/api/brief/");
+        let caller = match authenticate_request(hub, head, is_brief) {
+            Ok((m, _)) => Some(m),
             Err((code, msg)) => {
                 return Reply::json(
-                    code.as_u16(),
+                    code,
                     &serde_json::json!({ "ok": false, "error": msg }),
                 );
             }
@@ -378,10 +526,10 @@ async fn route(
         return r;
     }
     if matches!(head.path.as_str(), "/api/state" | "/api/policy") {
-        let (header, query_token) = extract_token(head);
+        let has_session =
+            extract_session_cookie(head.headers.get("cookie").map(String::as_str)).is_some();
         if head.path == "/api/state"
-            && header.is_none()
-            && query_token.is_none()
+            && !has_session
             && !head.headers.contains_key("authorization")
             && hub.door().public_read()
         {
@@ -389,26 +537,16 @@ async fn route(
         }
         // Key members read the state too, the policy stays with tokens. A key below tier 2 gets the
         // public view, the same as a reader without credentials.
-        let mut public_view = false;
-        let checked = match head.headers.get("authorization") {
-            Some(raw) if head.path == "/api/state" && raw.starts_with("SommelierKey ") => {
-                hub.check_auth(Some(raw), None).map(|(m, c)| {
-                    public_view = hub.credential_is_public(&m.name, &c);
-                    m
-                })
-            }
-            _ => hub.check_token(header, query_token).map(|(m, _)| m),
-        };
-        return match checked {
+        return match authenticate_request(hub, head, head.path == "/api/state") {
             Ok(_) if head.path == "/api/policy" => Reply::json(200, &hub.policy_response()),
-            Ok(_) => {
+            Ok((_, public_view)) => {
                 let mut state = hub.snapshot().await;
                 if public_view {
                     crate::door::redact_state(&mut state);
                 }
                 Reply::json(200, &state)
             }
-            Err((code, msg)) => Reply::json(code.as_u16(), &serde_json::json!({ "error": msg })),
+            Err((code, msg)) => Reply::json(code, &serde_json::json!({ "error": msg })),
         };
     }
     let Some(ui) = hub.config().ui_dir.as_deref() else {
@@ -513,7 +651,7 @@ pub async fn serve(
         && crate::factory::part_on(hub.config(), crate::factory::Part::Intake)
     {
         let auth = head.headers.get("authorization").map(String::as_str);
-        match hub.check_auth(auth, None) {
+        match hub.check_auth(auth) {
             Ok((m, _)) => match crate::intake::upload_allowance_status(hub, Some(&m), &head.path) {
                 Ok(cap) => {
                     max_body = usize::try_from(cap).unwrap_or(usize::MAX).max(MAX_BODY);

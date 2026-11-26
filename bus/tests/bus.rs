@@ -105,23 +105,8 @@ struct Raw {
 }
 
 impl Raw {
-    async fn open(url: &str) -> Raw {
-        let (ws, _) = tokio_tungstenite::connect_async(url.into_client_request().unwrap())
-            .await
-            .expect("connect");
-        Raw { ws }
-    }
-
-    /// Observers put the token into the URL (as a plain monitor must), everyone else into the header.
+    /// Every role puts the token in the `Authorization: Bearer` header, never in URL queries.
     async fn with_token(hub: &TestHub, who: &str, query: &str) -> Raw {
-        if who == "watcher" {
-            let sep = if query.is_empty() { "" } else { "&" };
-            return Raw::open(&format!(
-                "{}/?token={}{sep}{query}",
-                hub.url, hub.tokens[who]
-            ))
-            .await;
-        }
         let mut req = format!("{}/?{query}", hub.url)
             .into_client_request()
             .unwrap();
@@ -238,10 +223,12 @@ async fn bad_token_refused() {
     .await
     .expect_err("must fail");
     assert!(e.fatal && e.msg.contains("401"), "{}", e.msg);
-    // A member token in the URL is refused, an observer token is fine.
-    let url = format!("{}/?token={}", hub.url, hub.tokens["alice"]);
-    let r = tokio_tungstenite::connect_async(url.into_client_request().unwrap()).await;
-    assert!(r.is_err(), "member token in the URL must be refused");
+    // Any token in the URL query string is refused for all roles, including observer.
+    for who in ["alice", "watcher"] {
+        let url = format!("{}/?token={}", hub.url, hub.tokens[who]);
+        let r = tokio_tungstenite::connect_async(url.into_client_request().unwrap()).await;
+        assert!(r.is_err(), "{who} token in the URL must be refused");
+    }
     Raw::with_token(&hub, "watcher", "").await;
 }
 
@@ -1030,6 +1017,18 @@ async fn api_state_snapshot() {
         &get(&format!("/api/state?token={}", hub.tokens["watcher"]), ""),
     )
     .await;
+    assert!(
+        head.starts_with("HTTP/1.1 401"),
+        "observer token in the URL must be refused: {head}"
+    );
+    let (head, _) = http(
+        &hub,
+        &get(
+            "/api/state",
+            &format!("Authorization: Bearer {}\r\n", hub.tokens["watcher"]),
+        ),
+    )
+    .await;
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
     let (head, body) = http(
         &hub,
@@ -1370,12 +1369,21 @@ async fn brief_http_put_and_get_and_module_op_forwarding() {
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
     assert_eq!(body, brief_body);
 
-    // 4. Observer cannot GET /api/brief/<id> (403)
+    // 4. Observer token in query is 401; valid Bearer observer token cannot GET /api/brief/<id> (403)
     let (head, _) = http(
         &hub,
         &get(
             &format!("/api/brief/t42?token={}", hub.tokens["watcher"]),
             "",
+        ),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 401"), "{head}");
+    let (head, _) = http(
+        &hub,
+        &get(
+            "/api/brief/t42",
+            &format!("Authorization: Bearer {}\r\n", hub.tokens["watcher"]),
         ),
     )
     .await;
@@ -1408,4 +1416,105 @@ async fn brief_http_put_and_get_and_module_op_forwarding() {
     let fact = sub.next().await;
     assert_eq!(fact["kind"], "FACT");
     assert_eq!(fact["topic"], "quota/alice/codex.5h/5h");
+}
+
+#[tokio::test]
+async fn browser_session_cookie_auth() {
+    let hub = start(|_| {}).await;
+
+    // 1. Query-string tokens are refused on POST /api/session.
+    let req = format!(
+        "POST /api/session?token={} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        hub.tokens["watcher"]
+    );
+    let (head, _) = http(&hub, &req).await;
+    assert!(head.starts_with("HTTP/1.1 401"), "{head}");
+
+    // 2. Exchange a Bearer token for an HttpOnly SameSite=Strict session cookie.
+    let req = format!(
+        "POST /api/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        hub.tokens["alice"]
+    );
+    let (head, body) = http(&hub, &req).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head} {body}");
+    let session_res: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(session_res["ok"], true);
+    assert_eq!(session_res["name"], "alice");
+    assert_eq!(session_res["role"], "member");
+
+    let cookie_line = head
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
+        .expect("Set-Cookie header missing");
+    assert!(cookie_line.contains("HttpOnly"), "{cookie_line}");
+    assert!(cookie_line.contains("SameSite=Strict"), "{cookie_line}");
+    assert!(cookie_line.contains("Path=/"), "{cookie_line}");
+    let cookie_pair = cookie_line
+        .split_once(':')
+        .unwrap()
+        .1
+        .trim()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert!(cookie_pair.starts_with("sommelier_session="), "{cookie_pair}");
+
+    // 3. Authenticated GET /api/session & GET /api/state using only the Cookie header.
+    let (head, body) = http(&hub, &get("/api/session", &format!("Cookie: {cookie_pair}\r\n"))).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head} {body}");
+    let sess: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sess["authenticated"], true);
+    assert_eq!(sess["name"], "alice");
+
+    let (head, body) = http(&hub, &get("/api/state", &format!("Cookie: {cookie_pair}\r\n"))).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head} {body}");
+    let state: Value = serde_json::from_str(&body).unwrap();
+    assert!(state.get("hub").is_some(), "{state}");
+
+    // 4. Same-origin WebSocket upgrade authenticates via the Cookie header without any token in URL.
+    let addr = hub.url.strip_prefix("ws://").unwrap();
+    let mut ws_req = format!("{}/?since=1", hub.url)
+        .into_client_request()
+        .unwrap();
+    ws_req.headers_mut().insert("cookie", cookie_pair.parse().unwrap());
+    ws_req
+        .headers_mut()
+        .insert("origin", format!("http://{addr}").parse().unwrap());
+    let (ws, _) = tokio_tungstenite::connect_async(ws_req)
+        .await
+        .expect("cookie ws connect");
+    let mut raw = Raw { ws };
+    raw.send(json!({"op": "whoami", "rid": "c1"})).await;
+    let who = raw.next().await;
+    assert_eq!(who["ok"], true, "{who}");
+    assert_eq!(who["name"], "alice");
+    assert_eq!(who["role"], "member");
+    drop(raw);
+
+    // 5. Cross-origin WebSocket upgrade with cookie is refused (CSRF guard).
+    let mut evil_ws_req = format!("{}/?since=1", hub.url)
+        .into_client_request()
+        .unwrap();
+    evil_ws_req
+        .headers_mut()
+        .insert("cookie", cookie_pair.parse().unwrap());
+    evil_ws_req
+        .headers_mut()
+        .insert("origin", "https://evil.example".parse().unwrap());
+    assert!(
+        tokio_tungstenite::connect_async(evil_ws_req).await.is_err(),
+        "cross-origin cookie WS must be refused"
+    );
+
+    // 6. DELETE /api/session revokes the session and expires the cookie.
+    let del_req = format!(
+        "DELETE /api/session HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {cookie_pair}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let (head, _) = http(&hub, &del_req).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(head.contains("Max-Age=0"), "{head}");
+
+    let (head, _) = http(&hub, &get("/api/state", &format!("Cookie: {cookie_pair}\r\n"))).await;
+    assert!(head.starts_with("HTTP/1.1 401"), "{head}");
 }

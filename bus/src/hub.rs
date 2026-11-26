@@ -229,6 +229,15 @@ struct ConnInfo {
     live: bool,
 }
 
+pub(crate) const SESSION_TTL_SECS: u64 = 12 * 60 * 60;
+const SESSION_TTL_MS: u64 = SESSION_TTL_SECS * 1000;
+const MAX_SESSIONS: usize = 1024;
+
+struct SessionEntry {
+    token: String,
+    expires_ms: u64,
+}
+
 pub struct Hub {
     cfg: HubConfig,
     log_path: PathBuf,
@@ -237,6 +246,7 @@ pub struct Hub {
     tokens_stamp: Mutex<Option<(SystemTime, u64)>>,
     state: Mutex<State>,
     buckets: Mutex<HashMap<String, Bucket>>,
+    sessions: Mutex<HashMap<String, SessionEntry>>,
     tx: broadcast::Sender<Arc<Entry>>,
     conns: Mutex<HashMap<u64, ConnInfo>>,
     next_conn: AtomicU64,
@@ -467,6 +477,7 @@ impl Hub {
                 keys,
             }),
             buckets: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
             tx,
             conns: Mutex::new(HashMap::new()),
             next_conn: AtomicU64::new(1),
@@ -765,6 +776,11 @@ impl Hub {
                 eprintln!("sommelier: {e}");
             }
         }
+        {
+            let tokens = self.tokens.read().unwrap_or_else(|e| e.into_inner());
+            let mut sessions = lock(&self.sessions);
+            sessions.retain(|_, s| s.expires_ms > now && tokens.lookup(&s.token).is_some());
+        }
     }
 
     fn charge(&self, name: &str) -> Result<(), String> {
@@ -802,40 +818,29 @@ impl Hub {
             .is_some_and(|x| x.name == m.name && x.role == m.role)
     }
 
-    /// The member for a token from the `Authorization: Bearer` header, or from the URL
-    /// query for observer tokens only (URLs end up in proxy and tunnel logs).
+    /// The member for a bearer token from the `Authorization: Bearer` header.
     pub(crate) fn check_token(
         &self,
         header: Option<String>,
-        query: Option<String>,
     ) -> Result<(Member, String), (StatusCode, String)> {
-        let in_url = header.is_none();
-        let token = header.or(query).ok_or((
+        let token = header.ok_or((
             StatusCode::UNAUTHORIZED,
-            "missing token: send `Authorization: Bearer <token>` (or `?token=` with an observer token)".to_string(),
+            "missing token: send `Authorization: Bearer <token>` or sign in via POST /api/session"
+                .to_string(),
         ))?;
         let t = self.tokens.read().unwrap_or_else(|e| e.into_inner());
         let m = t.lookup(&token).cloned().ok_or((
             StatusCode::UNAUTHORIZED,
             "unknown or revoked token".to_string(),
         ))?;
-        // URLs end up in proxy and tunnel logs: only read only tokens may travel there.
-        if in_url && m.role != Role::Observer {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "a token in the URL is accepted for observer tokens only, send this one in the Authorization header"
-                    .to_string(),
-            ));
-        }
         Ok((m, token))
     }
 
     /// Authenticates with the `Authorization` header: `SommelierKey <member>.<nonce>.<address>.<sig>` for
-    /// a key member, else a bearer token (or an observer token in the URL query).
+    /// a key member, else a bearer token.
     pub(crate) fn check_auth(
         &self,
         authorization: Option<&str>,
-        query: Option<String>,
     ) -> Result<(Member, Credential), (StatusCode, String)> {
         if let Some(rest) = authorization.and_then(|v| v.strip_prefix("SommelierKey ")) {
             return self.check_key(rest.trim());
@@ -843,8 +848,83 @@ impl Hub {
         let bearer = authorization
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(|v| v.trim().to_owned());
-        let (m, token) = self.check_token(bearer, query)?;
+        let (m, token) = self.check_token(bearer)?;
         Ok((m, Credential(Cred::Token(token))))
+    }
+
+    /// Exchanges a valid `Authorization: Bearer` token for an opaque browser session id.
+    pub(crate) fn create_session(
+        &self,
+        bearer: Option<String>,
+    ) -> Result<(String, Member), (StatusCode, String)> {
+        let (member, token) = self.check_token(bearer)?;
+        if let Err(e) = self.charge(&member.name) {
+            return Err((StatusCode::TOO_MANY_REQUESTS, e));
+        }
+        let mut raw = [0u8; 32];
+        getrandom::fill(&mut raw).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("session rng error: {e}"),
+            )
+        })?;
+        let sid: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let now = now_ms();
+        let mut sessions = lock(&self.sessions);
+        sessions.retain(|_, s| s.expires_ms > now);
+        while sessions.len() >= MAX_SESSIONS {
+            if let Some(oldest) = sessions
+                .iter()
+                .min_by_key(|(_, s)| s.expires_ms)
+                .map(|(k, _)| k.clone())
+            {
+                sessions.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        sessions.insert(
+            sid.clone(),
+            SessionEntry {
+                token,
+                expires_ms: now.saturating_add(SESSION_TTL_MS),
+            },
+        );
+        Ok((sid, member))
+    }
+
+    pub(crate) fn delete_session(&self, sid: &str) {
+        lock(&self.sessions).remove(sid);
+    }
+
+    pub(crate) fn lookup_session(&self, sid: &str) -> Result<(Member, String), (StatusCode, String)> {
+        let now = now_ms();
+        let token = {
+            let mut sessions = lock(&self.sessions);
+            match sessions.get(sid) {
+                Some(entry) if entry.expires_ms > now => entry.token.clone(),
+                Some(_) => {
+                    sessions.remove(sid);
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        "session expired or unknown, sign in again".to_string(),
+                    ));
+                }
+                None => {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        "session expired or unknown, sign in again".to_string(),
+                    ));
+                }
+            }
+        };
+        match self.check_token(Some(token)) {
+            Ok(ok) => Ok(ok),
+            Err(err) => {
+                lock(&self.sessions).remove(sid);
+                Err(err)
+            }
+        }
     }
 
     /// Checks `<member>.<nonce>.<signature>`: the key is active, the signature covers the auth
@@ -963,14 +1043,23 @@ impl Hub {
         req: &HsRequest,
         ip: std::net::IpAddr,
     ) -> Result<(Member, ConnectParams, Credential, crate::door::Slot), (StatusCode, String)> {
-        let mut params = ConnectParams::from_query(req.uri().query())
+        if crate::web::has_query_token(req.uri().query()) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                crate::web::QUERY_TOKEN_ERR.to_string(),
+            ));
+        }
+        let params = ConnectParams::from_query(req.uri().query())
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         let header = req
             .headers()
             .get("authorization")
             .and_then(|v| v.to_str().ok());
+        let session_id = crate::web::extract_session_cookie(
+            req.headers().get("cookie").and_then(|v| v.to_str().ok()),
+        );
         let too_many = |e: String| (StatusCode::TOO_MANY_REQUESTS, e);
-        if header.is_none() && params.token.is_none() && self.door.public_read() {
+        if header.is_none() && session_id.is_none() && self.door.public_read() {
             // An anonymous observer: it sends nothing and fills the hub as tier 0 does.
             self.door
                 .charge_read(&self.door.block(ip), now_ms())
@@ -978,14 +1067,25 @@ impl Hub {
             let slot = self.door.admit("", true).map_err(too_many)?;
             return Ok((public_member(), params, Credential(Cred::Public), slot));
         }
-        let (m, cred) = self.check_auth(header, params.token.clone())?;
+        let (m, cred) = if header.is_some() {
+            self.check_auth(header)?
+        } else if let Some(sid) = session_id {
+            let host = req.headers().get("host").and_then(|v| v.to_str().ok());
+            let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
+            if !crate::web::same_origin_ok(host, origin) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "cross-origin WebSocket request refused".to_string(),
+                ));
+            }
+            let (m, tok) = self.lookup_session(&sid)?;
+            (m, Credential(Cred::Token(tok)))
+        } else {
+            self.check_auth(None)?
+        };
         let role = matches!(cred.0, Cred::Token(_)).then_some(m.role);
         let low = self.cfg.door.max_conns > 0 && crate::door::is_low(self, &m.name, role);
         let slot = self.door.admit(&m.name, low).map_err(too_many)?;
-        // Kept for the periodic revocation check, the file only holds hashes.
-        if let Cred::Token(t) = &cred.0 {
-            params.token = Some(t.clone());
-        }
         Ok((m, params, cred, slot))
     }
 

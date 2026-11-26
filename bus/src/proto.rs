@@ -282,7 +282,6 @@ pub fn reply_err(op: &str, rid: &Option<Value>, error: &str) -> String {
 /// Parameters of a connection, taken from the URL query.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConnectParams {
-    pub token: Option<String>,
     pub since: Option<u64>,
     pub last: Option<u64>,
     pub live: bool,
@@ -292,7 +291,6 @@ pub struct ConnectParams {
 impl Default for ConnectParams {
     fn default() -> Self {
         ConnectParams {
-            token: None,
             since: None,
             last: None,
             live: true,
@@ -302,7 +300,7 @@ impl Default for ConnectParams {
 }
 
 impl ConnectParams {
-    /// Parses `token=..&since=..&last=..&live=0&kinds=READY,FIX&topic=issue/*&from=a,b`.
+    /// Parses `since=..&last=..&live=0&kinds=READY,FIX&topic=issue/*&from=a,b`.
     pub fn from_query(query: Option<&str>) -> Result<Self, String> {
         let mut p = ConnectParams::default();
         for pair in query.unwrap_or("").split('&').filter(|s| !s.is_empty()) {
@@ -313,7 +311,7 @@ impl ConnectParams {
                     .map_err(|_| format!("`{k}` must be a number"))
             };
             match k {
-                "token" => p.token = Some(v),
+                "token" => return Err("tokens in URL query parameters are not allowed".into()),
                 "since" => p.since = Some(num(&v)?),
                 "last" => p.last = Some(num(&v)?),
                 "live" => p.live = !matches!(v.as_str(), "0" | "false" | "no"),
@@ -484,10 +482,8 @@ mod tests {
 
     #[test]
     fn query_round_trip() {
-        let q =
-            "token=sb_x&since=12&kinds=READY,RUN_RESULT&topic=run%2F4&from=a,b&live=0&worker=w.1";
+        let q = "since=12&kinds=READY,RUN_RESULT&topic=run%2F4&from=a,b&live=0&worker=w.1";
         let p = ConnectParams::from_query(Some(q)).unwrap();
-        assert_eq!(p.token.as_deref(), Some("sb_x"));
         assert_eq!(p.since, Some(12));
         assert!(!p.live);
         assert_eq!(p.filter.topic.as_deref(), Some("run/4"));
@@ -496,6 +492,7 @@ mod tests {
         assert_eq!(p.filter.to_filter("me1").to.as_deref(), Some("me1"));
         let back = ConnectParams::from_query(Some(&p.to_query())).unwrap();
         assert_eq!(back.filter, p.filter);
+        assert!(ConnectParams::from_query(Some("token=sb_x")).is_err());
         assert!(ConnectParams::from_query(Some("bogus=1")).is_err());
         assert_eq!(percent_decode("a%20b+c").unwrap(), "a b c");
         assert!(percent_decode("a%2").is_err());

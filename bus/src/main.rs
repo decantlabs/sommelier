@@ -638,7 +638,6 @@ async fn cmd_tail(raw: &[String]) -> Result<(), String> {
     )?;
     let opts = client_opts(&a)?;
     let params = ConnectParams {
-        token: None,
         since: a.num("since")?,
         last: a.num("last")?,
         live: true,
