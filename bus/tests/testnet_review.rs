@@ -446,6 +446,9 @@ async fn hand_outs_survive_a_restart_of_the_hub() {
         .lock()
         .unwrap()
         .insert(t.member.clone(), "blk-a".into());
+    // The restarted hub listens on another port. The client pins a hub id per address and refuses the
+    // same id under a second address (a relay guard), so the test forgets the old pin as a person would.
+    let _ = std::fs::remove_file(t.dir.path().join("member.hubs"));
     let opts = kc::opts_for(&again.url, t.dir.path());
     let r = report_for(&order, &t.member, Outcome::Works);
     client::request_ok(

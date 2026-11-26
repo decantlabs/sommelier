@@ -508,18 +508,21 @@ pub async fn serve(
     let mut signed_in = None;
     let mut max_body = MAX_BODY;
     let mut timeout = BODY_TIMEOUT;
-    if early.is_none() && head.path.starts_with("/api/submit/") && hub.config().intake.enabled {
+    if early.is_none()
+        && head.path.starts_with("/api/submit/")
+        && crate::factory::part_on(hub.config(), crate::factory::Part::Intake)
+    {
         let auth = head.headers.get("authorization").map(String::as_str);
         match hub.check_auth(auth, None) {
-            Ok((m, _)) => match crate::intake::upload_allowance(hub, &m, &head.path) {
+            Ok((m, _)) => match crate::intake::upload_allowance_status(hub, Some(&m), &head.path) {
                 Ok(cap) => {
                     max_body = usize::try_from(cap).unwrap_or(usize::MAX).max(MAX_BODY);
                     timeout = UPLOAD_TIMEOUT;
                     signed_in = Some(m);
                 }
-                Err(e) => {
+                Err((code, e)) => {
                     early = Some(Reply::json(
-                        403,
+                        code,
                         &serde_json::json!({ "ok": false, "error": e }),
                     ));
                 }
