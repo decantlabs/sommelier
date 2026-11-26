@@ -70,13 +70,13 @@ function renderQueuedTasks(waiting) {
       const id = esc(t.id || "?");
       const title = t.title ? ` ${esc(t.title)}` : "";
       const reason = esc(t.reason || "waiting");
-      return `<li class="pool-wait-item"><code>${id}</code>${title} <span class="pool-wait-why">(${reason})</span></li>`;
+      return `<li class="pool-wait-item"><code>${id}</code>${title} <span class="pool-wait-why">${reason}</span></li>`;
     })
     .join("");
   return `<ul class="pool-waiting" aria-label="Tasks waiting on this pool">${items}</ul>`;
 }
 
-export function renderPoolRow(p, nowSec) {
+export function renderPoolRow(p, nowSec, idx = 0) {
   if (!p || typeof p !== "object") return "";
   const state = String(p.state || "unknown").toLowerCase();
   const used = Math.max(0, Math.min(100, Number(p.used_pct) || 0));
@@ -104,6 +104,8 @@ export function renderPoolRow(p, nowSec) {
   const resetText = esc(formatResetClock(p.resets_at, nowSec));
   const staleCls = isStale ? " pool-stale" : "";
   const drainCls = p.drain || state === "drain" ? " pool-drain" : "";
+  const patId = `pool-hatch-${idx}`;
+  const reserveX = Math.max(0, 100 - reserve);
 
   return `<article class="pool-row${staleCls}${drainCls}" data-pool="${esc(p.pool)}" data-owner="${esc(p.owner)}" data-state="${esc(state)}">
     <header class="pool-head">
@@ -115,10 +117,24 @@ export function renderPoolRow(p, nowSec) {
     </header>
     <div class="pool-bar${isStale ? " is-greyed" : ""}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(used)}"
       data-used="${used.toFixed(1)}" data-committed="${committed.toFixed(1)}" data-line="${line.toFixed(0)}" data-reserve="${reserve.toFixed(0)}">
-      <span class="pool-bar-used" data-pct="${used.toFixed(1)}">${used.toFixed(1)}% used</span>
-      ${committed > 0 ? `<span class="pool-bar-committed" data-pct="${committed.toFixed(1)}">+${committed.toFixed(1)}% committed</span>` : ""}
-      <span class="pool-bar-line" data-line="${line.toFixed(0)}">line ${line.toFixed(0)}%</span>
-      ${reserve > 0 ? `<span class="pool-bar-reserve" data-reserve="${reserve.toFixed(0)}">reserve ${reserve.toFixed(0)}%</span>` : ""}
+      <svg class="pool-meter-svg" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">
+        <defs>
+          <pattern id="${patId}" width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect width="1.5" height="3" class="pool-svg-hatch"/>
+          </pattern>
+        </defs>
+        <rect x="0" y="0" width="100" height="10" class="pool-svg-track"/>
+        ${reserve > 0 ? `<rect x="${reserveX.toFixed(2)}" y="0" width="${reserve.toFixed(2)}" height="10" class="pool-svg-reserve"/>` : ""}
+        <rect x="0" y="0" width="${used.toFixed(2)}" height="10" class="pool-svg-used"/>
+        ${committed > 0 ? `<rect x="${used.toFixed(2)}" y="0" width="${committed.toFixed(2)}" height="10" fill="url(#${patId})" class="pool-svg-committed"/>` : ""}
+        <line x1="${line.toFixed(2)}" y1="0" x2="${line.toFixed(2)}" y2="10" class="pool-svg-line"/>
+      </svg>
+      <div class="pool-bar-legend">
+        <span class="pool-bar-used" data-pct="${used.toFixed(1)}">${used.toFixed(1)}% used</span>
+        ${committed > 0 ? `<span class="pool-bar-committed" data-pct="${committed.toFixed(1)}">+${committed.toFixed(1)}% committed</span>` : ""}
+        <span class="pool-bar-line" data-line="${line.toFixed(0)}">line ${line.toFixed(0)}%</span>
+        ${reserve > 0 ? `<span class="pool-bar-reserve" data-reserve="${reserve.toFixed(0)}">reserve ${reserve.toFixed(0)}%</span>` : ""}
+      </div>
     </div>
     <footer class="pool-foot">
       <span class="pool-forecast">${forecastLabel}</span>
@@ -135,8 +151,11 @@ export function renderPools(state) {
     : (state && Array.isArray(state.pools) ? state.pools : []);
   const nowSec = state && typeof state.as_of === "number" ? state.as_of : Math.floor(Date.now() / 1000);
   if (!pools.length) {
-    return `<section class="pools-view" id="pools"><p class="empty">No quota pools reported yet.</p></section>`;
+    return `<section class="panel pools-panel" id="pools"><h2 class="panel-h">Quota pools</h2><p class="empty">No quota pools reported yet. Pools appear when members report meter or burn estimates.</p></section>`;
   }
-  const rows = pools.map((p) => renderPoolRow(p, nowSec)).join("\n");
-  return `<section class="pools-view" id="pools" aria-label="Quota pools">\n${rows}\n</section>`;
+  const rows = pools.map((p, i) => renderPoolRow(p, nowSec, i)).join("\n");
+  return `<section class="panel pools-panel pools-view" id="pools" aria-label="Quota pools">
+    <h2 class="panel-h">Quota pools <span class="count">${pools.length}</span></h2>
+    <div class="pools-list">${rows}</div>
+  </section>`;
 }

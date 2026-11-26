@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#14171c" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#162235" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101826" media="(prefers-color-scheme: dark)">
 <title>sommelier</title>
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="style.css?v=2026-11-25-json1">
+<link rel="stylesheet" href="style.css?v=2026-11-26-impeccable1">
 </head>
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false">
@@ -21,6 +21,10 @@
   <symbol id="i-key" viewBox="0 0 16 16"><circle cx="5" cy="8" r="2.75"/><path d="M7.75 8H14.5M12 8v2.5M14.5 8v2"/></symbol>
   <symbol id="i-x" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
   <symbol id="i-flag" viewBox="0 0 16 16"><path d="M3.5 14.5V2M3.5 2.5h8.5l-2 3 2 3H3.5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 16 16"><path d="M8 2.2 14.2 13.5H1.8Z"/><path d="M8 6.4v3.4M8 11.6v.4"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.75"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 16 16"><path d="M13.2 9.8A5.5 5.5 0 0 1 6.2 2.8a5.5 5.5 0 1 0 7 7Z"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="8.5" rx="1.2"/><path d="M5.5 13.5h5M8 11v2.5"/></symbol>
 </svg>
 
 <header class="bar" id="bar">
@@ -31,25 +35,32 @@
       <span class="mark-word">sommelier</span>
     </a>
     <p class="pulse" id="pulse" aria-live="polite"></p>
-    <div class="conn" id="conn" role="status">
-      <span class="conn-dot" aria-hidden="true"></span>
-      <span class="conn-text" id="conn-text">not connected</span>
+    <div class="bar-actions">
+      <div class="conn" id="conn" role="status">
+        <span class="conn-dot" aria-hidden="true"></span>
+        <span class="conn-text" id="conn-text">not connected</span>
+      </div>
+      <button class="btn btn-shell" id="theme-toggle" type="button" title="Theme: system" aria-label="Cycle color theme (system, dark, light)">
+        <svg class="ic" aria-hidden="true"><use href="#i-monitor"/></svg><span class="theme-lbl">Auto</span>
+      </button>
+      <button class="btn btn-shell" id="forget" type="button" hidden>
+        <svg class="ic" aria-hidden="true"><use href="#i-key"/></svg><span>Forget token</span>
+      </button>
     </div>
-    <button class="btn btn-quiet" id="forget" type="button" hidden>
-      <svg class="ic" aria-hidden="true"><use href="#i-key"/></svg><span>Forget token</span>
-    </button>
   </div>
   <nav class="jump" aria-label="Sections">
-    <a href="#roster">People</a><a href="#views">Control plane</a><a href="#ledger">Claims and runs</a><a href="#feed">Feed</a>
+    <a href="#roster" data-jump-tab="people">People</a><a href="#views" data-jump-tab="tasks">Control plane</a><a href="#ledger" data-jump-tab="ledger">Claims &amp; runs</a><a href="#feed">Feed</a>
   </nav>
 </header>
 
 <main id="app">
   <section class="gate" id="gate" hidden aria-labelledby="gate-h">
-    <div class="gate-in">
-      <svg class="gate-glyph" viewBox="0 0 120 24" aria-hidden="true"><path d="M2 12h116"/><circle cx="14" cy="12" r="5"/><circle cx="46" cy="12" r="5"/><circle cx="78" cy="12" r="5"/><circle cx="106" cy="12" r="5" class="hollow"/></svg>
-      <h1 id="gate-h">Watch the bus</h1>
-      <p>Paste an <strong>observer token</strong>. It can only read, which is why the hub accepts it from a browser. Member and orchestrator tokens are refused here on purpose.</p>
+    <div class="gate-card">
+      <div class="gate-head">
+        <svg class="gate-glyph" viewBox="0 0 120 24" aria-hidden="true"><path d="M2 12h116"/><circle cx="14" cy="12" r="5"/><circle cx="46" cy="12" r="5"/><circle cx="78" cy="12" r="5"/><circle cx="106" cy="12" r="5" class="hollow"/></svg>
+        <h1 id="gate-h">Watch the bus</h1>
+        <p>Paste an <strong>observer token</strong>. It can only read, which is why the hub accepts it from a browser. Member and orchestrator tokens are refused here on purpose.</p>
+      </div>
       <form id="gate-form" autocomplete="off">
         <label for="gate-token">Observer token</label>
         <div class="gate-row">
@@ -69,31 +80,49 @@
     </div>
   </section>
 
-  <div class="board" id="board" hidden>
-    <section class="roster" id="roster" aria-labelledby="roster-h">
-      <h2 class="sr" id="roster-h">Participants and their agents</h2>
-      <div id="people"></div>
-    </section>
+  <div class="board" id="board" data-tab="overview" hidden>
+    <div class="triage" id="triage" role="region" aria-label="Active anomalies" hidden></div>
 
-    <section class="views" id="views" aria-label="Control plane views">
-      <div id="view-tasks"></div>
-      <div id="view-pools"></div>
-      <div id="view-landing"></div>
-      <div id="view-runs"></div>
-      <div id="view-branches"></div>
-      <div id="view-metrics"></div>
-    </section>
+    <div class="ws-tabs-wrap">
+      <div class="ws-tabs" id="ws-tabs" role="tablist" aria-label="Workspace views">
+        <button class="ws-tab" type="button" role="tab" id="tab-overview" data-tab="overview" aria-selected="true">Overview</button>
+        <button class="ws-tab" type="button" role="tab" id="tab-people" data-tab="people" aria-selected="false">People <span class="tab-n" id="tn-people"></span></button>
+        <button class="ws-tab" type="button" role="tab" id="tab-tasks" data-tab="tasks" aria-selected="false">Tasks <span class="tab-n" id="tn-tasks"></span></button>
+        <button class="ws-tab" type="button" role="tab" id="tab-pools" data-tab="pools" aria-selected="false">Pools <span class="tab-n" id="tn-pools"></span></button>
+        <button class="ws-tab" type="button" role="tab" id="tab-landing" data-tab="landing" aria-selected="false">Landing <span class="tab-n" id="tn-landing"></span></button>
+        <button class="ws-tab" type="button" role="tab" id="tab-runs" data-tab="runs" aria-selected="false">Runs <span class="tab-n" id="tn-runs"></span></button>
+        <button class="ws-tab" type="button" role="tab" id="tab-branches" data-tab="branches" aria-selected="false">Branches <span class="tab-n" id="tn-branches"></span></button>
+        <button class="ws-tab" type="button" role="tab" id="tab-metrics" data-tab="metrics" aria-selected="false">Metrics <span class="tab-n" id="tn-metrics"></span></button>
+        <button class="ws-tab" type="button" role="tab" id="tab-ledger" data-tab="ledger" aria-selected="false">Claims &amp; runs <span class="tab-n" id="tn-ledger"></span></button>
+      </div>
+    </div>
 
-    <section class="ledger" id="ledger" aria-label="Claims and run requests">
-      <div class="panel">
-        <h2 class="panel-h">Claims <span class="count" id="claims-n"></span></h2>
-        <ul class="claims" id="claims"></ul>
-      </div>
-      <div class="panel">
-        <h2 class="panel-h">Run requests <span class="count" id="runs-n"></span></h2>
-        <ul class="runs" id="runs"></ul>
-      </div>
-    </section>
+    <div class="workspace">
+      <section class="roster" id="roster" aria-labelledby="roster-h">
+        <h2 class="sr" id="roster-h">Participants and their agents</h2>
+        <div id="people"></div>
+      </section>
+
+      <section class="views" id="views" aria-label="Control plane views">
+        <div class="view-slot" id="view-tasks"></div>
+        <div class="view-slot" id="view-pools"></div>
+        <div class="view-slot" id="view-landing"></div>
+        <div class="view-slot" id="view-runs"></div>
+        <div class="view-slot" id="view-branches"></div>
+        <div class="view-slot" id="view-metrics"></div>
+      </section>
+
+      <section class="ledger" id="ledger" aria-label="Claims and run requests">
+        <div class="panel">
+          <h2 class="panel-h">Claims <span class="count" id="claims-n"></span></h2>
+          <ul class="claims" id="claims"></ul>
+        </div>
+        <div class="panel">
+          <h2 class="panel-h">Run requests <span class="count" id="runs-n"></span></h2>
+          <ul class="runs" id="runs"></ul>
+        </div>
+      </section>
+    </div>
 
     <section class="feed" id="feed" aria-labelledby="feed-h">
       <div class="feed-head">
@@ -117,7 +146,7 @@
   </div>
 </main>
 
-<script type="module" src="views/index.js"></script>
-<script src="app.js?v=2026-11-25-json1"></script>
+<script type="module" src="views/index.js?v=2026-11-26-impeccable1"></script>
+<script src="app.js?v=2026-11-26-impeccable1"></script>
 </body>
 </html>

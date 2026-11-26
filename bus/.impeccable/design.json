@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-26T00:40:00+01:00",
+  "title": "Design System: Sommelier Dashboard",
+  "extensions": {
+    "colorMeta": {
+      "survey-indigo": {
+        "role": "primary",
+        "displayName": "Survey Indigo",
+        "canonical": "oklch(0.235 0.045 252)",
+        "tonalRamp": ["oklch(0.14 0.03 252)", "oklch(0.235 0.045 252)", "oklch(0.33 0.05 250)", "oklch(0.48 0.06 250)", "oklch(0.76 0.03 250)", "oklch(0.95 0.008 250)"]
+      },
+      "survey-cobalt": {
+        "role": "primary",
+        "displayName": "Survey Cobalt",
+        "canonical": "oklch(0.48 0.17 256)",
+        "tonalRamp": ["oklch(0.26 0.11 256)", "oklch(0.38 0.18 256)", "oklch(0.48 0.17 256)", "oklch(0.69 0.15 252)", "oklch(0.86 0.075 255)", "oklch(0.94 0.035 256)"]
+      },
+      "topographic-emerald": {
+        "role": "secondary",
+        "displayName": "Topographic Emerald",
+        "canonical": "oklch(0.51 0.155 154)",
+        "tonalRamp": ["oklch(0.27 0.065 154)", "oklch(0.51 0.155 154)", "oklch(0.74 0.16 154)", "oklch(0.935 0.045 154)"]
+      },
+      "signal-vermilion": {
+        "role": "secondary",
+        "displayName": "Signal Vermilion",
+        "canonical": "oklch(0.53 0.21 26)",
+        "tonalRamp": ["oklch(0.29 0.08 26)", "oklch(0.53 0.21 26)", "oklch(0.71 0.18 26)", "oklch(0.945 0.04 26)"]
+      },
+      "survey-paper": {
+        "role": "neutral",
+        "displayName": "Survey Paper",
+        "canonical": "oklch(0.97 0.005 245)",
+        "tonalRamp": ["oklch(0.165 0.016 248)", "oklch(0.205 0.018 248)", "oklch(0.865 0.012 245)", "oklch(0.942 0.008 245)", "oklch(0.97 0.005 245)", "oklch(0.995 0.002 245)"]
+      }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Station Headline", "purpose": "Participant names and gate heading." },
+      "title": { "displayName": "Panel Title", "purpose": "Control plane and feed panel headers." },
+      "body": { "displayName": "Operational Body", "purpose": "Message bodies, worker summaries, and controls." },
+      "label": { "displayName": "Telemetry Mono", "purpose": "Topic slugs, SHAs, branches, and timestamps." }
+    },
+    "shadows": [
+      { "name": "station-elevation", "value": "0 1px 2px oklch(0.24 0.03 252 / 0.06), 0 4px 12px oklch(0.24 0.03 252 / 0.05)", "purpose": "Subtle card lift over survey-paper ground." }
+    ],
+    "motion": [
+      { "name": "ease-out-expo", "value": "cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Snappy 140-420ms state transitions and message arrival." }
+    ],
+    "breakpoints": [
+      { "name": "tablet", "value": "1180px" },
+      { "name": "header-wrap", "value": "900px" },
+      { "name": "phone", "value": "640px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary form submission action (Token Gate connect).",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">Connect</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; min-height: 2.5rem; padding: 0 1.15rem; border: 1px solid oklch(0.44 0.18 256); border-radius: 7px; background: oklch(0.44 0.18 256); color: oklch(0.99 0.002 250); font-weight: 550; cursor: pointer; } .ds-btn-primary:hover { background: oklch(0.38 0.18 256); }"
+    },
+    {
+      "name": "Workspace Tab",
+      "kind": "nav",
+      "refersTo": "ws-tab",
+      "description": "Switches between Overview and focused Control Plane views.",
+      "html": "<button class=\"ds-ws-tab\" aria-selected=\"true\">Pools <span class=\"ds-tab-n\">3</span></button>",
+      "css": ".ds-ws-tab { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.42rem 0.75rem; border-radius: 6px; border: 1px solid oklch(0.48 0.17 256 / 0.28); background: oklch(0.94 0.035 256); color: oklch(0.48 0.17 256); font-size: 0.8125rem; font-weight: 600; } .ds-tab-n { font-size: 0.7rem; padding: 0.05rem 0.4rem; border-radius: 999px; background: oklch(0.94 0.035 256); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Cartographic Survey & Topographic Atlas",
+    "overview": "The Sommelier web dashboard (bus/ui/) is an operational swarm observatory modeled on Swiss cartographic survey sheets and transit control schedules. Every swarm participant renders as a calibrated survey station with a vertical transit-line worker track, paired with precision SVG hatched quota gauges, an immediate top anomaly triage strip, and a docked live bus feed.",
+    "keyCharacteristics": [
+      "Committed deep survey-indigo header shell anchoring live tabular telemetry counters and connection state.",
+      "Dual-polarity OKLCH token architecture: cool survey-paper light ground and nocturnal chart slate dark ground.",
+      "Dual-encoded worker and state semantics combining hue with distinct geometric node silhouettes."
+    ],
+    "rules": [
+      { "name": "The Zero-Inline-Style Rule", "body": "All color, layout, and state variations must use CSS classes, data-* attributes, or SVG geometry attributes; inline style=\"...\" attributes are forbidden by the hub CSP.", "section": "colors" },
+      { "name": "The Dual-Encoding Rule", "body": "State color never works alone: running, blocked, idle, quiet, and done each carry distinct geometry and explicit text labels.", "section": "colors" }
+    ],
+    "dos": [
+      "Do keep all visual styling in bus/ui/style.css using classes, data-* attributes, and SVG attributes.",
+      "Do preserve bus/tests/quota_live.rs DOM/export contracts (renderPools, pool-bar-used, pool-bar-committed, pool-bar-line, pool-bar-reserve, waiting_tasks, is-greyed).",
+      "Do bump ?v= query parameters in bus/ui/index.html whenever editing style.css, app.js, or views/*.js."
+    ],
+    "donts": [
+      "Don't emit inline style=\"...\" attributes or <style> tags in HTML or JS templates.",
+      "Don't add external CDN fonts, stylesheets, or scripts.",
+      "Don't overwrite bus/DESIGN.md (which documents the Rust bus backend)."
+    ]
+  }
+}

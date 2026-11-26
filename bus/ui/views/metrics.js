@@ -37,7 +37,7 @@ export function renderMetrics(state) {
   const checks = state.regress && Array.isArray(state.regress.checks) ? state.regress.checks : [];
 
   if (!baselines.length && !metrics.length && !checks.length) {
-    return `<div class="panel metrics-panel"><h2 class="panel-h">Metrics</h2><p class="empty">No metrics recorded yet.</p></div>`;
+    return `<section class="panel metrics-panel"><h2 class="panel-h">Metrics &amp; baselines</h2><p class="empty">No metrics recorded yet.</p></section>`;
   }
 
   const baseRows = baselines.map((b) => {
@@ -45,9 +45,14 @@ export function renderMetrics(state) {
       ? (b.from_sha === b.to_sha ? esc(b.to_sha.slice(0, 10)) : `${esc(b.from_sha.slice(0, 10))}..${esc(b.to_sha.slice(0, 10))}`)
       : "-";
     return `<li class="metric-base">
-      <span class="c-topic">${esc(b.name)}</span>
-      <span class="chip"><span>${esc(b.machine_class)}/${esc(b.scenario)}</span></span>
-      <span class="m-val">median <strong>${fmtNum(b.median)}</strong> (${esc(b.n)} commits, <code>${range}</code>)</span>
+      <div class="cp-row-top">
+        <span class="c-topic">${esc(b.name)}</span>
+        <span class="m-val">median <strong>${fmtNum(b.median)}</strong></span>
+      </div>
+      <div class="cp-row-meta">
+        <span class="chip"><span>${esc(b.machine_class)}/${esc(b.scenario)}</span></span>
+        <span class="r-foot">${esc(b.n)} commits · <code>${range}</code></span>
+      </div>
     </li>`;
   }).join("");
 
@@ -56,16 +61,20 @@ export function renderMetrics(state) {
     const baseText = c.base != null ? `base ${fmtNum(c.base)} → ` : "";
     const newText = c.new != null ? `new ${fmtNum(c.new)}` : "";
     return `<li class="metric-check" data-status="${esc(c.status || "")}" data-sha="${esc(c.sha || "")}">
-      <span class="c-topic"><code>${esc(shaShort)}</code> ${esc(c.metric || "")}</span>
-      <span class="chip"><span>${esc(c.machine_class || "default")}/${esc(c.scenario || "default")}</span></span>
-      ${statusBadge(c)}
-      <span class="r-foot">${baseText}${newText}</span>
+      <div class="cp-row-top">
+        <span class="c-topic"><code>${esc(shaShort)}</code> ${esc(c.metric || "")}</span>
+        ${statusBadge(c)}
+      </div>
+      <div class="cp-row-meta">
+        <span class="chip"><span>${esc(c.machine_class || "default")}/${esc(c.scenario || "default")}</span></span>
+        <span class="r-foot">${baseText}${newText}</span>
+      </div>
     </li>`;
   }).join("");
 
-  return `<div class="panel metrics-panel">
+  return `<section class="panel metrics-panel">
     <h2 class="panel-h">Metrics &amp; baselines <span class="count">${metrics.length}</span></h2>
-    ${baseRows ? `<ul class="claims metrics-baselines">${baseRows}</ul>` : ""}
-    ${checkRows ? `<ul class="runs metrics-checks">${checkRows}</ul>` : ""}
-  </div>`;
+    ${baseRows ? `<ul class="metrics-baselines">${baseRows}</ul>` : ""}
+    ${checkRows ? `<h3 class="panel-sub">Regression checks <span class="count">${checks.length}</span></h3><ul class="metrics-checks">${checkRows}</ul>` : ""}
+  </section>`;
 }

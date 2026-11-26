@@ -17,6 +17,10 @@ export {
   renderMetrics,
 };
 
+function isSlotEmpty(html) {
+  return !html || html.includes('class="empty"');
+}
+
 export function renderViews(state, root) {
   const s = state || {};
   const parts = {
@@ -42,6 +46,7 @@ export function renderViews(state, root) {
       const node = doc.getElementById(id);
       if (node) {
         node.innerHTML = html;
+        node.classList.toggle("is-empty", isSlotEmpty(html));
         updatedSlot = true;
       }
     }
