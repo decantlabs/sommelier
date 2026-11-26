@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, GitCommit, Scales, ShieldCheck, X } from "@phosphor-icons/react";
+import { ArrowRight, CheckCircle, Circle, Clock, GitBranch, GitCommit, Scales, ShieldCheck, WarningCircle, X } from "@phosphor-icons/react";
 import type { BatchItem, LandingItem, ReviewItem, SubmissionItem } from "../api/types";
 import {
   Button,
@@ -16,28 +16,45 @@ import "./pipeline.css";
 
 type PipelineSection = "submissions" | "reviews" | "landing";
 
-function stageStatuses(sub: SubmissionItem): ("pass" | "active" | "fail" | "idle")[] {
-  const s = sub.state;
-  const gate =
-    s === "gate_failed" ? "fail" : s === "received" ? "active" : "pass";
-  const verify =
-    s === "verify_failed"
-      ? "fail"
-      : s === "verifying"
-        ? "active"
-        : ["verified", "reviewing", "review_failed", "approved", "landed"].includes(s)
-          ? "pass"
-          : "idle";
-  const review =
-    s === "review_failed" || s === "rejected"
-      ? "fail"
-      : s === "reviewing"
-        ? "active"
-        : ["approved", "landed"].includes(s)
-          ? "pass"
-          : "idle";
-  const land = s === "landed" ? "pass" : s === "approved" ? "active" : "idle";
-  return [gate, verify, review, land];
+export const deliveryStages = [
+  { label: "Gate", description: "Scope and policy", icon: ShieldCheck, states: ["received", "gated", "gate_failed"] },
+  { label: "Verify", description: "Clean build", icon: GitBranch, states: ["verifying", "verified", "verify_failed"] },
+  { label: "Review", description: "Independent checks", icon: Scales, states: ["reviewing", "review_failed"] },
+  { label: "Land", description: "Approved changes", icon: GitCommit, states: ["approved", "landed"] },
+] as const;
+
+export type StageStatus = "pass" | "active" | "fail" | "idle";
+
+export function stageStatuses(sub: SubmissionItem): StageStatus[] {
+  if (sub.state === "rejected") return ["idle", "idle", "idle", "idle"];
+  const stage = deliveryStages.findIndex(({ states }) => (states as readonly string[]).includes(sub.state));
+  const finished = ["gated", "verified", "landed"].includes(sub.state);
+  return deliveryStages.map((_, index) => {
+    if (index < stage || (index === stage && finished)) return "pass";
+    if (index > stage) return "idle";
+    return sub.state.endsWith("_failed") ? "fail" : "active";
+  });
+}
+
+export const stageStateLabels = { pass: "Passed", active: "Current stage", fail: "Failed", idle: "Not reached" };
+export const stageStateIcons = { pass: CheckCircle, active: Clock, fail: WarningCircle, idle: Circle };
+
+function SubmissionTrace({ submission }: { submission: SubmissionItem }) {
+  if (submission.state === "rejected") return null;
+  return (
+    <ol className="pl-trace" aria-label="Submission progress">
+      {stageStatuses(submission).map((state, index) => {
+        const Icon = stageStateIcons[state];
+        return (
+          <li key={deliveryStages[index].label} className={`is-${state}`} aria-current={state === "active" ? "step" : undefined}>
+            <Icon size={16} aria-hidden="true" />
+            <strong>{deliveryStages[index].label}</strong>
+            <span>{stageStateLabels[state]}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
 }
 
 export default function PipelineView({
@@ -60,7 +77,10 @@ export default function PipelineView({
   onMessages: (topic: string) => void;
 }) {
   const [section, setSection] = useState<PipelineSection>("submissions");
+  const pageSize = 20;
+  const [visibleLimit, setVisibleLimit] = useState(pageSize);
   const [stateFilter, setStateFilter] = useState("");
+  const [stageFilter, setStageFilter] = useState<number | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(
     () =>
       submissions.find((s) => s.task === initialTaskFilter)?.sha256 ??
@@ -71,18 +91,20 @@ export default function PipelineView({
   useEffect(() => {
     if (!initialTaskFilter) return;
     setSection("submissions");
-    const match = submissions.find((s) => s.task === initialTaskFilter);
-    if (match) setSelectedKey(match.sha256);
-  }, [initialTaskFilter, submissions]);
+    setStageFilter(null);
+    setStateFilter("");
+    setSelectedKey(null);
+  }, [initialTaskFilter]);
 
   const visibleSubmissions = useMemo(
     () =>
       submissions.filter(
         (item) =>
           (!stateFilter || item.state === stateFilter) &&
+          (stageFilter === null || (deliveryStages[stageFilter].states as readonly string[]).includes(item.state)) &&
           (!initialTaskFilter || item.task === initialTaskFilter),
       ),
-    [initialTaskFilter, stateFilter, submissions],
+    [initialTaskFilter, stageFilter, stateFilter, submissions],
   );
 
   const activeSubmission =
@@ -99,6 +121,7 @@ export default function PipelineView({
       : undefined;
 
   const hasDetail = Boolean(activeSubmission || activeReview || activeLanding);
+  const entryCount = section === "submissions" ? visibleSubmissions.length : section === "reviews" ? reviews.length : landing.length;
   const submissionStates = useMemo(
     () => [...new Set(submissions.map((s) => s.state))].sort(),
     [submissions],
@@ -109,13 +132,14 @@ export default function PipelineView({
       <div className="pl-header">
         <div>
           <h1 id="pl-title">Delivery pipeline</h1>
-          <p>Static gates, clean verification, assigned reviews, and landing batches.</p>
+          <p>Follow submissions from intake to landing.</p>
         </div>
         <SegmentedControl
           ariaLabel="Pipeline stage"
           value={section}
           onChange={(next) => {
             setSection(next);
+            setVisibleLimit(pageSize);
             setSelectedKey(null);
           }}
           options={[
@@ -127,9 +151,25 @@ export default function PipelineView({
       </div>
 
       {section === "submissions" && (
+        <div className="pl-stage-strip" role="group" aria-label="Filter by delivery stage">
+          {deliveryStages.map(({ label, description, icon: Icon, states }, index) => {
+            const count = submissions.filter(({ state }) => (states as readonly string[]).includes(state)).length;
+            return (
+              <button key={label} type="button" aria-pressed={stageFilter === index}
+                onClick={() => { setStageFilter(stageFilter === index ? null : index); setStateFilter(""); setVisibleLimit(pageSize); }}>
+                <span className="pl-stage-icon"><Icon size={17} aria-hidden="true" /></span>
+                <span><strong>{label}</strong><small>{description}</small></span>
+                <span className="pl-stage-total mono">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {section === "submissions" && (
         <FilterBar ariaLabel="Submission filters">
           <FilterField label="State">
-            <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}>
+            <select value={stateFilter} onChange={(e) => { setStateFilter(e.target.value); setStageFilter(null); setVisibleLimit(pageSize); }}>
               <option value="">All states</option>
               {submissionStates.map((st) => (
                 <option key={st} value={st}>
@@ -143,12 +183,13 @@ export default function PipelineView({
               Task: {initialTaskFilter} <X size={13} />
             </Button>
           )}
-          {(stateFilter || initialTaskFilter) && (
+          {(stageFilter !== null || stateFilter || initialTaskFilter) && (
             <Button
               variant="ghost"
               size="sm"
               onClick={() => {
                 setStateFilter("");
+                setStageFilter(null);
                 onClearTaskFilter();
               }}
             >
@@ -182,7 +223,7 @@ export default function PipelineView({
               <div className="pl-empty">No submissions match the selected filters.</div>
             ) : (
               <ol className="pl-rows">
-                {visibleSubmissions.map((sub) => {
+                {visibleSubmissions.slice(0, visibleLimit).map((sub) => {
                   const stages = stageStatuses(sub);
                   return (
                     <li key={sub.sha256}>
@@ -205,7 +246,7 @@ export default function PipelineView({
                             <span>risk: {sub.risk}</span>
                           </span>
                         </span>
-                        <div className="pl-stages" aria-label="Gate, Verify, Review, Land">
+                        <div className="pl-stages" aria-label={stages.map((state, index) => `${deliveryStages[index].label}: ${stageStateLabels[state]}`).join(", ")}>
                           {stages.map((st, idx) => (
                             <span key={idx} className={`pl-stage-dot is-${st}`} />
                           ))}
@@ -225,7 +266,7 @@ export default function PipelineView({
               <div className="pl-empty">No active or recent review assignments.</div>
             ) : (
               <ol className="pl-rows">
-                {reviews.map((rev) => {
+                {reviews.slice(0, visibleLimit).map((rev) => {
                   const key = `${rev.task}#${rev.n}`;
                   return (
                     <li key={key}>
@@ -273,7 +314,7 @@ export default function PipelineView({
               <div className="pl-empty">Landing queue is empty.</div>
             ) : (
               <ol className="pl-rows">
-                {landing.map((item) => (
+                {landing.slice(0, visibleLimit).map((item) => (
                   <li key={item.refName}>
                     <button
                       type="button"
@@ -303,6 +344,9 @@ export default function PipelineView({
                 ))}
               </ol>
             ))}
+          {entryCount > visibleLimit && <div className="pl-list-more">
+            <Button size="sm" onClick={() => setVisibleLimit(visibleLimit + pageSize)}>Show more</Button>
+          </div>}
         </div>
 
         {activeSubmission && (
@@ -317,9 +361,8 @@ export default function PipelineView({
             }
             title={`Submission ${activeSubmission.shortSha}`}
           >
-            <p className="pl-detail-copy">
-              {activeSubmission.reviewSummary ?? "Bundle tracked by intake, verify, and review pipeline."}
-            </p>
+            {activeSubmission.reviewSummary && <p className="pl-detail-copy">{activeSubmission.reviewSummary}</p>}
+            <SubmissionTrace submission={activeSubmission} />
             <DefinitionList
               items={[
                 {

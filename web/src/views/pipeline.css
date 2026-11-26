@@ -233,3 +233,58 @@
     justify-self: start;
   }
 }
+
+.pl-stage-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-panel);
+  background: var(--color-panel);
+}
+
+.pl-stage-strip button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  text-align: left;
+  border-radius: var(--radius-sm);
+}
+
+.pl-stage-strip button + button { border-left: 1px solid var(--color-line); }
+.pl-stage-strip button:hover { background: var(--color-surface-hover-wash); }
+.pl-stage-strip button[aria-pressed="true"] { background: var(--color-surface-card-selected); box-shadow: inset 0 -2px var(--color-accent); }
+.pl-stage-strip strong, .pl-stage-strip small { display: block; }
+.pl-stage-strip strong { font-size: var(--text-md); font-weight: 580; }
+.pl-stage-strip small { color: var(--color-text-muted); font-size: var(--text-sm); margin-top: 2px; }
+.pl-stage-icon { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-accent); }
+.pl-stage-total { font-size: var(--text-lg); color: var(--color-text-secondary); }
+
+.pl-trace {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  list-style: none;
+  margin: var(--space-4) 0;
+  padding: var(--space-3) 0;
+  border-block: 1px solid var(--color-line);
+}
+.pl-trace li { display: grid; justify-items: start; gap: 4px; color: var(--color-text-muted); min-width: 0; }
+.pl-trace li > strong { color: var(--color-text); font-size: var(--text-sm); }
+.pl-trace li > span { font-size: var(--text-xs); }
+.pl-trace .is-pass svg { color: var(--color-good); }
+.pl-trace .is-active svg { color: var(--color-warning); }
+.pl-trace .is-fail svg { color: var(--color-danger); }
+
+@media (max-width: 680px) {
+  .pl-stage-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pl-stage-strip button:nth-child(3) { border-left: 0; }
+  .pl-stage-strip button:nth-child(n+3) { border-top: 1px solid var(--color-line); }
+}
+
+@media (min-width: 841px) {
+  .pl-content > .ui-inspector-docked, .ts-content > .ui-inspector-docked { position: sticky; top: var(--space-4); }
+}
+
+.pl-list-more { padding: var(--space-3); border-top: 1px solid var(--color-line); }

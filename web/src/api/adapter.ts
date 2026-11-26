@@ -1,7 +1,7 @@
 import { inferProvider } from "../components/ProviderMark";
 import type {
   AccessRole,
-  AgentProvider,
+  AgentMachine,
   ApiStateSnapshot,
   BatchItem,
   BusMessage,
@@ -22,6 +22,7 @@ import type {
   SubmissionItem,
   SubmissionState,
   TaskState,
+  WorkAttempt,
   WorkTask,
 } from "./types";
 
@@ -202,6 +203,140 @@ function layoutTasks(rawTasks: Omit<WorkTask, "x" | "y">[]): WorkTask[] {
   return out;
 }
 
+function adaptAgentMachines(raw: ApiStateSnapshot, nowSec: number): AgentMachine[] {
+  const store = asRecord(raw.store);
+  const workers = asArray(asRecord(raw.derived)?.workers);
+  const machines = new Map<string, AgentMachine>();
+  const agentRows = new Map<string, Record<string, unknown>>();
+  const workerRows = new Map<string, Record<string, unknown>>();
+  const leases = new Map<string, Record<string, unknown>>();
+  const key = (owner: string, name?: string) => JSON.stringify([owner, name ?? ""]);
+  const machine = (owner: string, name?: string) => {
+    const id = key(owner, name);
+    let entry = machines.get(id);
+    if (!entry) {
+      entry = { owner, name, agents: [] };
+      machines.set(id, entry);
+    }
+    return entry;
+  };
+
+  for (const row of asArray(raw.machines ?? store?.machines)) {
+    const owner = str(row, "owner");
+    const name = str(row, "machine");
+    if (owner && name) machine(owner, name);
+  }
+
+  const declarations = new Map<string, Record<string, unknown>>();
+  for (const row of asArray(raw.capacities ?? store?.capacities)) {
+    const owner = str(row, "owner");
+    const name = str(row, "machine");
+    if (!owner || !name) continue;
+    declarations.set(JSON.stringify([owner, name, str(row, "class")]), row);
+  }
+  for (const row of declarations.values()) {
+    const slots = row.useful_parallel;
+    if (typeof slots !== "number" || !Number.isFinite(slots) || slots < 0) continue;
+    const entry = machine(str(row, "owner"), str(row, "machine"));
+    entry.slots = (entry.slots ?? 0) + slots;
+  }
+
+  // The roster and the store may both describe one process. Preserve its store metadata.
+  for (const row of [...asArray(store?.agents), ...asArray(raw.agents)]) {
+    const owner = str(row, "owner");
+    const name = str(row, "agent") || str(row, "name");
+    if (owner && name) {
+      const id = key(owner, name);
+      agentRows.set(id, { ...agentRows.get(id), ...row });
+    }
+  }
+
+  for (const row of workers) {
+    const owner = str(row, "owner");
+    const name = str(row, "agent");
+    if (owner && name) workerRows.set(key(owner, name), row);
+  }
+
+  for (const row of asArray(raw.leases)) {
+    const owner = str(row, "owner");
+    const name = str(row, "worker");
+    const state = str(row, "state");
+    if (!owner || !name || (state !== "active" && state !== "suspect")) continue;
+    const id = key(owner, name);
+    if (num(row, "granted_at") >= num(leases.get(id), "granted_at")) leases.set(id, row);
+  }
+
+  for (const id of new Set([...agentRows.keys(), ...workerRows.keys()])) {
+    const row = agentRows.get(id);
+    const worker = workerRows.get(id);
+    const lease = leases.get(id);
+    const owner = str(row, "owner") || str(worker, "owner");
+    const name = str(row, "agent") || str(row, "name") || str(worker, "agent");
+    const host = str(lease, "machine") || str(row, "machine") || undefined;
+    const model = str(worker, "model") || str(row, "model") || undefined;
+    const agentClass = str(worker, "class") || str(row, "class") || str(lease, "class") || undefined;
+    const mode = str(worker, "mode");
+    const reported = str(row, "reported_state") || str(row, "state", "unknown");
+    const state = str(worker, "state") || (bool(row, "stale") ? "stale" : reported);
+    const statusAt = num(row, "as_of") || num(worker, "as_of");
+
+    machine(owner, host).agents.push({
+      name,
+      state: capitalize(state.replaceAll("_", " ")),
+      provider: inferProvider(model, agentClass),
+      model,
+      agentClass,
+      mode: mode === "auto" ? "Auto" : mode === "own" ? "Own" : undefined,
+      taskId: str(lease, "task_id") || str(row, "task_id") || undefined,
+      branch: str(worker, "branch") || str(row, "branch") || undefined,
+      lastStatus: typeof worker?.age_secs === "number" && worker.age_secs >= 0
+        ? formatRelativeAge(nowSec - worker.age_secs, nowSec)
+        : statusAt > 0 ? formatRelativeAge(statusAt, nowSec) : undefined,
+      statusDetail: str(worker, "text") || str(row, "text") || undefined,
+      reason: str(worker, "reason") || undefined,
+    });
+  }
+
+  return [...machines.values()].sort((a, b) =>
+    a.owner.localeCompare(b.owner) || (a.name ?? "").localeCompare(b.name ?? ""),
+  );
+}
+
+function adaptWorkAttempts(raw: ApiStateSnapshot): WorkAttempt[] {
+  const entries = new Map<string, WorkAttempt>();
+  const checkpointOrder = new Map<string, number>();
+  const attemptKey = (task: string, attempt: number) => JSON.stringify([task, attempt]);
+  for (const lease of asArray(raw.leases)) {
+    const taskId = str(lease, "task_id");
+    const number = num(lease, "attempt");
+    if (!taskId || number < 1) continue;
+    entries.set(attemptKey(taskId, number), {
+      taskId, number,
+      leaseState: str(lease, "state") || undefined,
+      owner: str(lease, "owner") || undefined,
+      worker: str(lease, "worker") || undefined,
+      endReason: str(lease, "end_reason") || undefined,
+    });
+  }
+
+  const checkpoints = [
+    ...asArray(raw.checkpoints),
+    ...asArray(raw.tasks).map((task) => asRecord(task.latest_checkpoint)).filter((row) => row !== undefined),
+  ];
+  for (const checkpoint of checkpoints) {
+    const taskId = str(checkpoint, "task_id");
+    const number = num(checkpoint, "attempt");
+    const sequence = num(checkpoint, "seq");
+    const sha = str(checkpoint, "sha").slice(0, 7);
+    if (!taskId || number < 1 || !sha) continue;
+    const key = attemptKey(taskId, number);
+    if (sequence < (checkpointOrder.get(key) ?? 0)) continue;
+    checkpointOrder.set(key, sequence);
+    entries.set(key, { ...(entries.get(key) ?? { taskId, number }), checkpoint: sha });
+  }
+  return [...entries.values()];
+}
+
 export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
   const hub = asRecord(raw.hub);
   const hubId = num(hub, "id", 0);
@@ -310,6 +445,7 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
     to: Array.isArray(m.to) ? m.to.filter((r): r is string => typeof r === "string") : undefined,
   }));
 
+  const agentMachines = adaptAgentMachines(raw, nowSec);
   const rawMembers = asArray(raw.members);
   const rawAgents = asArray(raw.agents);
   const derived = asRecord(raw.derived);
@@ -327,6 +463,7 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
   }
   const allParticipantNames = new Set<string>([
     ...memberByName.keys(),
+    ...agentMachines.map(({ owner }) => owner),
     ...rawKeys.map((k) => str(k, "member")).filter(Boolean),
     ...rawStanding.map((s) => str(s, "member")).filter(Boolean),
   ]);
@@ -341,11 +478,10 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
     const standingRow = rawStanding.find((s) => str(s, "member") === name);
     const heldRole = rawRoles.find((r) => str(r, "holder") === name && str(r, "state") === "held");
 
-    const provider: AgentProvider =
-      inferProvider(
+    const provider = inferProvider(
         str(worker, "model") || str(agent, "model") || str(m, "hello"),
         str(worker, "class") || str(agent, "class"),
-      ) ?? "Claude";
+      );
 
     const rawMode = str(worker, "mode") || str(cap, "mode", "auto");
     const mode: "Auto" | "Own" = rawMode.toLowerCase() === "own" ? "Own" : "Auto";
@@ -490,10 +626,16 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
     return {
       id: str(f, "id"),
       area: str(f, "area"),
-      areaTitle: capitalize(str(f, "area")),
+      areaTitle: str(f, "area_title") || capitalize(str(f, "area")),
       title: str(f, "title"),
       paths: Array.isArray(f.paths) ? f.paths.filter((p): p is string => typeof p === "string") : [],
       depends: Array.isArray(f.depends) ? f.depends.filter((d): d is string => typeof d === "string") : [],
+      how: str(f, "how") || undefined,
+      proofs: asArray(f.proofs).map((proof) => ({
+        profile: str(proof, "profile"),
+        scenario: str(proof, "scenario"),
+        milestone: str(proof, "milestone"),
+      })).filter(({ profile, scenario, milestone }) => profile && scenario && milestone),
       openOrders: num(f, "open_orders", 0),
       openTasks: num(f, "open_tasks", 0),
       openRuns: num(f, "open_runs", 0),
@@ -522,13 +664,13 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
             : "pending";
     return {
       profile: str(c, "profile"),
-      scenario: str(c, "scenario", "default"),
+      scenario: str(c, "scenario") || undefined,
       machineKey: str(c, "machine_key"),
       outcome,
       reports: num(c, "reports", 0),
       quorum: num(c, "quorum", 3),
       build: str(c, "build").slice(0, 7),
-      channel: str(c, "channel", "main"),
+      channel: str(c, "channel") || undefined,
     };
   });
 
@@ -667,6 +809,8 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
     tasks: laidOutTasks,
     messages,
     contributors,
+    agentMachines,
+    workAttempts: adaptWorkAttempts(raw),
     submissions,
     submissionCounts,
     reviews,
@@ -691,6 +835,8 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
 export function redactSnapshotForPublic(snapshot: FactorySnapshot): FactorySnapshot {
   return {
     ...snapshot,
+    agentMachines: snapshot.agentMachines.filter(({ agents }) => agents.length > 0)
+      .map(({ slots: _slots, ...machine }) => machine),
     pools: snapshot.pools.map((p) => ({
       ...p,
       owner: "public",

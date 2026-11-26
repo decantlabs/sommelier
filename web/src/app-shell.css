@@ -57,11 +57,10 @@
 
 .app-header nav {
   display: flex;
-  gap: 16px;
+  gap: clamp(4px, 1vw, 16px);
   height: 100%;
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  min-width: 0;
+  justify-content: center;
 }
 
 .app-header nav button {
@@ -349,7 +348,7 @@
   }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 1180px) {
   .app-header {
     height: 95px;
     display: grid;
@@ -365,6 +364,7 @@
     overflow-x: auto;
     scrollbar-width: none;
     gap: 6px;
+    justify-content: flex-start;
   }
 
   .app-header nav::-webkit-scrollbar {

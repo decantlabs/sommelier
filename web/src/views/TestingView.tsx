@@ -1,15 +1,18 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { ArrowRight, ChartLineDown, Desktop, Info, TreeStructure } from "@phosphor-icons/react";
 import type { FeatureItem, MatrixCell, RegressionCheck, RunOrderItem } from "../api/types";
 import {
   Button,
   CodeChip,
   DefinitionList,
+  FilterBar,
+  FilterField,
   InspectorPanel,
   SegmentedControl,
   StatusLabel,
   featureStateTone,
 } from "../components";
+import { FeatureCards, MachineMatrix, matrixCellKey } from "./FeatureAtlas";
 import "./pipeline.css";
 import "./testing.css";
 
@@ -35,37 +38,44 @@ export default function TestingView({
   const [section, setSection] = useState<TestingSection>("features");
   const [selectedId, setSelectedId] = useState<string | null>(features[0]?.id ?? null);
 
-  const areas = useMemo(() => {
-    const grouped = new Map<string, FeatureItem[]>();
-    for (const f of features) {
-      const list = grouped.get(f.area) ?? [];
-      list.push(f);
-      grouped.set(f.area, list);
-    }
-    return [...grouped.entries()];
-  }, [features]);
+  const [areaFilter, setAreaFilter] = useState("");
+  const [featureSearch, setFeatureSearch] = useState("");
+  const [proofFilter, setProofFilter] = useState<{ profile: string; scenario: string } | null>(null);
+  const areas = new Map(features.map(({ area, areaTitle }) => [area, areaTitle]));
+  const query = featureSearch.trim().toLowerCase();
+  const visibleFeatures = features.filter((feature) =>
+    (!areaFilter || feature.area === areaFilter)
+    && (!query || [feature.id, feature.title, feature.areaTitle].some((value) => value.toLowerCase().includes(query))),
+  );
+  const visibleMatrix = matrix.filter((cell) => !proofFilter
+    || (cell.profile === proofFilter.profile && (!cell.scenario || cell.scenario === proofFilter.scenario)));
 
-  const activeFeature =
-    section === "features"
-      ? features.find((f) => f.id === selectedId) ?? features[0]
-      : undefined;
-  const activeCell =
-    section === "matrix"
-      ? matrix.find((c) => `${c.profile}/${c.scenario}/${c.machineKey}` === selectedId) ?? matrix[0]
-      : undefined;
+  function selectFeature(id: string) {
+    setAreaFilter("");
+    setFeatureSearch("");
+    setSelectedId(id);
+  }
+
+  const activeFeature = section === "features"
+    ? visibleFeatures.find((f) => f.id === selectedId) ?? visibleFeatures[0]
+    : undefined;
+  const activeCell = section === "matrix"
+    ? visibleMatrix.find((cell) => matrixCellKey(cell) === selectedId) ?? visibleMatrix[0]
+    : undefined;
   const activeReg =
     section === "regressions"
       ? regressions.find((r) => `${r.sha}/${r.machineClass}/${r.metric}` === selectedId) ?? regressions[0]
       : undefined;
 
   const hasDetail = Boolean(activeFeature || activeCell || activeReg);
+  const dependents = activeFeature ? features.filter((feature) => feature.depends.includes(activeFeature.id)) : [];
 
   return (
     <section className="ts-view" aria-labelledby="ts-title">
       <div className="ts-header">
         <div>
           <h1 id="ts-title">Feature map & test network</h1>
-          <p>Product capability coverage, quorum matrix reports, and MAD regression guards.</p>
+          <p>See what works, what depends on it, and which machines proved it.</p>
         </div>
         <SegmentedControl
           ariaLabel="Testing section"
@@ -73,14 +83,33 @@ export default function TestingView({
           onChange={(next) => {
             setSection(next);
             setSelectedId(null);
+            setProofFilter(null);
           }}
           options={[
-            { value: "features", label: `Features (${features.length})` },
+            { value: "features", label: `Feature map (${features.length})` },
             { value: "matrix", label: `Test matrix (${matrix.length})` },
             { value: "regressions", label: `Regressions (${regressions.length})` },
           ]}
         />
       </div>
+
+      {section === "features" && features.length > 0 && (
+        <FilterBar ariaLabel="Feature map filters">
+          <FilterField label="Area"><select value={areaFilter} onChange={(event) => setAreaFilter(event.target.value)}>
+            <option value="">All areas</option>
+            {[...areas].map(([area, title]) => <option key={area} value={area}>{title}</option>)}
+          </select></FilterField>
+          <FilterField label="Find feature"><input value={featureSearch} onChange={(event) => setFeatureSearch(event.target.value)} placeholder="Title or feature ID" /></FilterField>
+          {(areaFilter || featureSearch) && <Button size="sm" variant="ghost" onClick={() => { setAreaFilter(""); setFeatureSearch(""); }}>Clear filters</Button>}
+        </FilterBar>
+      )}
+
+      {section === "matrix" && proofFilter && (
+        <FilterBar ariaLabel="Proof filter">
+          <CodeChip small>{proofFilter.profile} / {proofFilter.scenario}</CodeChip>
+          <Button size="sm" variant="ghost" onClick={() => setProofFilter(null)}>Show all reports</Button>
+        </FilterBar>
+      )}
 
       {section === "matrix" && matrixBlocksNote && !matrixBlocksNote.kept && (
         <div className="ts-notice">
@@ -95,103 +124,25 @@ export default function TestingView({
             <div className="ts-list-head">
               <span>
                 {section === "features"
-                  ? "features.toml capabilities"
+                  ? "Capabilities by area"
                   : section === "matrix"
-                    ? "Hardware quorum cells"
+                    ? "Evidence by machine"
                     : "Metric baseline & MAD checks"}
               </span>
               <StatusLabel variant="chip" tone="muted">
                 {section === "features"
-                  ? features.length
+                  ? visibleFeatures.length
                   : section === "matrix"
-                    ? matrix.length
+                    ? visibleMatrix.length
                     : regressions.length}
               </StatusLabel>
             </div>
 
-            {section === "features" &&
-              (areas.length === 0 ? (
-                <div className="ts-empty">No feature map configured on this hub.</div>
-              ) : (
-                areas.map(([area, items]) => (
-                  <div key={area} className="ts-area-group">
-                    <div className="ts-area-label">{items[0]?.areaTitle ?? area}</div>
-                    <ol className="ts-rows">
-                      {items.map((f) => (
-                        <li key={f.id}>
-                          <button
-                            type="button"
-                            className="ts-row"
-                            aria-pressed={activeFeature?.id === f.id}
-                            onClick={() => setSelectedId(f.id)}
-                          >
-                            <span className="mono">{f.id}</span>
-                            <span className="ts-row-main">
-                              <span className="ts-row-title">{f.title}</span>
-                              <span className="ts-row-meta">
-                                {f.paths[0] && <code>{f.paths[0]}</code>}
-                                {f.depends.length > 0 && <span>· depends: {f.depends.join(", ")}</span>}
-                              </span>
-                            </span>
-                            <div className="ts-state-pills">
-                              {Object.entries(f.states).map(([mk, st]) => (
-                                <StatusLabel key={mk} variant="pill" tone={featureStateTone(st)}>
-                                  {mk}: {st}
-                                </StatusLabel>
-                              ))}
-                            </div>
-                            <StatusLabel variant="chip" tone={f.openOrders > 0 ? "accent" : "muted"}>
-                              {f.openOrders} open
-                            </StatusLabel>
-                          </button>
-                        </li>
-                      ))}
-                    </ol>
-                  </div>
-                ))
-              ))}
+            {section === "features" && (features.length
+              ? <FeatureCards features={visibleFeatures} active={activeFeature} onSelect={setSelectedId} />
+              : <div className="ts-empty">No feature map is available from this hub.</div>)}
 
-            {section === "matrix" &&
-              (matrix.length === 0 ? (
-                <div className="ts-empty">No matrix reports recorded yet.</div>
-              ) : (
-                <ol className="ts-rows">
-                  {matrix.map((cell) => {
-                    const key = `${cell.profile}/${cell.scenario}/${cell.machineKey}`;
-                    return (
-                      <li key={key}>
-                        <button
-                          type="button"
-                          className="ts-row"
-                          aria-pressed={
-                            activeCell &&
-                            `${activeCell.profile}/${activeCell.scenario}/${activeCell.machineKey}` === key
-                          }
-                          onClick={() => setSelectedId(key)}
-                        >
-                          <span className="mono">{cell.profile}</span>
-                          <span className="ts-row-main">
-                            <span className="ts-row-title">
-                              {cell.scenario} · {cell.machineKey}
-                            </span>
-                            <span className="ts-row-meta">
-                              <code>{cell.build}</code>
-                              <span>·</span>
-                              <span>{cell.channel}</span>
-                            </span>
-                          </span>
-                          <span className="mono">
-                            {cell.reports}/{cell.quorum} quorum
-                          </span>
-                          <StatusLabel variant="pill" tone={featureStateTone(cell.outcome)}>
-                            {cell.outcome}
-                          </StatusLabel>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ol>
-              ))}
+            {section === "matrix" && <MachineMatrix matrix={visibleMatrix} active={activeCell} onSelect={setSelectedId} />}
 
             {section === "regressions" &&
               (regressions.length === 0 ? (
@@ -274,12 +225,12 @@ export default function TestingView({
             }
             title={activeFeature.title}
           >
-            <p className="ts-detail-copy">{activeFeature.how ?? "Feature capability tracked by features.toml."}</p>
+            {activeFeature.how && <p className="ts-detail-copy">{activeFeature.how}</p>}
             <DefinitionList
               items={[
                 { label: "Area", value: activeFeature.areaTitle },
                 { label: "Open orders", value: `${activeFeature.openTasks} tasks · ${activeFeature.openRuns} runs` },
-                { label: "Depends on", value: activeFeature.depends.length ? activeFeature.depends.join(", ") : "None" },
+
                 ...(activeFeature.paths.length > 0
                   ? [
                       {
@@ -298,13 +249,46 @@ export default function TestingView({
                   : []),
               ]}
             />
-            <div className="ts-detail-pills">
-              {Object.entries(activeFeature.states).map(([mk, st]) => (
-                <StatusLabel key={mk} variant="pill" tone={featureStateTone(st)}>
-                  {mk}: {st}
-                </StatusLabel>
-              ))}
-            </div>
+            {(activeFeature.depends.length > 0 || dependents.length > 0) && (
+              <section className="feature-detail-section" aria-label="Feature dependencies">
+                <h3>Dependencies</h3>
+                <ul className="feature-evidence">
+                  {activeFeature.depends.map((id) => (
+                    <li key={id}><span>Requires</span>
+                      {features.some((feature) => feature.id === id)
+                        ? <Button variant="link" onClick={() => selectFeature(id)}><code>{id}</code> <ArrowRight size={13} /></Button>
+                        : <code>{id}</code>}
+                    </li>
+                  ))}
+                  {dependents.map(({ id }) => (
+                    <li key={id}><span>Required by</span><Button variant="link" onClick={() => selectFeature(id)}><code>{id}</code> <ArrowRight size={13} /></Button></li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            <section className="feature-detail-section" aria-label="Test evidence">
+              <h3>Machine evidence</h3>
+              {Object.keys(activeFeature.states).length > 0
+                ? <ul className="feature-evidence">{Object.entries(activeFeature.states).map(([machine, state]) => (
+                    <li key={machine}><code>{machine}</code><StatusLabel variant="dot" tone={featureStateTone(state)}>{state}</StatusLabel></li>
+                  ))}</ul>
+                : <p>No machine evidence reported.</p>}
+            </section>
+            {Boolean(activeFeature.proofs?.length) && (
+              <section className="feature-detail-section" aria-label="Proof milestones">
+                <h3>Proof milestones</h3>
+                <ul className="feature-proofs">
+                  {activeFeature.proofs?.map((proof) => (
+                    <li key={`${proof.profile}/${proof.scenario}/${proof.milestone}`}>
+                      <strong>{proof.milestone.replaceAll("_", " ")}</strong>
+                      <Button variant="link" onClick={() => { setProofFilter(proof); setSection("matrix"); setSelectedId(null); }}>
+                        <code>{proof.profile} / {proof.scenario}</code> <ArrowRight size={13} />
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
           </InspectorPanel>
         )}
 
@@ -318,7 +302,7 @@ export default function TestingView({
                 <span className="mono">{activeCell.profile}</span>
               </>
             }
-            title={`${activeCell.scenario} · ${activeCell.machineKey}`}
+            title={activeCell.machineKey}
           >
             <DefinitionList
               items={[
@@ -330,9 +314,11 @@ export default function TestingView({
                     </StatusLabel>
                   ),
                 },
-                { label: "Quorum", value: `${activeCell.reports} / ${activeCell.quorum} independent owners` },
+                { label: "Scenario", value: activeCell.scenario ?? "All scenarios in profile" },
+                { label: "Reports", value: activeCell.reports },
+                { label: "Quorum threshold", value: activeCell.quorum },
                 { label: "Build", value: <CodeChip small>{activeCell.build}</CodeChip> },
-                { label: "Channel", value: activeCell.channel },
+                ...(activeCell.channel ? [{ label: "Channel", value: activeCell.channel }] : []),
               ]}
             />
             <div className="ui-inspector-actions ui-inspector-actions-docked">

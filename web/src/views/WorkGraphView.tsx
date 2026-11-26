@@ -43,6 +43,7 @@ type GraphProps = {
   onMessages: (topic: string) => void;
   onInspectBrief: (id: string) => void;
   onOpenSubmission: (taskId: string) => void;
+  onOpenLoop: (taskId: string) => void;
   submissions: SubmissionItem[];
   alerts: FactoryAlert[];
   scheduler: SchedulerStatus;
@@ -166,6 +167,7 @@ function TaskInspector({
   onMessages,
   onInspectBrief,
   onOpenSubmission,
+  onOpenLoop,
 }: {
   task: WorkTask;
   hasSubmission: boolean;
@@ -173,6 +175,7 @@ function TaskInspector({
   onMessages: GraphProps["onMessages"];
   onInspectBrief: GraphProps["onInspectBrief"];
   onOpenSubmission: GraphProps["onOpenSubmission"];
+  onOpenLoop: GraphProps["onOpenLoop"];
 }) {
   const left = task.conflict && task.x === 570 && task.y === 432 ? 960 : task.x + cardWidth + 26;
   const isRight = left > 980;
@@ -236,8 +239,8 @@ function TaskInspector({
           </small>
         )}
       </div>
-      {(task.briefAvailable || hasSubmission) && (
-        <div className="inspector-sublinks">
+      <div className="inspector-sublinks">
+          <Button variant="link" onClick={() => onOpenLoop(task.id)}>View work loop <ArrowRight size={14} /></Button>
           {task.briefAvailable && (
             <Button variant="link" onClick={() => onInspectBrief(task.id)}>
               <FileText size={14} /> Inspect brief
@@ -248,8 +251,7 @@ function TaskInspector({
               View submission <ArrowRight size={14} />
             </Button>
           )}
-        </div>
-      )}
+      </div>
     </InspectorPanel>
   );
 }
@@ -262,6 +264,7 @@ export default function WorkGraphView({
   onMessages,
   onInspectBrief,
   onOpenSubmission,
+  onOpenLoop,
   submissions,
   alerts,
   scheduler,
@@ -466,6 +469,7 @@ export default function WorkGraphView({
                   onMessages={onMessages}
                   onInspectBrief={onInspectBrief}
                   onOpenSubmission={onOpenSubmission}
+                  onOpenLoop={onOpenLoop}
                 />
               )}
             </section>
@@ -519,7 +523,7 @@ export default function WorkGraphView({
           type="button"
           className="presence"
           onClick={onOpenContributors}
-          aria-label={`Open contributors. ${runningAgentCount} agents working.`}
+          aria-label={`Open participant network. ${runningAgentCount} agents working.`}
         >
           <span className="presence-providers" aria-hidden="true">
             {presenceProviders}

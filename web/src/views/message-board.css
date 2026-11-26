@@ -353,3 +353,18 @@
     justify-content: center;
   }
 }
+
+.mb-toolbar-actions, .mb-stream-bar, .mb-pagination, .mb-pagination > div {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2);
+}
+.mb-toolbar-actions { gap: var(--space-4); }
+.mb-stream-bar { justify-content: space-between; margin-bottom: var(--space-3); }
+.mb-posted { font-size: var(--text-sm); color: var(--color-good); }
+.mb-pagination { color: var(--color-text-muted); font-size: var(--text-sm); justify-content: space-between; padding: var(--space-3); border-top: 1px solid var(--color-line); }
+.mb-compose { margin: 0 0 var(--space-4); }
+.mb-readonly { margin: 0 0 var(--space-4); }
+.mb-content .ui-dl-row dd { overflow-wrap: anywhere; }
+
+@media (min-width: 801px) {
+  .mb-content > .ui-inspector-docked { position: sticky; top: var(--space-4); }
+}

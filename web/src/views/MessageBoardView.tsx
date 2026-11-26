@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   ArrowDown,
   ArrowRight,
@@ -18,6 +18,7 @@ import {
   FilterField,
   FilterToggle,
   InspectorPanel,
+  SegmentedControl,
   messageKindTone,
   StatusLabel,
 } from "../components";
@@ -37,6 +38,8 @@ type Props = {
 
 const messageLimit = 600;
 const taskReference = /^(?:SOM|T)-\d+$/;
+const messagePageSize = 25;
+type Stream = "all" | "events" | "chat";
 
 function matchesTopic(value: string, filter: string) {
   if (!filter) return true;
@@ -66,23 +69,39 @@ export default function MessageBoardView({
   const [draftTopic, setDraftTopic] = useState<string | null>(null);
   const [recipient, setRecipient] = useState("");
   const [posted, setPosted] = useState(false);
+  const [stream, setStream] = useState<Stream>("all");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(0);
+  const [isComposing, setComposing] = useState(false);
+  const composer = useRef<HTMLInputElement>(null);
+  const canPost = role === "Member" || role === "Orchestrator";
 
   useEffect(() => {
-    if (selected !== null && messages.some((m) => m.id === selected)) return;
+    if (canPost && isComposing) composer.current?.focus();
+  }, [canPost, isComposing]);
+
+  useEffect(() => {
+    if (selected === null || messages.some((m) => m.id === selected)) return;
     setSelected(messages[0]?.id ?? null);
   }, [messages, selected]);
 
   const kinds = useMemo(() => [...new Set(messages.map((message) => message.kind))].sort(), [messages]);
   const senders = useMemo(() => [...new Set(messages.map((message) => message.from))].sort(), [messages]);
+  const query = search.trim().toLowerCase();
   const visible = messages.filter(
     (message) =>
+      (stream === "all" || (stream === "chat") === (message.kind === "CHAT")) &&
+      (!query || [message.body, message.from, message.topic, ...message.refs].some((value) => value.toLowerCase().includes(query))) &&
       (!kind || message.kind === kind) &&
       (!sender || message.from === sender) &&
       matchesTopic(message.topic, topic.trim()) &&
       (!forMe || !message.to?.length || isAddressedTo(message, currentUser)),
   );
   const active = visible.find((message) => message.id === selected);
-  const filtered = Boolean(kind || sender || topic || forMe);
+  const pageCount = Math.max(1, Math.ceil(visible.length / messagePageSize));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageMessages = visible.slice(currentPage * messagePageSize, (currentPage + 1) * messagePageSize);
+  const filtered = Boolean(kind || sender || topic || forMe || query || stream !== "all");
   const effectiveTopic = draftTopic ?? (topic && !topic.endsWith("*") ? topic : "chat/general");
 
   function resetFilters() {
@@ -90,6 +109,9 @@ export default function MessageBoardView({
     setSender("");
     setTopic("");
     setForMe(false);
+    setStream("all");
+    setSearch("");
+    setPage(0);
   }
 
   function publish(event: FormEvent<HTMLFormElement>) {
@@ -111,6 +133,7 @@ export default function MessageBoardView({
     setDraft("");
     setSelected(created.id);
     setPosted(true);
+    setComposing(false);
     resetFilters();
   }
 
@@ -123,17 +146,29 @@ export default function MessageBoardView({
           </div>
           <div>
             <h1>Message board</h1>
-            <p>Project events and participant messages</p>
+            <p>Read project events and follow conversations by topic.</p>
           </div>
         </div>
-        <span className="mb-log-label">
-          <span /> {source === "live" ? "Live stream" : "Demo log"}
-        </span>
+        <div className="mb-toolbar-actions">
+          <span className="mb-log-label"><span /> {source === "live" ? "Live stream" : "Demo log"}</span>
+          {canPost && <Button size="sm" variant="primary" aria-expanded={isComposing} aria-controls={isComposing ? "mb-composer" : undefined}
+            onClick={() => { setPosted(false); setComposing(!isComposing); }}>
+            <ChatCircle size={16} /> {isComposing ? "Close composer" : "Write a message"}
+          </Button>}
+        </div>
+      </div>
+
+      <div className="mb-stream-bar">
+        <SegmentedControl size="sm" ariaLabel="Message streams" value={stream}
+          options={[{ value: "all", label: "All activity" }, { value: "events", label: "Bus events" }, { value: "chat", label: "Chat" }]}
+          onChange={(next) => { setKind(""); setPage(0); setStream(next); }} />
+        {posted && <span className="mb-posted" role="status">{source === "live" ? "Message sent." : "Added to demo log."}</span>}
       </div>
 
       <FilterBar ariaLabel="Message filters">
+        <FilterField label="Search"><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="Message or reference" /></FilterField>
         <FilterField label="Kind">
-          <select value={kind} onChange={(event) => setKind(event.target.value)}>
+          <select value={kind} onChange={(event) => { setKind(event.target.value); setPage(0); }}>
             <option value="">All kinds</option>
             {kinds.map((item) => (
               <option key={item} value={item}>
@@ -146,12 +181,12 @@ export default function MessageBoardView({
           <input
             className="mb-topic-input"
             value={topic}
-            onChange={(event) => setTopic(event.target.value)}
+            onChange={(event) => { setTopic(event.target.value); setPage(0); }}
             placeholder="task/*"
           />
         </FilterField>
         <FilterField label="Sender">
-          <select value={sender} onChange={(event) => setSender(event.target.value)}>
+          <select value={sender} onChange={(event) => { setSender(event.target.value); setPage(0); }}>
             <option value="">Anyone</option>
             {senders.map((item) => (
               <option key={item} value={item}>
@@ -162,7 +197,7 @@ export default function MessageBoardView({
         </FilterField>
         <FilterToggle
           pressed={forMe}
-          onClick={() => setForMe(!forMe)}
+          onClick={() => { setForMe(!forMe); setPage(0); }}
           icon={<Crosshair size={15} />}
         >
           For me
@@ -173,6 +208,68 @@ export default function MessageBoardView({
           </Button>
         )}
       </FilterBar>
+
+      {canPost && isComposing ? (
+        <form className="mb-compose" id="mb-composer" onSubmit={publish}>
+          <div className="mb-compose-title">
+            <ChatCircle size={17} />
+            <strong>Post a message</strong>
+            <span>{source === "live" ? "Live bus" : "Local demo"}</span>
+          </div>
+          <div className="mb-compose-fields">
+            <label className="mb-compose-topic">
+              <span>Topic</span>
+              <input
+                value={effectiveTopic}
+                onChange={(event) => setDraftTopic(event.target.value)}
+                maxLength={128}
+                pattern="[^\s*]+"
+                required
+              />
+            </label>
+            <label>
+              <span>To</span>
+              <select value={recipient} onChange={(event) => setRecipient(event.target.value)}>
+                <option value="">Everyone</option>
+                {recipients.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="mb-compose-body">
+              <span>Message</span>
+              <input
+                ref={composer}
+                value={draft}
+                onChange={(event) => {
+                  setPosted(false);
+                  setDraft(event.target.value);
+                }}
+                placeholder="Write a short update…"
+                maxLength={messageLimit}
+                required
+              />
+            </label>
+            <Button variant="primary" size="sm" type="submit" className="mb-send" disabled={!draft.trim()}>
+              <PaperPlaneRight size={16} /> Post
+            </Button>
+          </div>
+          <div className="mb-compose-footer">
+            <span role="status">
+              {posted
+                ? source === "live"
+                  ? "Message sent to hub."
+                  : "Message added to the demo log."
+                : ""}
+            </span>
+            <span>
+              {Array.from(draft).length}/{messageLimit}
+            </span>
+          </div>
+        </form>
+      ) : canPost ? null : <div className="mb-readonly"><Tray size={16} /> {role} access · Read only</div>}
 
       <div className="mb-content" data-detail={Boolean(active)}>
         <div className="mb-log">
@@ -192,7 +289,7 @@ export default function MessageBoardView({
             </div>
           ) : (
             <ol className="mb-rows">
-              {visible.map((message) => (
+              {pageMessages.map((message) => (
                 <li key={message.id}>
                   <button
                     type="button"
@@ -226,6 +323,13 @@ export default function MessageBoardView({
               ))}
             </ol>
           )}
+          {pageCount > 1 && <div className="mb-pagination">
+            <span>{currentPage * messagePageSize + 1}–{Math.min((currentPage + 1) * messagePageSize, visible.length)} of {visible.length}</span>
+            <div>
+              <Button size="sm" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>Previous</Button>
+              <Button size="sm" disabled={currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)}>Next</Button>
+            </div>
+          </div>}
         </div>
 
         {active && (
@@ -249,7 +353,7 @@ export default function MessageBoardView({
             </div>
             <DefinitionList
               items={[
-                { label: "Topic", value: <span className="mb-mono">{active.topic}</span> },
+                { label: "Topic", value: <Button variant="link" onClick={() => { setTopic(active.topic); setPage(0); }}><code>{active.topic}</code> <ArrowRight size={12} /></Button> },
                 {
                   label: "Sender",
                   value: (
@@ -298,70 +402,6 @@ export default function MessageBoardView({
         )}
       </div>
 
-      {role === "Observer" || role === "Public" ? (
-        <div className="mb-readonly">
-          <Tray size={16} /> {role} access · Read only
-        </div>
-      ) : (
-        <form className="mb-compose" onSubmit={publish}>
-          <div className="mb-compose-title">
-            <ChatCircle size={17} />
-            <strong>Post a message</strong>
-            <span>{source === "live" ? "Live bus" : "Local demo"}</span>
-          </div>
-          <div className="mb-compose-fields">
-            <label className="mb-compose-topic">
-              <span>Topic</span>
-              <input
-                value={effectiveTopic}
-                onChange={(event) => setDraftTopic(event.target.value)}
-                maxLength={128}
-                pattern="[^\s*]+"
-                required
-              />
-            </label>
-            <label>
-              <span>To</span>
-              <select value={recipient} onChange={(event) => setRecipient(event.target.value)}>
-                <option value="">Everyone</option>
-                {recipients.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="mb-compose-body">
-              <span>Message</span>
-              <input
-                value={draft}
-                onChange={(event) => {
-                  setPosted(false);
-                  setDraft(event.target.value);
-                }}
-                placeholder="Write a short update…"
-                maxLength={messageLimit}
-                required
-              />
-            </label>
-            <Button variant="primary" size="sm" type="submit" className="mb-send" disabled={!draft.trim()}>
-              <PaperPlaneRight size={16} /> Post
-            </Button>
-          </div>
-          <div className="mb-compose-footer">
-            <span role="status">
-              {posted
-                ? source === "live"
-                  ? "Message sent to hub."
-                  : "Message added to the demo log."
-                : ""}
-            </span>
-            <span>
-              {Array.from(draft).length}/{messageLimit}
-            </span>
-          </div>
-        </form>
-      )}
     </section>
   );
 }
