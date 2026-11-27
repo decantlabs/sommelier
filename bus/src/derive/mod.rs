@@ -168,6 +168,8 @@ impl DeriveStore {
                 owner_online: present,
                 reported_state: a.state.clone(),
                 supervised: is_supervised_row(a, cap),
+                pid: a.pid,
+                machine: a.machine.clone(),
                 last_seen_ms: a.ts_ms,
                 state_since_ms: changed_ms,
                 starved_reason,
@@ -326,15 +328,25 @@ impl DeriveStore {
 
 fn infer_agent_class(a: &Agent, cap: Option<&HelloCapacity>) -> String {
     let m = a.model.to_ascii_lowercase();
+    let n = a.agent.to_ascii_lowercase();
     let b = a.branch.to_ascii_lowercase();
-    if m.contains("codex") || b.starts_with("codex/") {
+    if m.contains("codex") || n.contains("codex") || b.starts_with("codex/") {
         return "codex".into();
     }
-    if m.contains("gemini") || b.starts_with("gemini/") {
-        return "gemini".into();
-    }
-    if m.contains("claude") || m.contains("sonnet") || m.contains("opus") || m.contains("fable") {
+    if m.contains("claude")
+        || m.contains("sonnet")
+        || m.contains("opus")
+        || m.contains("haiku")
+        || m.contains("fable")
+        || n.contains("claude")
+        || n.contains("sonnet")
+        || n.contains("opus")
+        || n.contains("haiku")
+    {
         return "claude".into();
+    }
+    if m.contains("gemini") || n.contains("gemini") || b.starts_with("gemini/") {
+        return "gemini".into();
     }
     if let Some(c) = cap
         && let Some(first) = c.classes.keys().next()
@@ -351,7 +363,10 @@ fn is_supervised_row(a: &Agent, cap: Option<&HelloCapacity>) -> bool {
     if cap.is_some_and(|c| c.mode == CapacityMode::Own) {
         return false;
     }
-    true
+    // Only treat a worker as supervised when an OS supervisor or launcher wrapper
+    // actually verified its process (`liveness:process` / `pid:<N>`). Manual or
+    // one-shot roster entries should not flap between green and "heartbeat late".
+    a.supervised || a.pid.is_some()
 }
 
 fn check_starved_reason(
@@ -409,6 +424,8 @@ mod tests {
             owner_online: true,
             reported_state: "running".into(),
             supervised: true,
+            pid: Some(4242),
+            machine: "box1".into(),
             last_seen_ms: 1_000_000,
             state_since_ms: 1_000_000,
             starved_reason: None,
@@ -526,5 +543,32 @@ mod tests {
         assert_eq!(cap.classes.get("gemini"), Some(&2));
         assert_eq!(cap.classes.get("claude"), Some(&1));
         assert_eq!(cap.accepts, vec!["fix", "review", "run"]);
+    }
+
+    #[test]
+    fn unsupervised_rows_do_not_flap_and_agent_names_infer_class() {
+        let manual = Agent {
+            owner: "v0".into(),
+            agent: "opus-queue-async".into(),
+            state: "running".into(),
+            model: String::new(),
+            branch: String::new(),
+            text: "working".into(),
+            ts: String::new(),
+            changed: String::new(),
+            id: 1,
+            stale: false,
+            supervised: false,
+            pid: None,
+            machine: String::new(),
+            ts_ms: 1_000_000,
+        };
+        assert!(!is_supervised_row(&manual, None));
+        assert_eq!(infer_agent_class(&manual, None), "claude");
+
+        let mut proc_backed = manual.clone();
+        proc_backed.supervised = true;
+        proc_backed.pid = Some(9911);
+        assert!(is_supervised_row(&proc_backed, None));
     }
 }

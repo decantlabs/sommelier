@@ -688,6 +688,8 @@ struct Row {
     model: String,
     branch: String,
     text: String,
+    pid: Option<u32>,
+    host: String,
 }
 
 impl Row {
@@ -698,6 +700,15 @@ impl Row {
         }
         if !self.branch.is_empty() {
             refs.push(format!("branch:{}", self.branch));
+        }
+        if let Some(pid) = self.pid
+            && pid > 0
+        {
+            refs.push("liveness:process".into());
+            refs.push(format!("pid:{pid}"));
+        }
+        if !self.host.is_empty() {
+            refs.push(format!("host:{}", self.host));
         }
         json!({"op": "send", "kind": "STATUS", "topic": format!("agent/{}", self.agent), "body": self.text, "refs": refs})
     }
@@ -740,6 +751,8 @@ fn parse_tsv(text: &str) -> Result<Vec<Row>, String> {
             model: col(2),
             branch: col(3),
             text: cols.get(4..).map(|c| c.join(" ")).unwrap_or_default(),
+            pid: None,
+            host: String::new(),
         });
     }
     Ok(rows)
@@ -749,12 +762,12 @@ fn parse_tsv(text: &str) -> Result<Vec<Row>, String> {
 const REFRESH_MS: u64 = 10 * 60 * 1000;
 
 async fn cmd_status(raw: &[String]) -> Result<(), String> {
-    const USAGE: &str = "usage: sommelier status set AGENT [--state S] [--model M] [--branch B] TEXT... | clear AGENT | list [--owner NAME|me] | sync --file FILE";
+    const USAGE: &str = "usage: sommelier status set AGENT [--state S] [--model M] [--branch B] [--pid N] [--host H] TEXT... | clear AGENT | list [--owner NAME|me] | sync --file FILE";
     let a = Args::parse(
         raw,
         &with(
             &CLIENT_FLAGS,
-            &["state", "model", "branch", "file", "owner"],
+            &["state", "model", "branch", "pid", "host", "file", "owner"],
         ),
         &["json"],
     )?;
@@ -763,12 +776,18 @@ async fn cmd_status(raw: &[String]) -> Result<(), String> {
     let mut c = client::Conn::open(&opts).await?;
     match (sub.as_str(), rest) {
         ("set", [agent, words @ ..]) => {
+            let pid = match a.get("pid") {
+                Some(v) => Some(v.parse::<u32>().map_err(|_| "--pid must be a positive integer")?),
+                None => None,
+            };
             let row = Row {
                 agent: agent.clone(),
                 state: a.get("state").unwrap_or("running").to_owned(),
                 model: a.get("model").unwrap_or("").to_owned(),
                 branch: a.get("branch").unwrap_or("").to_owned(),
                 text: words.join(" "),
+                pid,
+                host: a.get("host").unwrap_or("").to_owned(),
             };
             let v = c.call_ok(&row.request()).await?;
             outln!("#{}", v["id"]);

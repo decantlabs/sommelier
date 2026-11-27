@@ -31,10 +31,10 @@ use serde_json::{Map, Value, json};
 
 use super::capture::{ExitCapture, MAX_NOTE_CHARS, truncate_chars};
 use super::checkpoint::CheckpointWatcher;
-use super::children::{ChildRecord, ChildrenStore, kill_pid};
+use super::children::{ChildRecord, ChildrenStore, is_pid_alive, kill_pid};
 use super::classify::{ClassifyInput, ExitReason, classify_exit};
 use super::disk::{DiskGuardConfig, check_disk};
-use super::exec::{build_exit_fact_request, build_status_request};
+use super::exec::{build_exit_fact_request, build_supervised_status_request};
 use super::launch::{
     HookEnv, assemble_role_seat_prompt, assemble_worker_prompt, guide_vendor, prepare_worktree,
     resolve_hook_script, spawn_hook_with, vendor_for_class,
@@ -767,8 +767,15 @@ async fn execute_leased_task(
     };
     let _ = children_store.save(&child_record);
 
-    let running_status =
-        build_status_request(&worker_name, "running", &class, &branch, &child_record.text);
+    let running_status = build_supervised_status_request(
+        &worker_name,
+        "running",
+        &class,
+        &branch,
+        &child_record.text,
+        Some(pid),
+        &cfg.machine,
+    );
     let _ = outbox.send_or_spool(opts, running_status).await;
 
     // 6. Monitor loop: heartbeat, checkpoint forward, stop marker, timeout
@@ -819,11 +826,23 @@ async fn execute_leased_task(
 
         if last_hb.elapsed() >= hb_every {
             last_hb = Instant::now();
-            child_record.heartbeat_at_sec = now_ms() / 1000;
-            let _ = children_store.save(&child_record);
-            let _ = client::request_ok(opts, json!({"op": "heartbeat"})).await;
-            let _ =
-                client::request_ok(opts, json!({"op": "task.heartbeat", "task": task_id})).await;
+            if is_pid_alive(pid) {
+                child_record.heartbeat_at_sec = now_ms() / 1000;
+                let _ = children_store.save(&child_record);
+                let _ = client::request_ok(opts, json!({"op": "heartbeat"})).await;
+                let _ = client::request_ok(opts, json!({"op": "task.heartbeat", "task": task_id}))
+                    .await;
+                let refresh_status = build_supervised_status_request(
+                    &worker_name,
+                    "running",
+                    &class,
+                    &branch,
+                    &child_record.text,
+                    Some(pid),
+                    &cfg.machine,
+                );
+                let _ = client::request_ok(opts, refresh_status).await;
+            }
         }
 
         tokio::time::sleep(poll_interval).await;
@@ -914,7 +933,15 @@ async fn execute_leased_task(
     let _ = outbox.send_or_spool(opts, exit_op_req).await;
 
     let headline = capture.status_headline(exit_code, classification.reason.as_str());
-    let final_status = build_status_request(&worker_name, "idle", &class, &branch, &headline);
+    let final_status = build_supervised_status_request(
+        &worker_name,
+        "idle",
+        &class,
+        &branch,
+        &headline,
+        None,
+        &cfg.machine,
+    );
     let _ = outbox.send_or_spool(opts, final_status).await;
 
     let _ = children_store.remove(&worker_name);

@@ -32,6 +32,15 @@ pub struct Agent {
     pub changed: String,
     pub id: u64,
     pub stale: bool,
+    /// True when this row was reported by an OS-level supervisor/process wrapper (`liveness:process` / `pid:<N>`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervised: bool,
+    /// OS process ID observed by the local supervisor or launcher wrapper, if reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// Host machine name reported by the local supervisor or launcher wrapper, if any.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub machine: String,
     #[serde(skip)]
     pub ts_ms: u64,
 }
@@ -81,6 +90,9 @@ impl Roster {
             changed: m.ts.clone(),
             id: m.id,
             stale: false,
+            supervised: false,
+            pid: None,
+            machine: String::new(),
             ts_ms: crate::time::parse_ms(&m.ts).unwrap_or_else(crate::time::now_ms),
         };
         for r in &m.refs {
@@ -90,6 +102,16 @@ impl Roster {
                 e.model = v.into();
             } else if let Some(v) = r.strip_prefix("branch:") {
                 e.branch = v.into();
+            } else if r == "liveness:process" || r == "supervised:true" {
+                e.supervised = true;
+            } else if let Some(v) = r.strip_prefix("pid:")
+                && let Ok(pid) = v.parse::<u32>()
+                && pid > 0
+            {
+                e.pid = Some(pid);
+                e.supervised = true;
+            } else if let Some(v) = r.strip_prefix("host:").or_else(|| r.strip_prefix("machine:")) {
+                e.machine = v.into();
             }
         }
         if let Some(prev) = self.map.get(&key)
@@ -230,5 +252,37 @@ mod tests {
         assert!(check("agent/", &[]).is_err());
         assert!(check("issue/3", &[]).is_err());
         assert!(check("agent/p3", &["state:sleeping".into()]).is_err());
+    }
+
+    #[test]
+    fn parses_process_liveness_pid_and_host() {
+        let t0 = 1_800_000_000_000;
+        let mut r = Roster::default();
+        r.apply(&status(
+            1,
+            "v0",
+            "opus-queue-async",
+            "working",
+            &["state:running", "liveness:process", "pid:4812", "host:dev-box"],
+            t0,
+        ));
+        r.apply(&status(
+            2,
+            "v0",
+            "manual-note",
+            "checking",
+            &["state:running"],
+            t0,
+        ));
+        let snap = r.snapshot(t0 + 1000, Some("v0"));
+        let sup = snap.iter().find(|a| a.agent == "opus-queue-async").unwrap();
+        assert!(sup.supervised);
+        assert_eq!(sup.pid, Some(4812));
+        assert_eq!(sup.machine, "dev-box");
+
+        let manual = snap.iter().find(|a| a.agent == "manual-note").unwrap();
+        assert!(!manual.supervised);
+        assert_eq!(manual.pid, None);
+        assert!(manual.machine.is_empty());
     }
 }

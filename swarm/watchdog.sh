@@ -93,25 +93,32 @@ while :; do
     fi
   fi
 
-  # 5. Codex and Antigravity agents.
-  for kind in codex agy; do
+  # 5. Codex, Claude, and Antigravity agents: verify OS process liveness automatically.
+  HOST_NAME=${SOMMELIER_MACHINE:-$(hostname 2>/dev/null || echo local)}
+  for kind in codex claude agy; do
     for pf in "$RUNS/$kind"/*.pid; do
       [ -f "$pf" ] || continue
       n=$(basename "$pf" .pid); p=$(cat "$pf")
       if ! kill -0 "$p" 2>/dev/null; then
-        rm -f "$pf"; BUS status set "$kind-$n" --state idle "ended without a report, see $RUNS/$kind/$n.last.txt"
+        rm -f "$pf"
+        if [ -f "$SOMMELIER_ROSTER" ]; then
+          { grep -v -P "^$kind-$n\t" "$SOMMELIER_ROSTER" 2>/dev/null; printf '%s\t%s\t%s\t%s\t%s\n' "$kind-$n" "idle" "$kind" "" "ended without a report"; } > "$SOMMELIER_ROSTER.wd.$$" && mv "$SOMMELIER_ROSTER.wd.$$" "$SOMMELIER_ROSTER"
+        fi
+        BUS status set "$kind-$n" --state idle --host "$HOST_NAME" "ended without a report, see $RUNS/$kind/$n.last.txt"
         note "$kind agent '$n' is gone without cleaning up, its row is set to idle"
         found "agent-gone-$kind-$n-$p" "the $kind agent '$n' ended without a report"
         continue
       fi
-      act="$RUNS/$kind/$n.events.jsonl"; [ $kind = agy ] && act="$RUNS/$kind/$n.log.txt"
+      act="$RUNS/$kind/$n.events.jsonl"
+      [ "$kind" = agy ] && act="$RUNS/$kind/$n.log.txt"
+      [ "$kind" = claude ] && act="$RUNS/$kind/$n.last.txt"
       s=$(age "$act")
       [ "$s" -gt 1200 ] && found "agent-silent-$kind-$n-$(stat -c %Y "$act" 2>/dev/null)" "the $kind agent '$n' is alive and silent for $((s / 60)) minutes"
     done
   done
 
   # 5b. An agent that finished: its report line wakes the coordinator, once.
-  for kind in codex agy; do
+  for kind in codex claude agy; do
     for df in "$RUNS/$kind"/*.done; do
       [ -f "$df" ] || continue
       n=$(basename "$df" .done)
@@ -120,6 +127,9 @@ while :; do
       mv "$df" "$df.reported"
     done
   done
+
+  # 5c. Probe supervised `sommelier agent` children via OS PIDs so heartbeats stay OS-verified.
+  [ -n "$SOMMELIER_URL" ] && SOMMELIER_TOKEN_FILE="$SOMMELIER_ORCH_TOKEN" timeout 20 sommelier agent watch --once >/dev/null 2>&1
 
   # 6. The bus, in four layers: the hub on this PC, the tunnel process, the public address end to
   #    end, and the coordinator's own listener. A dead hub or tunnel is started again at once.
@@ -161,8 +171,24 @@ while :; do
     done < "$RUNS/.quota.due"
   fi
 
-  # 6c. Our own rows on the bus go quiet after 20 minutes without an update: resend the roster
-  #     every pass (sync only sends rows that changed or are older than 10 minutes).
+  # 6c. Before syncing the roster, never resurrect a launcher-managed worker whose OS PID is gone.
+  if [ -f "$SOMMELIER_ROSTER" ]; then
+    while IFS="$(printf '\t')" read -r r_agent r_state r_model r_branch r_text; do
+      case "$r_agent" in
+        codex-*|claude-*|agy-*)
+          if [ "$r_state" = "running" ]; then
+            r_kind=${r_agent%%-*}; r_name=${r_agent#*-}
+            r_pf="$RUNS/$r_kind/$r_name.pid"
+            if [ ! -f "$r_pf" ] || ! kill -0 "$(cat "$r_pf" 2>/dev/null)" 2>/dev/null; then
+              r_state="idle"
+              r_text="process not running (reconciled by watchdog)"
+            fi
+          fi
+          ;;
+      esac
+      printf '%s\t%s\t%s\t%s\t%s\n' "$r_agent" "$r_state" "$r_model" "$r_branch" "$r_text"
+    done < "$SOMMELIER_ROSTER" > "$SOMMELIER_ROSTER.clean.$$" && mv "$SOMMELIER_ROSTER.clean.$$" "$SOMMELIER_ROSTER"
+  fi
   [ -n "$SOMMELIER_URL" ] && [ -f "$SOMMELIER_ROSTER" ] && SOMMELIER_TOKEN_FILE="$SOMMELIER_ORCH_TOKEN" timeout 20 sommelier status sync --file "$SOMMELIER_ROSTER" >/dev/null 2>&1
 
   # 7. The work handed out on the bus, every third pass: offers nobody answered, accepted work

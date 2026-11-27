@@ -68,8 +68,12 @@ pub struct WorkerFacts {
     pub owner_online: bool,
     /// Reported state from STATUS (`running`, `idle`, `blocked`, `draining`), or `"idle"` for a free slot.
     pub reported_state: String,
-    /// Whether this row comes from a supervised worker or an active lease where heartbeats are expected every 60 s.
+    /// Whether this row comes from a supervised worker or OS process wrapper where heartbeats are expected every 60 s.
     pub supervised: bool,
+    /// OS PID observed by the local supervisor/launcher, if any.
+    pub pid: Option<u32>,
+    /// Host machine name reported by the local supervisor/launcher, if any.
+    pub machine: String,
     /// Last STATUS or heartbeat timestamp (UTC epoch milliseconds).
     pub last_seen_ms: u64,
     /// Timestamp when the current state or text began (UTC epoch milliseconds).
@@ -98,6 +102,16 @@ pub struct DerivedWorker {
     pub branch: String,
     pub text: String,
     pub as_of: u64,
+    /// Whether an OS supervisor/process wrapper is actively verifying this worker's liveness.
+    #[serde(default)]
+    pub supervised: bool,
+    /// Liveness source: `"process"` when backed by a supervisor/PID watcher, `"self_reported"` otherwise.
+    #[serde(default)]
+    pub liveness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub machine: String,
 }
 
 /// Pure function computing the derived state of a worker or slot at `now_ms`.
@@ -160,5 +174,13 @@ pub fn derive_worker(facts: &WorkerFacts, timers: &DeriveTimers, now_ms: u64) ->
         branch: facts.branch.clone(),
         text: facts.text.clone(),
         as_of: now_ms / 1000,
+        supervised: facts.supervised,
+        liveness: if facts.supervised {
+            "process".into()
+        } else {
+            "self_reported".into()
+        },
+        pid: facts.pid,
+        machine: facts.machine.clone(),
     }
 }

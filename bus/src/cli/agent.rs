@@ -17,7 +17,7 @@ use serde_json::json;
 
 use crate::agent::children::ChildrenStore;
 use crate::agent::disk::DiskGuardConfig;
-use crate::agent::exec::{ExecConfig, exec_worker};
+use crate::agent::exec::{ExecConfig, exec_worker, watch_children_once};
 use crate::agent::lease_loop::{SupervisorConfig, run_supervisor};
 use crate::client::Opts;
 use crate::derive::CapacityMode;
@@ -29,17 +29,18 @@ pub async fn run(cmd: &str, args: &[String]) -> Result<ExitCode, String> {
     }
     let Some((sub, rest)) = args.split_first() else {
         eprintln!(
-            "usage: sommelier agent run [--config FILE] | exec --name N --class C --branch B -- COMMAND... | status | stop [NAME]"
+            "usage: sommelier agent run [--config FILE] | exec --name N --class C --branch B -- COMMAND... | watch [--once] | status | stop [NAME]"
         );
         return Ok(exit::code(exit::WRONG_USAGE));
     };
     match sub.as_str() {
         "run" => cmd_run(rest).await,
         "exec" => cmd_exec(rest).await,
+        "watch" => cmd_watch(rest).await,
         "status" => cmd_status(rest),
         "stop" => cmd_stop(rest),
         other => {
-            eprintln!("sommelier: unknown agent subcommand `{other}` (run, exec, status, stop)");
+            eprintln!("sommelier: unknown agent subcommand `{other}` (run, exec, watch, status, stop)");
             Ok(exit::code(exit::WRONG_USAGE))
         }
     }
@@ -497,6 +498,85 @@ async fn cmd_exec(args: &[String]) -> Result<ExitCode, String> {
             Ok(exit::code(c))
         }
     }
+}
+
+async fn cmd_watch(args: &[String]) -> Result<ExitCode, String> {
+    let mut data_dir: Option<PathBuf> = None;
+    let mut url: Option<String> = None;
+    let mut token: Option<String> = None;
+    let mut token_file: Option<String> = None;
+    let mut interval_sec: u64 = 45;
+    let mut once = false;
+    let mut json_out = false;
+
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--once" => once = true,
+            "--json" => json_out = true,
+            other => {
+                let Some(stripped) = other.strip_prefix("--") else {
+                    eprintln!("sommelier: unknown argument `{other}` for `agent watch`");
+                    return Ok(exit::code(exit::WRONG_USAGE));
+                };
+                let (flag, val) = match stripped.split_once('=') {
+                    Some((k, v)) => (k, v.to_owned()),
+                    None => {
+                        let Some(v) = it.next() else {
+                            eprintln!("sommelier: --{stripped} needs a value");
+                            return Ok(exit::code(exit::WRONG_USAGE));
+                        };
+                        (stripped, v.clone())
+                    }
+                };
+                match flag {
+                    "data" => data_dir = Some(PathBuf::from(val)),
+                    "url" => url = Some(val),
+                    "token" => token = Some(val),
+                    "token-file" => token_file = Some(val),
+                    "interval-sec" => {
+                        interval_sec = val
+                            .parse()
+                            .map_err(|_| "--interval-sec requires an integer")?;
+                    }
+                    unknown => {
+                        eprintln!("sommelier: unknown flag --{unknown} for `agent watch`");
+                        return Ok(exit::code(exit::WRONG_USAGE));
+                    }
+                }
+            }
+        }
+    }
+
+    let dir = data_dir.unwrap_or_else(crate::default_data_dir);
+    let opts = resolve_client_opts(url, token, token_file);
+
+    loop {
+        let report = watch_children_once(&dir, opts.as_ref()).await?;
+        if json_out {
+            println!(
+                "{}",
+                json!({
+                    "ok": true,
+                    "code": exit::OK,
+                    "alive": report.alive,
+                    "gone": report.gone,
+                })
+            );
+        } else if once || !report.gone.is_empty() {
+            println!(
+                "watch: {} alive, {} gone",
+                report.alive.len(),
+                report.gone.len()
+            );
+        }
+        if once {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(interval_sec.max(5))).await;
+    }
+
+    Ok(exit::code(exit::OK))
 }
 
 fn cmd_status(args: &[String]) -> Result<ExitCode, String> {

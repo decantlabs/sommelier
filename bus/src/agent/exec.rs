@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::capture::ExitCapture;
-use super::children::{ChildRecord, ChildrenStore, kill_pid};
+use super::children::{ChildRecord, ChildrenStore, is_pid_alive, kill_pid};
 use super::classify::{Classification, ClassifyInput, classify_exit};
 use super::disk::{DiskGuardConfig, DiskRefusal, check_disk};
 use super::outbox::Outbox;
@@ -190,9 +190,17 @@ pub async fn exec_worker(cfg: &ExecConfig) -> Result<ExecOutcome, ExecError> {
     };
     let _ = children.save(&record);
 
+    let host = default_host_name();
     let mut hub_spooled = false;
-    let running_req =
-        build_status_request(&cfg.name, "running", &cfg.model, &cfg.branch, &cfg.text);
+    let running_req = build_supervised_status_request(
+        &cfg.name,
+        "running",
+        &cfg.model,
+        &cfg.branch,
+        &cfg.text,
+        Some(pid),
+        &host,
+    );
     if !send_or_queue(&outbox, cfg.client_opts.as_ref(), running_req).await {
         hub_spooled = true;
     }
@@ -231,16 +239,25 @@ pub async fn exec_worker(cfg: &ExecConfig) -> Result<ExecOutcome, ExecError> {
 
         if last_hb.elapsed() >= hb_every {
             last_hb = Instant::now();
-            let now_sec = now_ms() / 1000;
-            record.heartbeat_at_sec = now_sec;
-            let _ = children.save(&record);
-            if let Some(opts) = &cfg.client_opts {
-                let _ = outbox.flush(opts).await;
-                let hb_req = json!({"op": "heartbeat"});
-                let _ = crate::client::request_ok(opts, hb_req).await;
-                let refresh_req =
-                    build_status_request(&cfg.name, "running", &cfg.model, &cfg.branch, &cfg.text);
-                let _ = crate::client::request_ok(opts, refresh_req).await;
+            if is_pid_alive(pid) {
+                let now_sec = now_ms() / 1000;
+                record.heartbeat_at_sec = now_sec;
+                let _ = children.save(&record);
+                if let Some(opts) = &cfg.client_opts {
+                    let _ = outbox.flush(opts).await;
+                    let hb_req = json!({"op": "heartbeat"});
+                    let _ = crate::client::request_ok(opts, hb_req).await;
+                    let refresh_req = build_supervised_status_request(
+                        &cfg.name,
+                        "running",
+                        &cfg.model,
+                        &cfg.branch,
+                        &cfg.text,
+                        Some(pid),
+                        &host,
+                    );
+                    let _ = crate::client::request_ok(opts, refresh_req).await;
+                }
             }
         }
 
@@ -289,8 +306,15 @@ pub async fn exec_worker(cfg: &ExecConfig) -> Result<ExecOutcome, ExecError> {
     }
 
     let headline = capture.status_headline(exit_code, classification.reason.as_str());
-    let final_status_req =
-        build_status_request(&cfg.name, "idle", &cfg.model, &cfg.branch, &headline);
+    let final_status_req = build_supervised_status_request(
+        &cfg.name,
+        "idle",
+        &cfg.model,
+        &cfg.branch,
+        &headline,
+        None,
+        &host,
+    );
     if !send_or_queue(&outbox, cfg.client_opts.as_ref(), final_status_req).await {
         hub_spooled = true;
     }
@@ -309,6 +333,17 @@ pub async fn exec_worker(cfg: &ExecConfig) -> Result<ExecOutcome, ExecError> {
     })
 }
 
+/// Resolves the local machine hostname for supervisor telemetry.
+pub fn default_host_name() -> String {
+    std::env::var("SOMMELIER_MACHINE")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
 /// Builds a `STATUS` bus request for `agent/<name>`.
 pub fn build_status_request(
     name: &str,
@@ -317,12 +352,34 @@ pub fn build_status_request(
     branch: &str,
     text: &str,
 ) -> Value {
+    build_supervised_status_request(name, state, model, branch, text, None, "")
+}
+
+/// Builds a `STATUS` bus request for `agent/<name>` tagged with OS-level process liveness and host.
+pub fn build_supervised_status_request(
+    name: &str,
+    state: &str,
+    model: &str,
+    branch: &str,
+    text: &str,
+    pid: Option<u32>,
+    host: &str,
+) -> Value {
     let mut refs = vec![format!("state:{state}")];
     if !model.is_empty() {
         refs.push(format!("model:{model}"));
     }
     if !branch.is_empty() {
         refs.push(format!("branch:{branch}"));
+    }
+    if let Some(p) = pid
+        && p > 0
+    {
+        refs.push("liveness:process".into());
+        refs.push(format!("pid:{p}"));
+    }
+    if !host.is_empty() {
+        refs.push(format!("host:{host}"));
     }
     let clean_text: String = text
         .chars()
@@ -336,6 +393,74 @@ pub fn build_status_request(
         "body": clean_text,
         "refs": refs,
     })
+}
+
+/// Summary of one `sommelier agent watch` liveness probe pass.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchPassReport {
+    pub alive: Vec<String>,
+    pub gone: Vec<String>,
+}
+
+/// Probes all locally tracked child PIDs via `sysinfo`:
+/// - refreshes OS-verified heartbeats for every live process
+/// - marks gone processes `idle` on the hub and removes their stale child records.
+pub async fn watch_children_once(
+    data_dir: &std::path::Path,
+    opts: Option<&Opts>,
+) -> Result<WatchPassReport, String> {
+    let store = ChildrenStore::new(data_dir);
+    let outbox = Outbox::new(data_dir);
+    let host = default_host_name();
+    let statuses = store.list_statuses().map_err(|e| e.to_string())?;
+    let mut report = WatchPassReport::default();
+
+    if let Some(o) = opts {
+        let _ = outbox.flush(o).await;
+    }
+
+    for mut st in statuses {
+        if st.pid_alive {
+            st.record.heartbeat_at_sec = now_ms() / 1000;
+            let _ = store.save(&st.record);
+            let req = build_supervised_status_request(
+                &st.record.name,
+                "running",
+                &st.record.model,
+                &st.record.branch,
+                &st.record.text,
+                Some(st.record.pid),
+                &host,
+            );
+            let _ = send_or_queue(&outbox, opts, req).await;
+            if let Some(o) = opts {
+                let _ = crate::client::request_ok(o, json!({"op": "heartbeat"})).await;
+                if let Some(task_id) = &st.record.task_id {
+                    let _ = crate::client::request_ok(
+                        o,
+                        json!({"op": "task.heartbeat", "task": task_id}),
+                    )
+                    .await;
+                }
+            }
+            report.alive.push(st.record.name);
+        } else {
+            let req = build_supervised_status_request(
+                &st.record.name,
+                "idle",
+                &st.record.model,
+                &st.record.branch,
+                "process exited (detected by local supervisor watch)",
+                None,
+                &host,
+            );
+            let _ = send_or_queue(&outbox, opts, req).await;
+            let _ = store.remove(&st.record.name);
+            report.gone.push(st.record.name);
+        }
+    }
+
+    Ok(report)
 }
 
 /// Builds a `FACT` bus request for `exit/<worker>` (section 5.2).
