@@ -18,6 +18,37 @@ import "./testing.css";
 
 type TestingSection = "features" | "matrix" | "regressions";
 
+function EmptyTestingState({ section }: { section: TestingSection }) {
+  const copy =
+    section === "features"
+      ? {
+          icon: TreeStructure,
+          title: "No feature map published yet",
+          body: "Once features.toml is registered on the hub, capabilities, gate globs, and cross-machine proof milestones appear here as a dependency atlas.",
+        }
+      : section === "matrix"
+        ? {
+            icon: Desktop,
+            title: "No machine test reports yet",
+            body: "Hardware test runners submit signed scenario reports per OS/GPU class. Quorum verdicts populate this matrix automatically.",
+          }
+        : {
+            icon: ChartLineDown,
+            title: "No metric regression checks yet",
+            body: "Median and MAD guardrails compare candidate builds against baselines and automatically open bisect tasks on regressions.",
+          };
+  const Icon = copy.icon;
+  return (
+    <div className="ts-empty-state">
+      <span className="ts-empty-icon">
+        <Icon size={24} aria-hidden="true" />
+      </span>
+      <strong>{copy.title}</strong>
+      <p>{copy.body}</p>
+    </div>
+  );
+}
+
 export default function TestingView({
   features,
   matrix,
@@ -74,7 +105,7 @@ export default function TestingView({
     <section className="ts-view" aria-labelledby="ts-title">
       <div className="ts-header">
         <div>
-          <h1 id="ts-title">Feature map & test network</h1>
+          <h1 id="ts-title">Feature map &amp; test network</h1>
           <p>See what works, what depends on it, and which machines proved it.</p>
         </div>
         <SegmentedControl
@@ -140,13 +171,15 @@ export default function TestingView({
 
             {section === "features" && (features.length
               ? <FeatureCards features={visibleFeatures} active={activeFeature} onSelect={setSelectedId} />
-              : <div className="ts-empty">No feature map is available from this hub.</div>)}
+              : <EmptyTestingState section="features" />)}
 
-            {section === "matrix" && <MachineMatrix matrix={visibleMatrix} active={activeCell} onSelect={setSelectedId} />}
+            {section === "matrix" && (visibleMatrix.length
+              ? <MachineMatrix matrix={visibleMatrix} active={activeCell} onSelect={setSelectedId} />
+              : <EmptyTestingState section="matrix" />)}
 
             {section === "regressions" &&
               (regressions.length === 0 ? (
-                <div className="ts-empty">No metric checks recorded yet.</div>
+                <EmptyTestingState section="regressions" />
               ) : (
                 <ol className="ts-rows">
                   {regressions.map((reg) => {

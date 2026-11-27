@@ -102,6 +102,9 @@ export type AgentInstance = {
   lastStatus?: string;
   statusDetail?: string;
   reason?: string;
+  supervised?: boolean;
+  liveness?: "process" | "self_reported";
+  pid?: number;
 };
 
 export type AgentMachine = {
@@ -166,7 +169,7 @@ export type LandingItem = {
   sha: string;
   taskId: string;
   state: string;
-  priority: string;
+  priority?: string;
   batchId?: string;
   tries?: number;
   failStep?: string;

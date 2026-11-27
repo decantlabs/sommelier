@@ -2,18 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   ArrowSquareOut,
+  Broadcast,
   CaretDown,
   Check,
-  Cloud,
+  Info,
+  Lock,
   MagnifyingGlass,
   Plus,
-  Stack,
+  Sparkle,
+  WarningCircle,
   X,
 } from "@phosphor-icons/react";
 import { initialTasks } from "./api/demo";
-import { useSommelierData } from "./api/client";
+import { useSommelierData, type BriefResult } from "./api/client";
 import type { AccessRole, AgentProvider } from "./api/types";
-import { Button, DefinitionList, ProviderMark } from "./components";
+import { Button, DefinitionList, MarkdownBrief, ProviderMark } from "./components";
 import WorkGraphView from "./views/WorkGraphView";
 import PipelineView from "./views/PipelineView";
 import LoopsView from "./views/LoopsView";
@@ -24,6 +27,11 @@ import ContributorsView from "./views/ContributorsView";
 export type Tab = "Graph" | "Loops" | "Pipeline" | "Testing" | "Message board" | "Contributors";
 const tabs: Tab[] = ["Graph", "Loops", "Pipeline", "Testing", "Message board", "Contributors"];
 const roles: AccessRole[] = ["Orchestrator", "Member", "Observer", "Public"];
+
+type NoticeState = {
+  text: string;
+  tone: "good" | "info" | "warning" | "danger";
+};
 
 function initialsFor(name: string): string {
   const clean = name.replace(/^[^a-zA-Z0-9]+/, "");
@@ -46,23 +54,31 @@ export function App() {
   const [search, setSearch] = useState("");
   const [needsAttention, setNeedsAttention] = useState(false);
   const [topic, setTopic] = useState("");
-  const [hosting, setHosting] = useState("Self-hosted");
   const [menu, setMenu] = useState<"hosting" | "role" | "project" | null>(null);
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<NoticeState | null>(null);
   const [briefTitle, setBriefTitle] = useState("");
-  const [briefText, setBriefText] = useState("");
+  const [briefResult, setBriefResult] = useState<BriefResult>({ status: "ok", content: "" });
   const [tokenInput, setTokenInput] = useState("");
 
   const createDialog = useRef<HTMLDialogElement>(null);
   const evidenceDialog = useRef<HTMLDialogElement>(null);
   const briefDialog = useRef<HTMLDialogElement>(null);
+  const noticeTimerRef = useRef<number | null>(null);
 
-  // When switching from demo to a live hub, auto-select the first relevant task if SOM-142 isn't present.
+  const showNotice = (text: string, tone: NoticeState["tone"] = "good") => {
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    setNotice({ text, tone });
+    noticeTimerRef.current = window.setTimeout(() => setNotice(null), 3600);
+  };
+
+  // Auto-select the first relevant task when switching from demo to a live hub.
   useEffect(() => {
     if (selectedTaskId === null || snapshot.tasks.some((t) => t.id === selectedTaskId)) return;
     if (snapshot.tasks.length > 0) {
       const firstRelevant =
-        snapshot.tasks.find((t) => Boolean(t.conflict)) ?? snapshot.tasks[0];
+        snapshot.tasks.find((t) => Boolean(t.conflict)) ??
+        snapshot.tasks.find((t) => t.state !== "Cancelled" && t.state !== "Closed") ??
+        snapshot.tasks[0];
       setSelectedTaskId(firstRelevant.id);
     } else {
       setSelectedTaskId(null);
@@ -71,29 +87,39 @@ export function App() {
 
   useEffect(() => {
     if (!lastError) return;
-    setNotice(lastError);
-    const timer = window.setTimeout(() => {
-      setNotice("");
-      clearError();
-    }, 4200);
-    return () => window.clearTimeout(timer);
+    showNotice(lastError, "warning");
+    clearError();
   }, [clearError, lastError]);
 
   const agents = snapshot.agentMachines.flatMap(({ agents }) => agents);
-  const communityProviders = [...new Set(agents.map(({ provider }) => provider)
-    .filter((provider): provider is AgentProvider => Boolean(provider)))];
+  const communityProviders = [
+    ...new Set(
+      agents
+        .map(({ provider }) => provider)
+        .filter((provider): provider is AgentProvider => Boolean(provider)),
+    ),
+  ];
   const runningAgentCount = agents.filter(({ state }) => state.toLowerCase() === "running").length;
   const currentUser = source === "live" ? identity?.name ?? "" : "mira";
-  const canRunLocally = (effectiveRole === "Member" || effectiveRole === "Orchestrator")
-    && (identity?.tier === undefined || identity.tier >= 1);
+  const canRunLocally =
+    (effectiveRole === "Member" || effectiveRole === "Orchestrator") &&
+    (identity?.tier === undefined || identity.tier >= 1);
   const recipientNames = snapshot.contributors
     .map((c) => c.name)
     .filter((name) => name !== currentUser);
 
-  function showNotice(text: string) {
-    setNotice(text);
-    window.setTimeout(() => setNotice(""), 3200);
-  }
+  const liveHost =
+    typeof window !== "undefined" && window.location.host ? window.location.host : "live hub";
+  const openAlertCount = snapshot.alerts.filter((a) => !a.acked).length;
+  const pipelineCount =
+    snapshot.submissions.length + snapshot.reviews.length + snapshot.landing.length;
+
+  const tabCounts: Partial<Record<Tab, number>> = {
+    Graph: snapshot.tasks.length,
+    Pipeline: pipelineCount,
+    "Message board": snapshot.messages.length,
+    Contributors: snapshot.contributors.length,
+  };
 
   function go(next: Tab) {
     setTab(next);
@@ -126,9 +152,9 @@ export function App() {
   }
 
   async function inspectBrief(taskId: string) {
-    const content = await data.fetchBrief(taskId);
-    setBriefTitle(`Task brief · ${taskId}`);
-    setBriefText(content);
+    const result = await data.fetchBrief(taskId);
+    setBriefTitle(taskId);
+    setBriefResult(result);
     briefDialog.current?.showModal();
   }
 
@@ -139,7 +165,7 @@ export function App() {
     const formData = new FormData(form);
     const value = (key: string) => String(formData.get(key) ?? "").trim();
     if (!value("title") || !value("scope") || !value("done")) {
-      setNotice("Enter a title, scope and acceptance criteria.");
+      showNotice("Enter a title, scope and acceptance criteria.", "warning");
       return;
     }
     const created = data.createTask({
@@ -158,7 +184,10 @@ export function App() {
     setNeedsAttention(false);
     form.reset();
     createDialog.current?.close();
-    showNotice(source === "live" ? `${created.id} sent to hub` : `${created.id} created in this demo`);
+    showNotice(
+      source === "live" ? `${created.id} sent to hub` : `${created.id} created in this demo`,
+      "good",
+    );
   }
 
   async function handleConnectLive(event: FormEvent<HTMLFormElement>) {
@@ -167,9 +196,9 @@ export function App() {
     if (ok) {
       setTokenInput("");
       setMenu(null);
-      showNotice("Connected to live Sommelier hub");
+      showNotice("Connected to live Sommelier hub", "good");
     } else {
-      showNotice("Hub unreachable or token rejected · staying in demo mode");
+      showNotice("Hub unreachable or token rejected · staying in demo mode", "warning");
     }
   }
 
@@ -193,7 +222,7 @@ export function App() {
             onClick={() => go("Graph")}
             aria-label="Sommelier work graph"
           >
-            <img src={`${import.meta.env.BASE_URL}assets/sommelier-mark.png`} width="30" height="30" alt="" />
+            <img src={`${import.meta.env.BASE_URL}assets/sommelier-mark.png`} width="28" height="28" alt="" />
             <strong>sommelier</strong>
           </button>
           <span className="slash">/</span>
@@ -208,7 +237,9 @@ export function App() {
             </button>
             {menu === "project" && (
               <div className="menu project-menu">
-                <span className="menu-label">{source === "live" ? "Live hub" : "Demo project"}</span>
+                <span className="menu-label">
+                  {source === "live" ? `Live hub #${snapshot.hubId}` : "Demo workspace"}
+                </span>
                 <a href="https://github.com/decantlabs/sommelier" target="_blank" rel="noreferrer">
                   Open source repository <ArrowSquareOut size={15} />
                 </a>
@@ -218,62 +249,72 @@ export function App() {
         </div>
 
         <nav aria-label="Project views">
-          {tabs.map((entry) => (
-            <button
-              key={entry}
-              type="button"
-              className={tab === entry ? "current" : ""}
-              aria-current={tab === entry ? "page" : undefined}
-              onClick={() => go(entry)}
-            >
-              {entry === "Graph" ? "Work Graph" : entry}
-            </button>
-          ))}
+          {tabs.map((entry) => {
+            const count = tabCounts[entry];
+            return (
+              <button
+                key={entry}
+                type="button"
+                className={tab === entry ? "current" : ""}
+                aria-current={tab === entry ? "page" : undefined}
+                onClick={() => go(entry)}
+              >
+                <span>{entry === "Graph" ? "Work Graph" : entry}</span>
+                {count !== undefined && count > 0 && (
+                  <span className="nav-count mono">{count}</span>
+                )}
+                {entry === "Message board" && openAlertCount > 0 && (
+                  <span className="nav-alert-dot" title={`${openAlertCount} open alerts`} />
+                )}
+              </button>
+            );
+          })}
         </nav>
 
         <div className="header-right">
           <div className="menu-anchor">
             <button
               type="button"
-              className="hosting"
+              className={`hosting ${source === "live" ? "is-live-pill" : ""}`}
               onClick={() => setMenu(menu === "hosting" ? null : "hosting")}
               aria-expanded={menu === "hosting"}
             >
-              {hosting === "Self-hosted" ? <Stack size={16} /> : <Cloud size={17} />}
-              <span>
-                {hosting}
-                {hosting === "Self-hosted" ? " · eu-node-01" : ""}
-              </span>
               {source === "live" ? (
-                <span className="hosting-dot is-live" title="Connected to live hub" />
-              ) : data.liveStatus === "auth-required" ? (
-                <span className="hosting-dot is-auth" title="Live hub requires a token" />
-              ) : null}
+                <>
+                  <span className="hosting-dot is-live" title="Connected to live hub" />
+                  <span className="hosting-label">{liveHost}</span>
+                </>
+              ) : (
+                <>
+                  <Sparkle size={15} />
+                  <span className="hosting-label">Demo preview</span>
+                  {data.liveStatus === "auth-required" && (
+                    <span className="hosting-dot is-auth" title="Live hub requires a token" />
+                  )}
+                </>
+              )}
+              <CaretDown size={12} />
             </button>
             {menu === "hosting" && (
               <div className="menu right">
-                <span className="menu-label">{source === "live" ? "Connected deployment" : "Demo deployment"}</span>
-                {["Self-hosted", "Managed cloud"].map((value) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => {
-                      setHosting(value);
-                      setMenu(null);
-                    }}
-                  >
-                    {value}
-                    {hosting === value && <Check size={14} />}
-                  </button>
-                ))}
+                <span className="menu-label">
+                  {source === "live" ? `Connected · Hub #${snapshot.hubId}` : "Demo mode"}
+                </span>
+                {source === "live" && (
+                  <div className="menu-meta-line">
+                    <Broadcast size={14} />
+                    <span>
+                      {effectiveRole} · updated {snapshot.asOf}
+                    </span>
+                  </div>
+                )}
                 <div className="menu-divider" />
-                <span className="menu-label">Hub connection ({source})</span>
                 {data.liveStatus === "auth-required" && source !== "live" && (
                   <span className="menu-note">Live hub requires a token</span>
                 )}
                 <form className="menu-form" onSubmit={handleConnectLive}>
                   <label>
-                    Hub token (sent via Bearer → HttpOnly session)
+                    Hub token (Bearer → HttpOnly session)
                     <input
                       type="password"
                       value={tokenInput}
@@ -282,7 +323,7 @@ export function App() {
                     />
                   </label>
                   <Button variant="primary" size="sm" type="submit">
-                    {source === "live" ? "Reconnect live hub" : "Connect live hub"}
+                    {source === "live" ? "Sign in / reconnect" : "Connect live hub"}
                   </Button>
                   {source === "live" && (
                     <Button
@@ -293,7 +334,7 @@ export function App() {
                         setMenu(null);
                       }}
                     >
-                      Sign out &amp; switch to demo
+                      Switch to demo preview
                     </Button>
                   )}
                 </form>
@@ -322,6 +363,14 @@ export function App() {
                     <span className="menu-label">
                       Live: {identity.name} · {effectiveRole}
                     </span>
+                    {effectiveRole === "Public" && (
+                      <button
+                        type="button"
+                        onClick={() => setMenu("hosting")}
+                      >
+                        Sign in with hub token
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => {
@@ -359,17 +408,19 @@ export function App() {
       {tab === "Graph" ? (
         <div className="view graph-view">
           <div className="view-header">
-            <h1>Work graph</h1>
-            <span>
-              Public project <b>·</b>{" "}
-              {source === "live" ? `Live hub #${snapshot.hubId}` : "Demo project"}
-            </span>
+            <div className="view-header-title">
+              <h1>Work graph</h1>
+              <span>
+                {effectiveRole === "Public" ? "Public hub" : `${effectiveRole} session`} <b>·</b>{" "}
+                {source === "live" ? `Event #${snapshot.hubId}` : "Demo project"}
+              </span>
+            </div>
             <div className="view-actions">
               {searchOpen && (
                 <input
                   autoFocus
                   aria-label="Search tasks"
-                  placeholder="Find a task…"
+                  placeholder="Find a task, scope, or ID…"
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
                 />
@@ -382,17 +433,18 @@ export function App() {
                   setSearch("");
                 }}
               >
-                {searchOpen ? <X size={21} /> : <MagnifyingGlass size={23} />}
+                {searchOpen ? <X size={19} /> : <MagnifyingGlass size={20} />}
               </Button>
               {effectiveRole === "Orchestrator" && (
                 <Button
                   variant="primary"
+                  size="sm"
                   onClick={() => {
-                    setNotice("");
+                    setNotice(null);
                     createDialog.current?.showModal();
                   }}
                 >
-                  <Plus size={18} /> Create task
+                  <Plus size={16} /> Create task
                 </Button>
               )}
             </div>
@@ -406,7 +458,10 @@ export function App() {
             onMessages={openMessages}
             onInspectBrief={inspectBrief}
             onOpenSubmission={openSubmission}
-            onOpenLoop={(taskId) => { setSelectedLoopTask(taskId); go("Loops"); }}
+            onOpenLoop={(taskId) => {
+              setSelectedLoopTask(taskId);
+              go("Loops");
+            }}
             submissions={snapshot.submissions}
             alerts={snapshot.alerts}
             scheduler={snapshot.scheduler}
@@ -421,13 +476,11 @@ export function App() {
             onScopeChange={setScope}
             needsAttention={needsAttention}
             onNeedsAttentionChange={setNeedsAttention}
-            presenceProviders={
-              communityProviders.map((provider) => (
-                <span key={provider} title={provider}>
-                  <ProviderMark provider={provider} />
-                </span>
-              ))
-            }
+            presenceProviders={communityProviders.map((provider) => (
+              <span key={provider} title={provider}>
+                <ProviderMark provider={provider} size={15} />
+              </span>
+            ))}
             runningAgentCount={runningAgentCount}
           />
         </div>
@@ -435,8 +488,14 @@ export function App() {
 
       {tab === "Loops" && (
         <div className="view">
-          <LoopsView tasks={snapshot.tasks} submissions={snapshot.submissions}
-            initialTaskId={selectedLoopTask} attempts={snapshot.workAttempts} onTask={openTask} onPipeline={openSubmission} />
+          <LoopsView
+            tasks={snapshot.tasks}
+            submissions={snapshot.submissions}
+            initialTaskId={selectedLoopTask}
+            attempts={snapshot.workAttempts}
+            onTask={openTask}
+            onPipeline={openSubmission}
+          />
         </div>
       )}
 
@@ -559,7 +618,7 @@ export function App() {
               </select>
             </label>
           </div>
-          {notice && <p role="status">{notice}</p>}
+          {notice && <p role="status">{notice.text}</p>}
           <Button variant="primary" type="submit">
             <Plus size={17} /> Create task
           </Button>
@@ -622,19 +681,54 @@ export function App() {
         </div>
       </dialog>
 
-      <dialog ref={briefDialog} className="app-dialog">
+      <dialog ref={briefDialog} className="app-dialog brief-dialog">
         <div className="dialog-heading">
-          <span className="task-id">{briefTitle}</span>
+          <span className="task-id">Task brief · {briefTitle}</span>
           <Button variant="icon" aria-label="Close brief" onClick={() => briefDialog.current?.close()}>
             <X size={19} />
           </Button>
         </div>
-        <pre className="brief-body">{briefText}</pre>
+        {briefResult.status === "auth-required" ? (
+          <div className="brief-auth-callout">
+            <Lock size={20} />
+            <div>
+              <strong>Sign in required</strong>
+              <p>{briefResult.content}</p>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => {
+                  briefDialog.current?.close();
+                  setMenu("hosting");
+                }}
+              >
+                Connect with hub token
+              </Button>
+            </div>
+          </div>
+        ) : briefResult.status === "not-found" ? (
+          <div className="brief-empty-callout">
+            <Info size={18} />
+            <p>{briefResult.content}</p>
+          </div>
+        ) : (
+          <MarkdownBrief content={briefResult.content} />
+        )}
       </dialog>
 
       {notice && !createDialog.current?.open && (
-        <div className="toast" role="status">
-          <Check size={17} /> {notice}
+        <div className={`toast toast-${notice.tone}`} role="status">
+          {notice.tone === "warning" || notice.tone === "danger" ? (
+            <WarningCircle size={17} />
+          ) : notice.tone === "info" ? (
+            <Info size={17} />
+          ) : (
+            <Check size={17} />
+          )}
+          <span>{notice.text}</span>
+          <button type="button" className="toast-close" aria-label="Dismiss notice" onClick={() => setNotice(null)}>
+            <X size={14} />
+          </button>
         </div>
       )}
 

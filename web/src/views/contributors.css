@@ -249,13 +249,33 @@
 }
 
 .ct-empty {
-  padding: 40px 16px;
+  padding: 48px 20px;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
   text-align: center;
   border: 1px solid var(--color-line);
   border-radius: var(--radius-panel);
   background: var(--color-panel);
   color: var(--color-text-muted);
-  font-size: var(--text-md);
+  font-size: var(--text-sm);
+  box-shadow: var(--shadow-card);
+}
+
+.ct-empty svg {
+  color: var(--color-accent);
+  margin-bottom: 2px;
+}
+
+.ct-empty strong {
+  color: var(--color-text);
+  font-size: var(--text-base);
+}
+
+.ct-empty p {
+  margin: 0;
+  max-width: 420px;
+  line-height: 1.5;
 }
 
 .ct-guide {

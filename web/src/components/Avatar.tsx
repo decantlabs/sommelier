@@ -1,3 +1,5 @@
+import { avatarToneKey } from "../api/format";
+
 export function Avatar({
   initials,
   person,
@@ -12,7 +14,7 @@ export function Avatar({
   return (
     <span
       className={`ui-avatar ui-avatar-${size} ${className}`.trim()}
-      data-person={person}
+      data-person={person ? avatarToneKey(person) : undefined}
       aria-hidden="true"
     >
       {initials}

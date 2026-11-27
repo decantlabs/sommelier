@@ -278,7 +278,11 @@ export default function ContributorsView({
       {subView === "pools" && (
         <div className="ct-pools-grid">
           {pools.length === 0 ? (
-            <div className="ct-empty">No quota pools reported yet.</div>
+            <div className="ct-empty">
+              <Circuitry size={24} />
+              <strong>No quota pools reported yet</strong>
+              <p>Local supervisors publish 5-hour and window utilization pools here once connected with capacity probes.</p>
+            </div>
           ) : (
             pools.map((pool) => (
               <MeterBar key={`${pool.owner}-${pool.pool}`} pool={pool} onSelectTask={onOpenTask} />
@@ -290,7 +294,11 @@ export default function ContributorsView({
       {subView === "roles" && (
         <div className="ct-roles-grid">
           {roleLeases.length === 0 ? (
-            <div className="ct-empty">No role leases configured on this hub.</div>
+            <div className="ct-empty">
+              <ShieldCheck size={24} />
+              <strong>No role leases configured</strong>
+              <p>Coordinator, brain, lander, and run-keeper leases appear here when role election is enabled on the hub.</p>
+            </div>
           ) : (
             roleLeases.map((lease) => (
               <InspectorPanel

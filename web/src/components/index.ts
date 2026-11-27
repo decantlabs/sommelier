@@ -4,6 +4,7 @@ export { FilterBar, FilterField, FilterToggle, SegmentedControl } from "./Filter
 export type { SegmentOption } from "./FilterControls";
 export { CodeChip, DefinitionList, InspectorPanel, InspectorSection } from "./InspectorPanel";
 export type { DefinitionItem } from "./InspectorPanel";
+export { MarkdownBrief } from "./MarkdownBrief";
 export { MeterBar } from "./MeterBar";
 export { inferProvider, ProviderLabel, ProviderMark } from "./ProviderMark";
 export {

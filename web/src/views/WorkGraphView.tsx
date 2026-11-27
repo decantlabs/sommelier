@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { PointerEvent, ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent, ReactNode, WheelEvent } from "react";
 import {
   ArrowRight,
   ArrowSquareOut,
@@ -8,11 +8,15 @@ import {
   CaretUp,
   Crosshair,
   FileText,
+  FlowArrow,
   Minus,
   Pause,
   Play,
   Plus,
+  SquaresFour,
 } from "@phosphor-icons/react";
+import { layoutTasks } from "../api/adapter";
+import { buildScopeOptions, parseMessageBody, scopePrefixOf } from "../api/format";
 import type {
   AccessRole,
   BusMessage,
@@ -30,10 +34,15 @@ import {
   SegmentedControl,
   StatusLabel,
   TaskNode,
+  messageKindTone,
+  taskStateTone,
 } from "../components";
 import type { DefinitionItem } from "../components";
 import { readCanvasTokens } from "../design/tokens";
 import "./work-graph.css";
+
+type VisibilityMode = "all" | "active" | "attention";
+type ViewMode = "graph" | "grid";
 
 type GraphProps = {
   tasks: WorkTask[];
@@ -58,32 +67,12 @@ type GraphProps = {
   onScopeChange: (scope: string) => void;
   needsAttention: boolean;
   onNeedsAttentionChange: (value: boolean) => void;
-  presenceProviders: ReactNode;
+  presenceProviders: ReactNode[];
   runningAgentCount: number;
 };
 
-const sceneWidth = 1440;
-const sceneHeight = 835;
-const cardWidth = 310;
-const topRowHeight = 140;
-
-const KNOWN_SCOPE_LABELS: Record<string, string> = {
-  "bus/src/agent": "agent",
-  "bus/src/intake": "intake",
-  "bus/tests": "tests",
-};
-
-function scopePrefixOf(raw: string): string {
-  const first = raw.split(",")[0]?.trim() ?? "";
-  for (const known of Object.keys(KNOWN_SCOPE_LABELS)) {
-    if (first.startsWith(known)) return known;
-  }
-  const clean = first.replace(/\*+$/g, "").replace(/\/+$/g, "");
-  const parts = clean.split("/").filter(Boolean);
-  if (parts.length >= 3) return parts.slice(0, 3).join("/");
-  if (parts.length >= 2) return parts.slice(0, 2).join("/");
-  return clean;
-}
+const cardWidth = 316;
+const cardHeight = 160;
 
 function Connections({
   tasks,
@@ -102,50 +91,95 @@ function Connections({
     if (!el || !ctx) return;
 
     const palette = readCanvasTokens(el);
-    ctx.setTransform(2, 0, 0, 2, 0, 0);
-    ctx.clearRect(0, 0, width, height);
-    ctx.lineWidth = 1.8;
-
-    function wire(from: WorkTask, to: WorkTask, conflict: boolean) {
-      const paint = ctx!;
-      const sameColumn = Math.abs(from.x - to.x) < 20;
-      const x1 = sameColumn ? from.x + cardWidth / 2 : from.x + cardWidth;
-      const y1 = sameColumn ? from.y + topRowHeight : from.y + 76;
-      const x2 = sameColumn ? to.x + cardWidth / 2 : to.x;
-      const y2 = sameColumn ? to.y : to.y + 76;
-      const midX = (x1 + x2) / 2;
-      const color = conflict ? palette.conflict : palette.edge;
-
-      paint.strokeStyle = color;
-      paint.fillStyle = color;
-      paint.setLineDash(conflict ? [8, 6] : []);
-      paint.beginPath();
-      paint.moveTo(x1, y1);
-      paint.bezierCurveTo(midX, y1, midX, y2, x2, y2);
-      paint.stroke();
-      paint.setLineDash([]);
-
-      for (const [x, y] of [
-        [x1, y1],
-        [x2, y2],
-      ]) {
-        paint.beginPath();
-        paint.arc(x, y, 4.5, 0, 2 * Math.PI);
-        paint.fillStyle = palette.portFill;
-        paint.fill();
-        paint.stroke();
-      }
-    }
-
     const byId = new Map(tasks.map((task) => [task.id, task]));
+    const edges: { from: WorkTask; to: WorkTask; conflict: boolean; active: boolean }[] = [];
     for (const task of tasks) {
+      const taskActive = task.state === "Running" || task.state === "Leased" || task.state === "Landing";
       for (const dep of task.deps ?? []) {
         const previous = byId.get(dep);
-        if (previous) wire(previous, task, false);
+        if (previous) edges.push({ from: previous, to: task, conflict: false, active: taskActive });
       }
       const blocker = task.conflict && byId.get(task.conflict);
-      if (blocker) wire(blocker, task, true);
+      if (blocker) edges.push({ from: blocker, to: task, conflict: true, active: false });
     }
+
+    const reducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const hasActiveEdge = edges.some((e) => e.active);
+    let rafId = 0;
+
+    function bezierPoint(p0: number, p1: number, p2: number, p3: number, t: number): number {
+      const u = 1 - t;
+      return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3;
+    }
+
+    function draw(nowMs: number) {
+      const paint = ctx!;
+      paint.setTransform(2, 0, 0, 2, 0, 0);
+      paint.clearRect(0, 0, width, height);
+      paint.lineWidth = 1.7;
+
+      const phase = (nowMs % 2800) / 2800;
+
+      for (let i = 0; i < edges.length; i += 1) {
+        const { from, to, conflict, active } = edges[i];
+        const sameColumn = Math.abs(from.x - to.x) < 20;
+        const x1 = sameColumn ? from.x + cardWidth / 2 : from.x + cardWidth;
+        const y1 = sameColumn ? from.y + cardHeight : from.y + cardHeight / 2;
+        const x2 = sameColumn ? to.x + cardWidth / 2 : to.x;
+        const y2 = sameColumn ? to.y : to.y + cardHeight / 2;
+        const midX = (x1 + x2) / 2;
+        const color = conflict ? palette.conflict : palette.edge;
+
+        paint.strokeStyle = color;
+        paint.fillStyle = color;
+        paint.globalAlpha = conflict ? 0.85 : active ? 0.88 : 0.55;
+        paint.setLineDash(conflict ? [7, 5] : []);
+        paint.beginPath();
+        paint.moveTo(x1, y1);
+        paint.bezierCurveTo(midX, y1, midX, y2, x2, y2);
+        paint.stroke();
+        paint.setLineDash([]);
+
+        for (const [x, y] of [
+          [x1, y1],
+          [x2, y2],
+        ]) {
+          paint.beginPath();
+          paint.arc(x, y, 4, 0, 2 * Math.PI);
+          paint.fillStyle = palette.portFill;
+          paint.fill();
+          paint.stroke();
+        }
+
+        if (active && !reducedMotion) {
+          const t = (phase + i * 0.23) % 1;
+          const px = bezierPoint(x1, midX, midX, x2, t);
+          const py = bezierPoint(y1, y1, y2, y2, t);
+          paint.globalAlpha = Math.sin(t * Math.PI) * 0.95;
+          paint.fillStyle = "#79d8a5";
+          paint.beginPath();
+          paint.arc(px, py, 3, 0, Math.PI * 2);
+          paint.fill();
+        }
+      }
+      paint.globalAlpha = 1;
+    }
+
+    draw(performance.now());
+
+    if (hasActiveEdge && !reducedMotion) {
+      const tick = (ts: number) => {
+        draw(ts);
+        rafId = window.requestAnimationFrame(tick);
+      };
+      rafId = window.requestAnimationFrame(tick);
+    }
+
+    return () => {
+      if (rafId) window.cancelAnimationFrame(rafId);
+    };
   }, [tasks, width, height]);
 
   return (
@@ -177,80 +211,93 @@ function TaskInspector({
   onOpenSubmission: GraphProps["onOpenSubmission"];
   onOpenLoop: GraphProps["onOpenLoop"];
 }) {
-  const left = task.conflict && task.x === 570 && task.y === 432 ? 960 : task.x + cardWidth + 26;
-  const isRight = left > 980;
-  const top = task.conflict && task.x === 570 && task.y === 432 ? 366 : task.y + 24;
-
   const definitions: DefinitionItem[] = [
-    ...(!task.conflict ? [{ label: "Task state", value: task.state }] : []),
-    ...(task.conflict ? [] : task.blockerReason ? [{ label: "Dispatch", value: task.blockerReason }] : []),
+    {
+      label: "Task state",
+      value: (
+        <StatusLabel variant="pill" tone={taskStateTone(task.state)}>
+          {task.state}
+        </StatusLabel>
+      ),
+    },
+    ...(task.blockerReason && !task.conflict ? [{ label: "Dispatch", value: task.blockerReason }] : []),
     { label: "Priority", value: task.priority ?? "Normal" },
     { label: "Attempt", value: `${task.attempt ?? 1} of ${task.maxAttempts ?? 3}` },
     { label: "Min. trust", value: `Tier ${task.minTrust ?? 2}` },
     ...(task.risk ? [{ label: "Risk", value: task.risk }] : []),
+    ...(task.kind ? [{ label: "Order kind", value: <span className="mono">{task.kind}</span> }] : []),
     ...(task.feature ? [{ label: "Feature", value: <span className="mono">{task.feature}</span> }] : []),
     ...(task.owner
       ? [
           {
             label: "Lease holder",
             value: task.provider ? (
-              <ProviderLabel provider={task.provider} suffix={task.owner ? ` · ${task.owner}` : ""} />
+              <ProviderLabel provider={task.provider} suffix={` · ${task.owner}`} />
             ) : (
               task.owner
             ),
           },
         ]
       : []),
+    ...(task.heartbeat ? [{ label: "Last status", value: task.heartbeat }] : []),
     ...(task.deps?.length ? [{ label: "Dependencies", value: task.deps.join(", ") }] : []),
   ];
 
   return (
     <InspectorPanel
-      mode="floating"
+      mode="docked"
+      className="graph-inspector-docked"
       ariaLabel={`Details for ${task.id}`}
       eyebrow={<span className="task-id">{task.id}</span>}
-      title={task.conflict ? "Waiting on active scope" : task.title}
-      hasPointer={Boolean(task.conflict)}
-      fromRight={isRight}
-      style={{ left: isRight ? Math.max(24, task.x - 435) : left, top }}
+      title={task.title}
       onClose={() => onSelect(null)}
       closeLabel="Close task details"
     >
-      <p>
-        {task.conflict
-          ? `${task.conflict} is working in the same scope. Dispatch can resume once the scope is free.`
-          : task.done}
-      </p>
-      <CodeChip>{task.scope}</CodeChip>
-      <DefinitionList items={definitions} />
-      <div className="ui-inspector-actions">
-        {task.conflict ? (
+      {task.conflict && (
+        <div className="graph-inspector-callout">
+          <strong>Waiting on active scope</strong>
+          <p>{task.conflict} holds an active lease in the same scope. Dispatch resumes once it releases.</p>
           <Button variant="link" onClick={() => onSelect(task.conflict!)}>
-            Open blocking task <ArrowRight size={15} />
+            Inspect blocking task {task.conflict} <ArrowRight size={14} />
           </Button>
-        ) : (
-          <Button variant="link" onClick={() => onMessages(`task/${task.id}`)}>
-            Open task messages <ArrowRight size={15} />
-          </Button>
-        )}
+        </div>
+      )}
+
+      <p className="graph-inspector-done">{task.done}</p>
+
+      {task.scope && (
+        <div className="graph-inspector-scope">
+          <CodeChip small>{task.scope}</CodeChip>
+        </div>
+      )}
+
+      <DefinitionList items={definitions} />
+
+      <div className="ui-inspector-actions ui-inspector-actions-docked">
+        <Button variant="link" onClick={() => onMessages(`task/${task.id}`)}>
+          Task messages <ArrowRight size={14} />
+        </Button>
         {task.checkpoint && (
           <small className="inspector-actions-note">
-            Latest checkpoint <code>{task.checkpoint}</code>
+            Checkpoint <code>{task.checkpoint}</code>
           </small>
         )}
       </div>
+
       <div className="inspector-sublinks">
-          <Button variant="link" onClick={() => onOpenLoop(task.id)}>View work loop <ArrowRight size={14} /></Button>
-          {task.briefAvailable && (
-            <Button variant="link" onClick={() => onInspectBrief(task.id)}>
-              <FileText size={14} /> Inspect brief
-            </Button>
-          )}
-          {hasSubmission && (
-            <Button variant="link" onClick={() => onOpenSubmission(task.id)}>
-              View submission <ArrowRight size={14} />
-            </Button>
-          )}
+        <Button variant="secondary" size="sm" onClick={() => onOpenLoop(task.id)}>
+          View work loop <ArrowRight size={14} />
+        </Button>
+        {task.briefAvailable && (
+          <Button variant="secondary" size="sm" onClick={() => onInspectBrief(task.id)}>
+            <FileText size={14} /> Inspect brief
+          </Button>
+        )}
+        {hasSubmission && (
+          <Button variant="secondary" size="sm" onClick={() => onOpenSubmission(task.id)}>
+            View submission <ArrowRight size={14} />
+          </Button>
+        )}
       </div>
     </InspectorPanel>
   );
@@ -285,70 +332,126 @@ export default function WorkGraphView({
   const viewport = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const [isPanning, setPanning] = useState(false);
-  const [width, setWidth] = useState(sceneWidth);
+  const [viewSize, setViewSize] = useState({ width: 1200, height: 680 });
   const [zoom, setZoom] = useState(1);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [visibility, setVisibility] = useState<VisibilityMode>(needsAttention ? "attention" : "all");
+  const [viewMode, setViewMode] = useState<ViewMode>("graph");
   const searchText = search.trim().toLowerCase();
 
   useEffect(() => {
+    setVisibility(needsAttention ? "attention" : (prev) => (prev === "attention" ? "all" : prev));
+  }, [needsAttention]);
+
+  useEffect(() => {
     if (!viewport.current) return;
-    const observer = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width));
+    const observer = new ResizeObserver(([entry]) => {
+      setViewSize({
+        width: Math.max(320, entry.contentRect.width),
+        height: Math.max(320, entry.contentRect.height),
+      });
+    });
     observer.observe(viewport.current);
     return () => observer.disconnect();
-  }, []);
+  }, [viewMode]);
 
-  const scopeOptions = useMemo(() => {
-    const prefixes = new Set<string>();
-    for (const task of tasks) {
-      const p = scopePrefixOf(task.scope);
-      if (p) prefixes.add(p);
-    }
-    return [...prefixes].map((value) => ({
-      value,
-      label: KNOWN_SCOPE_LABELS[value] ?? (value.split("/").pop() || value),
-    }));
-  }, [tasks]);
+  const scopeOptions = useMemo(() => buildScopeOptions(tasks), [tasks]);
 
-  const graphWidth = Math.max(
-    sceneWidth,
-    ...tasks.map((task) => task.x + cardWidth + 460),
+  const activeCount = useMemo(
+    () => tasks.filter((t) => t.state !== "Cancelled" && t.state !== "Closed").length,
+    [tasks],
   );
-  const graphHeight = Math.max(
-    sceneHeight,
-    ...tasks.map((task) => task.y + (task.y >= 640 ? 360 : 195)),
+  const attentionCount = useMemo(
+    () =>
+      tasks.filter(
+        (task) =>
+          Boolean(task.conflict) ||
+          task.state === "Stuck" ||
+          tasks.some((other) => other.conflict === task.id),
+      ).length,
+    [tasks],
   );
 
-  const baseScale = Math.max(0.74, Math.min(1.2, width / sceneWidth));
-  const scale = baseScale * zoom;
-  const filteredTasks = tasks.filter((task) => {
-    const matchesSearch =
-      !searchText ||
-      [task.id, task.title, task.scope, task.feature ?? ""].some((value) =>
-        value.toLowerCase().includes(searchText),
-      );
-    const matchesScope = !scope || task.scope.startsWith(scope);
-    const attention =
-      Boolean(task.conflict) ||
-      task.state === "Stuck" ||
-      tasks.some((other) => other.conflict === task.id);
-    return matchesSearch && matchesScope && (!needsAttention || attention);
-  });
+  const isFiltered = Boolean(searchText || scope || visibility !== "all");
+
+  const filteredTasks = useMemo(() => {
+    const matched = tasks.filter((task) => {
+      const matchesSearch =
+        !searchText ||
+        [task.id, task.title, task.scope, task.feature ?? "", task.done].some((value) =>
+          value.toLowerCase().includes(searchText),
+        );
+      const matchesScope = !scope || scopePrefixOf(task.scope) === scope || task.scope.startsWith(scope);
+      const isAttention =
+        Boolean(task.conflict) ||
+        task.state === "Stuck" ||
+        tasks.some((other) => other.conflict === task.id);
+      const isActive = task.state !== "Cancelled" && task.state !== "Closed";
+      const matchesVis =
+        visibility === "all" ||
+        (visibility === "active" && isActive) ||
+        (visibility === "attention" && isAttention);
+      return matchesSearch && matchesScope && matchesVis;
+    });
+
+    // Preserve hand-crafted demo positions when viewing the full reference demo set;
+    // dynamically re-pack filtered/live tasks so results always appear cleanly in view.
+    const isDemoReference =
+      !isFiltered &&
+      matched.some((t) => t.id === "SOM-130" && t.x === 105) &&
+      matched.some((t) => t.id === "SOM-136" && t.x === 572);
+
+    return isDemoReference ? matched : layoutTasks(matched);
+  }, [isFiltered, scope, searchText, tasks, visibility]);
+
+  const hasEdges = useMemo(() => {
+    const ids = new Set(filteredTasks.map((t) => t.id));
+    return filteredTasks.some(
+      (t) => (t.conflict && ids.has(t.conflict)) || (t.deps ?? []).some((d) => ids.has(d)),
+    );
+  }, [filteredTasks]);
 
   const findTask = (id: string) => filteredTasks.find((task) => task.id === id);
-  const active = selected && findTask(selected.id) ? selected : undefined;
+  const active = selected && findTask(selected.id) ? findTask(selected.id) : undefined;
+
+  const contentBounds = useMemo(() => {
+    if (filteredTasks.length === 0) {
+      return { width: viewSize.width, height: viewSize.height };
+    }
+    const maxX = Math.max(...filteredTasks.map((t) => t.x + cardWidth)) + 36;
+    const maxY = Math.max(...filteredTasks.map((t) => t.y + cardHeight)) + 96;
+    return {
+      width: Math.max(viewSize.width, maxX),
+      height: Math.max(viewSize.height, maxY),
+    };
+  }, [filteredTasks, viewSize.height, viewSize.width]);
+
+  const fitScale = useMemo(() => {
+    if (filteredTasks.length === 0) return 1;
+    const rawW = Math.max(...filteredTasks.map((t) => t.x + cardWidth)) + 88;
+    const rawH = Math.max(...filteredTasks.map((t) => t.y + cardHeight)) + 104;
+    const scaleX = viewSize.width / rawW;
+    const scaleY = viewSize.height / rawH;
+    return Math.max(0.45, Math.min(1, Math.min(scaleX, scaleY)));
+  }, [filteredTasks, viewSize.height, viewSize.width]);
+
+  const scale = zoom;
+
+  const fitGraph = useCallback(() => {
+    setZoom(Number(fitScale.toFixed(2)));
+    viewport.current?.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+  }, [fitScale]);
+
+  // Reset scroll to top-left whenever filters change so matched nodes are immediately visible.
+  useEffect(() => {
+    viewport.current?.scrollTo({ left: 0, top: 0 });
+  }, [searchText, scope, visibility]);
 
   const showReferenceLabels =
+    !isFiltered &&
     findTask("SOM-130")?.x === 105 &&
     findTask("SOM-136")?.x === 572 &&
     findTask("SOM-142")?.x === 570;
-
-  useEffect(() => {
-    if (selected && selected.y >= 640) {
-      viewport.current
-        ?.querySelector(`[data-task-id="${selected.id}"]`)
-        ?.scrollIntoView({ block: "center", inline: "nearest" });
-    }
-  }, [selected]);
 
   function startPan(event: PointerEvent<HTMLDivElement>) {
     const target = event.target as HTMLElement;
@@ -375,184 +478,333 @@ export default function WorkGraphView({
     setPanning(false);
   }
 
+  function handleWheel(event: WheelEvent<HTMLDivElement>) {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    const delta = event.deltaY < 0 ? 0.1 : -0.1;
+    setZoom((prev) => Number(Math.max(0.4, Math.min(1.5, prev + delta)).toFixed(2)));
+  }
+
   const openAlerts = alerts.filter((a) => !a.acked);
   const isPaused = scheduler.activePauses.length > 0;
-  const recentActivity = messages.slice(0, 3);
+  const recentActivity = messages.slice(0, 5);
   const latestMessage = messages[0];
-  const latestRef = latestMessage?.refs[0] ?? latestMessage?.topic;
+  const latestParsed = latestMessage ? parseMessageBody(latestMessage) : null;
+  const latestRef = latestMessage?.refs.find((r) => !r.startsWith("state:")) ?? latestMessage?.topic;
 
   return (
     <>
-      <div className="graph-body">
-        <div className="graph-top">
-          <div className="legend">
-            <span>
-              <i /> Dependency
-            </span>
-            <span>
-              <i /> Scope conflict
-            </span>
-          </div>
-          <div className="graph-filters">
+      <div className="graph-shell">
+        <div className="graph-toolbar">
+          <div className="graph-toolbar-left">
             <SegmentedControl
               ariaLabel="Task visibility"
-              value={needsAttention ? "attention" : "all"}
-              onChange={(next) => onNeedsAttentionChange(next === "attention")}
+              size="sm"
+              value={visibility}
+              onChange={(next) => {
+                setVisibility(next);
+                onNeedsAttentionChange(next === "attention");
+              }}
               options={[
-                { value: "all", label: "All work" },
-                { value: "attention", label: "Needs attention" },
+                { value: "all", label: `All (${tasks.length})` },
+                { value: "active", label: `Active (${activeCount})` },
+                { value: "attention", label: `Needs attention (${attentionCount})` },
               ]}
             />
-            <label className="scope-select">
-              Scope:{" "}
-              <select
-                aria-label="Scope"
-                value={scope}
-                onChange={(event) => onScopeChange(event.target.value)}
+            {scopeOptions.length > 0 && (
+              <label className="scope-select">
+                <span>Scope</span>
+                <select
+                  aria-label="Scope"
+                  value={scope}
+                  onChange={(event) => onScopeChange(event.target.value)}
+                >
+                  <option value="">All scopes</option>
+                  {scopeOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {(searchText || scope || visibility !== "all") && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setVisibility("all");
+                  onNeedsAttentionChange(false);
+                  onScopeChange("");
+                }}
               >
-                <option value="">all</option>
-                {scopeOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+                Reset
+              </Button>
+            )}
+          </div>
+
+          <div className="graph-toolbar-right">
+            {viewMode === "graph" && hasEdges && (
+              <div className="legend">
+                <span>
+                  <i /> Dependency
+                </span>
+                <span>
+                  <i /> Scope conflict
+                </span>
+              </div>
+            )}
+            <div className="view-mode-switch" role="group" aria-label="Layout mode">
+              <button
+                type="button"
+                aria-pressed={viewMode === "graph"}
+                onClick={() => setViewMode("graph")}
+                title="Spatial work graph"
+              >
+                <FlowArrow size={15} /> Graph
+              </button>
+              <button
+                type="button"
+                aria-pressed={viewMode === "grid"}
+                onClick={() => setViewMode("grid")}
+                title="Compact card grid"
+              >
+                <SquaresFour size={15} /> Grid
+              </button>
+            </div>
           </div>
         </div>
 
-        <div
-          className={`graph-viewport ${isPanning ? "panning" : ""}`}
-          ref={viewport}
-          onPointerDown={startPan}
-          onPointerMove={movePan}
-          onPointerUp={stopPan}
-          onPointerCancel={stopPan}
-          onLostPointerCapture={stopPan}
-        >
-          <div className="graph-size" style={{ width: graphWidth * scale, height: graphHeight * scale }}>
-            <section
-              aria-label="Task graph canvas"
-              className="world"
-              style={{ width: graphWidth, height: graphHeight, transform: `scale(${scale})` }}
+        <div className={`graph-workspace ${active ? "has-inspector" : ""}`}>
+          <div className="graph-body">
+            {viewMode === "grid" ? (
+              <div className="graph-grid-scroll">
+                {filteredTasks.length ? (
+                  <div className="graph-grid">
+                    {filteredTasks.map((task) => (
+                      <TaskNode
+                        key={task.id}
+                        task={task}
+                        positioned={false}
+                        selected={active?.id === task.id}
+                        onSelect={() => onSelect(active?.id === task.id ? null : task.id)}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-graph-card">
+                    <strong>
+                      {tasks.length === 0 ? "No tasks on this hub yet" : "No matching tasks"}
+                    </strong>
+                    <p>
+                      {tasks.length === 0
+                        ? "Create a task or wait for the orchestrator to publish work to the bus."
+                        : "Try clearing the search query or switching back to All tasks."}
+                    </p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div
+                className={`graph-viewport ${isPanning ? "panning" : ""}`}
+                ref={viewport}
+                onPointerDown={startPan}
+                onPointerMove={movePan}
+                onPointerUp={stopPan}
+                onPointerCancel={stopPan}
+                onLostPointerCapture={stopPan}
+                onWheel={handleWheel}
+              >
+                {filteredTasks.length ? (
+                  <div
+                    className="graph-size"
+                    style={{
+                      width: contentBounds.width * scale,
+                      height: contentBounds.height * scale,
+                    }}
+                  >
+                    <section
+                      aria-label="Task graph canvas"
+                      className="world"
+                      style={{
+                        width: contentBounds.width,
+                        height: contentBounds.height,
+                        transform: `scale(${scale})`,
+                      }}
+                    >
+                      <Connections
+                        tasks={filteredTasks}
+                        width={contentBounds.width}
+                        height={contentBounds.height}
+                      />
+                      {showReferenceLabels && (
+                        <>
+                          <span className="edge-label dependency-met">dependency satisfied</span>
+                          <span className="edge-label scope-conflict">overlapping scope</span>
+                          {findTask("SOM-145") && (
+                            <span className="edge-label dependency-required">required before dispatch</span>
+                          )}
+                        </>
+                      )}
+                      {filteredTasks.map((task) => (
+                        <TaskNode
+                          key={task.id}
+                          task={task}
+                          selected={active?.id === task.id}
+                          onSelect={() => onSelect(active?.id === task.id ? null : task.id)}
+                        />
+                      ))}
+                    </section>
+                  </div>
+                ) : (
+                  <div className="empty-graph-card">
+                    <strong>
+                      {tasks.length === 0
+                        ? "No tasks on this hub yet"
+                        : visibility === "attention"
+                          ? "All clear — nothing needs attention"
+                          : "No tasks match these filters"}
+                    </strong>
+                    <p>
+                      {tasks.length === 0
+                        ? "Tasks published on the hub appear here as an interactive dependency graph."
+                        : visibility === "attention"
+                          ? "No scope conflicts or stuck tasks right now."
+                          : "Adjust your search or scope filter to inspect other work."}
+                    </p>
+                    {isFiltered && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => {
+                          setVisibility("all");
+                          onNeedsAttentionChange(false);
+                          onScopeChange("");
+                        }}
+                      >
+                        Show all tasks ({tasks.length})
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {viewMode === "graph" && filteredTasks.length > 0 && (
+              <div className="graph-tools" aria-label="Canvas controls">
+                <Button
+                  variant="icon"
+                  size="sm"
+                  aria-label="Zoom in"
+                  disabled={zoom >= 1.5}
+                  onClick={() => setZoom((z) => Number(Math.min(1.5, z + 0.15).toFixed(2)))}
+                >
+                  <Plus size={15} />
+                </Button>
+                <Button
+                  variant="icon"
+                  size="sm"
+                  aria-label="Zoom out"
+                  disabled={zoom <= 0.4}
+                  onClick={() => setZoom((z) => Number(Math.max(0.4, z - 0.15).toFixed(2)))}
+                >
+                  <Minus size={15} />
+                </Button>
+                <Button variant="icon" size="sm" aria-label="Fit graph" onClick={fitGraph}>
+                  <ArrowsOut size={15} />
+                </Button>
+                <Button
+                  variant="icon"
+                  size="sm"
+                  aria-label="Center selected task"
+                  disabled={!active}
+                  onClick={() =>
+                    viewport.current?.scrollTo({
+                      left: Math.max(0, (active!.x + cardWidth / 2) * scale - viewSize.width / 2),
+                      top: Math.max(0, (active!.y + cardHeight / 2) * scale - viewSize.height / 2),
+                      behavior: "smooth",
+                    })
+                  }
+                >
+                  <Crosshair size={15} />
+                </Button>
+                <output className="graph-zoom-readout" aria-label="Canvas zoom">
+                  {Math.round(scale * 100)}%
+                </output>
+              </div>
+            )}
+
+            <button
+              type="button"
+              className={`presence ${runningAgentCount > 0 ? "is-active" : ""}`}
+              onClick={onOpenContributors}
+              aria-label={`Open participant network. ${runningAgentCount} agents working.`}
             >
-              <Connections tasks={filteredTasks} width={graphWidth} height={graphHeight} />
-              {showReferenceLabels && (
-                <>
-                  <span className="edge-label dependency-met">dependency satisfied</span>
-                  <span className="edge-label scope-conflict">overlapping scope</span>
-                  {findTask("SOM-145") && (
-                    <span className="edge-label dependency-required">required before dispatch</span>
-                  )}
-                </>
+              {presenceProviders.length > 0 && (
+                <span className="presence-providers" aria-hidden="true">
+                  {presenceProviders}
+                </span>
               )}
-              {filteredTasks.map((task) => (
-                <TaskNode
-                  key={task.id}
-                  task={task}
-                  selected={active?.id === task.id}
-                  onSelect={() => onSelect(task.id)}
-                />
-              ))}
-              {!filteredTasks.length && (
-                <div className="empty-graph">
-                  {tasks.length === 0
-                    ? "No tasks on this hub yet."
-                    : "No tasks match these filters."}
-                </div>
-              )}
-              {active && (
-                <TaskInspector
-                  task={active}
-                  hasSubmission={submissions.some((s) => s.task === active.id)}
-                  onSelect={onSelect}
-                  onMessages={onMessages}
-                  onInspectBrief={onInspectBrief}
-                  onOpenSubmission={onOpenSubmission}
-                  onOpenLoop={onOpenLoop}
-                />
-              )}
-            </section>
+              <span className="presence-count">
+                <i /> {runningAgentCount} {runningAgentCount === 1 ? "agent" : "agents"} working
+              </span>
+            </button>
           </div>
 
-          <div className="graph-tools" aria-label="Canvas controls">
-            <Button
-              variant="icon"
-              aria-label="Zoom in"
-              disabled={zoom >= 1.5}
-              onClick={() => setZoom(Math.min(1.5, zoom + 0.15))}
-            >
-              <Plus size={17} />
-            </Button>
-            <Button
-              variant="icon"
-              aria-label="Zoom out"
-              disabled={zoom <= 0.35}
-              onClick={() => setZoom(Math.max(0.35, zoom - 0.15))}
-            >
-              <Minus size={17} />
-            </Button>
-            <Button
-              variant="icon"
-              aria-label="Fit graph"
-              onClick={() => {
-                setZoom(Math.min(1, width / (graphWidth * baseScale)));
-                viewport.current?.scrollTo(0, 0);
-              }}
-            >
-              <ArrowsOut size={17} />
-            </Button>
-            <Button
-              variant="icon"
-              aria-label="Center selected task"
-              disabled={!active}
-              onClick={() =>
-                viewport.current?.scrollTo({
-                  left: Math.max(0, (active!.x + cardWidth / 2) * scale - width / 2),
-                  top: Math.max(0, active!.y * scale - 120),
-                  behavior: "smooth",
-                })
-              }
-            >
-              <Crosshair size={17} />
-            </Button>
-          </div>
+          {active && (
+            <div className="graph-inspector-pane">
+              <TaskInspector
+                task={active}
+                hasSubmission={submissions.some((s) => s.task === active.id)}
+                onSelect={onSelect}
+                onMessages={onMessages}
+                onInspectBrief={onInspectBrief}
+                onOpenSubmission={onOpenSubmission}
+                onOpenLoop={onOpenLoop}
+              />
+            </div>
+          )}
         </div>
-
-        <button
-          type="button"
-          className="presence"
-          onClick={onOpenContributors}
-          aria-label={`Open participant network. ${runningAgentCount} agents working.`}
-        >
-          <span className="presence-providers" aria-hidden="true">
-            {presenceProviders}
-          </span>
-          <span className="presence-count">
-            <i /> {runningAgentCount} agents working
-          </span>
-        </button>
       </div>
 
       <div className="activity">
         {activityOpen && (
           <div className="activity-details">
             {recentActivity.length === 0 ? (
-              <p>No recent hub events.</p>
+              <p className="activity-empty">No recent hub events.</p>
             ) : (
               recentActivity.map((msg) => {
-                const ref = msg.refs.find((r) => /^SOM-|^T-/.test(r)) ?? msg.refs[0] ?? msg.topic;
+                const parsed = parseMessageBody(msg);
+                const ref =
+                  msg.refs.find((r) => !r.startsWith("state:") && (/^SOM-|^T-/.test(r) || tasks.some((t) => t.id === r))) ??
+                  msg.topic;
                 const isTask = tasks.some((t) => t.id === ref) || ref === "SOM-138";
                 return (
-                  <p key={msg.id}>
-                    <span className="mono">{msg.at}</span> {msg.body}{" "}
+                  <div key={msg.id} className="activity-event-row">
+                    <span className="mono activity-time">{msg.at}</span>
+                    <StatusLabel
+                      variant="chip"
+                      tone={parsed.alertState === "acked" || parsed.alertState === "closed" ? "muted" : messageKindTone(msg.kind)}
+                    >
+                      {parsed.alertCode ?? msg.kind.replaceAll("_", " ")}
+                    </StatusLabel>
+                    <span className="activity-event-text">{parsed.title}</span>
+                    {parsed.alertState && (
+                      <StatusLabel
+                        variant="chip"
+                        tone={parsed.alertState === "open" ? "warning" : "muted"}
+                      >
+                        {parsed.alertState}
+                      </StatusLabel>
+                    )}
                     <button
                       type="button"
+                      className="activity-ref-btn mono"
                       onClick={() => (isTask ? onOpenTask(ref) : onMessages(msg.topic))}
                     >
                       {ref}
                     </button>
-                  </p>
+                  </div>
                 );
               })
             )}
@@ -606,12 +858,20 @@ export default function WorkGraphView({
             }
           >
             <i />
-            {latestMessage ? (
+            {latestMessage && latestParsed ? (
               <>
-                <u>{latestRef}</u> · {latestMessage.body} · {latestMessage.at}
+                <StatusLabel
+                  variant="chip"
+                  tone={latestParsed.alertState === "acked" ? "muted" : messageKindTone(latestMessage.kind)}
+                >
+                  {latestParsed.alertCode ?? latestMessage.kind}
+                </StatusLabel>
+                <span className="activity-latest-text">{latestParsed.title}</span>
+                {latestRef && <span className="activity-latest-ref mono">{latestRef}</span>}
+                <span className="activity-latest-time mono">{latestMessage.at}</span>
               </>
             ) : (
-              "No recent events"
+              <span>No recent events</span>
             )}
           </button>
           <div className="activity-meta-badges">

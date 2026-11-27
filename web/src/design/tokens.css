@@ -6,96 +6,102 @@
   --font-sans: "Geist Variable", "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono Variable", "Geist Mono", "SFMono-Regular", ui-monospace, monospace;
 
-  --text-2xs: 10px;
-  --text-xs: 11px;
-  --text-sm: 12px;
-  --text-md: 13px;
+  --text-2xs: 10.5px;
+  --text-xs: 11.5px;
+  --text-sm: 12.5px;
+  --text-md: 13.5px;
   --text-base: 14px;
   --text-lg: 15px;
-  --text-xl: 17px;
-  --text-2xl: 23px;
-  --text-heading: 24px;
+  --text-xl: 16.5px;
+  --text-2xl: 21px;
+  --text-heading: 22px;
 
-  --tracking-tight: -0.04em;
-  --tracking-title: -0.7px;
-  --tracking-card: -0.3px;
+  --tracking-tight: -0.03em;
+  --tracking-title: -0.025em;
+  --tracking-card: -0.015em;
 
-  /* Plum Canvas & Surfaces */
-  --color-bg: #14121b;
-  --color-canvas: #13111a;
-  --color-canvas-dot: #332b40;
-  --color-panel: #1b1822;
-  --color-panel-alt: #1b1623;
-  --color-surface: #211c29;
-  --color-surface-card: #1d1824;
-  --color-surface-card-hover: #241d2b;
-  --color-surface-card-selected: #251e33;
-  --color-surface-inspector: #221b28;
-  --color-surface-input: #191620;
-  --color-surface-chip: #383043;
-  --color-surface-edge-label: #17131f;
-  --color-surface-port: #17141e;
-  --color-surface-avatar: #392a49;
-  --color-surface-presence: #16121dbb;
-  --color-surface-hover-wash: #ffffff0b;
-  --color-surface-icon-hover: #ffffff11;
-  --color-backdrop: #0e0b13bb;
+  /* Obsidian-Plum Surfaces (high-craft depth hierarchy) */
+  --color-bg: #100e16;
+  --color-canvas: #0e0c14;
+  --color-canvas-dot: #2b2438;
+  --color-panel: #16131e;
+  --color-panel-alt: #14111c;
+  --color-surface: #1d1927;
+  --color-surface-card: #181422;
+  --color-surface-card-hover: #1f1a2b;
+  --color-surface-card-selected: #231c33;
+  --color-surface-inspector: #191523;
+  --color-surface-input: #14111b;
+  --color-surface-chip: #292236;
+  --color-surface-edge-label: #15111e;
+  --color-surface-port: #15121d;
+  --color-surface-avatar: #312442;
+  --color-surface-presence: #14111ce0;
+  --color-surface-hover-wash: #ffffff0a;
+  --color-surface-icon-hover: #ffffff12;
+  --color-backdrop: #09070ec4;
 
   /* Lines & Borders */
-  --color-line: #3d3546;
-  --color-line-subtle: #342c3c;
-  --color-line-header-sub: #332c3e;
-  --color-line-card: #4b4053;
-  --color-line-card-hover: #84758e;
-  --color-line-control: #52465d;
-  --color-line-divider: #504458;
-  --color-line-toggle: #655571;
-  --color-line-edge: #928aa5;
-  --color-line-edge-legend: #9f95ad;
+  --color-line: #2d2638;
+  --color-line-subtle: #241e2e;
+  --color-line-header-sub: #262030;
+  --color-line-card: #383047;
+  --color-line-card-hover: #5c4f73;
+  --color-line-control: #3e354d;
+  --color-line-divider: #352d42;
+  --color-line-toggle: #473d57;
+  --color-line-edge: #7b7291;
+  --color-line-edge-legend: #8f85a6;
   --color-line-conflict: #b99354;
-  --color-line-segments: #40364b;
-  --color-line-tools: #463c50;
-  --color-line-tools-inner: #3b3343;
+  --color-line-segments: #332b40;
+  --color-line-tools: #3a3147;
+  --color-line-tools-inner: #2e2739;
 
   /* Text */
-  --color-text: #f2edf3;
-  --color-text-secondary: #d0c5d9;
-  --color-text-muted: #b9b0c3;
-  --color-text-id: #c9bfd0;
-  --color-text-subtle: #92879d;
-  --color-text-chip: #f3e9f5;
-  --color-text-legend: #dbd2e4;
-  --color-text-activity: #ded3e5;
+  --color-text: #f3eff7;
+  --color-text-secondary: #cdc3d8;
+  --color-text-muted: #9e94ad;
+  --color-text-id: #b4a9c4;
+  --color-text-subtle: #786e87;
+  --color-text-chip: #ebe2f5;
+  --color-text-legend: #c8bed6;
+  --color-text-activity: #ddd4e8;
   --color-text-avatar: #e4d7ed;
 
   /* Semantic Colors */
-  --color-accent: #cdb4ff;
-  --color-accent-hover: #dfccff;
-  --color-accent-ink: #211535;
-  --color-accent-soft: #36284a;
-  --color-accent-soft-text: #eee2ff;
-  --color-accent-line: #987fbe;
-  --color-accent-border: #d8c3ff;
+  --color-accent: #c7abff;
+  --color-accent-hover: #d8c4ff;
+  --color-accent-ink: #1b112d;
+  --color-accent-soft: #2e2245;
+  --color-accent-soft-text: #ebe0ff;
+  --color-accent-line: #876db3;
+  --color-accent-border: #d2baff;
 
-  --color-warning: #f1c46e;
-  --color-warning-edge: #eabc67;
-  --color-warning-soft: #3b301c;
-  --color-warning-line: #b99354;
+  --color-warning: #f0c065;
+  --color-warning-edge: #e5b357;
+  --color-warning-soft: #312716;
+  --color-warning-line: #9e7b3e;
 
-  --color-good: #79d8a5;
-  --color-good-soft: #1b3428;
-  --color-good-line: #418763;
+  --color-good: #6fd69e;
+  --color-good-soft: #142c21;
+  --color-good-line: #347855;
 
-  --color-danger: #f08c9d;
-  --color-danger-soft: #3b1f28;
-  --color-danger-line: #9b4b5c;
+  --color-danger: #f08294;
+  --color-danger-soft: #331922;
+  --color-danger-line: #8f4252;
 
-  /* Contributor avatar accents */
-  --color-person-leo: #93cbb6;
-  --color-person-nora: #b5a6e0;
-  --color-person-sam: #9caacf;
+  /* Contributor avatar palette */
+  --color-person-leo: #7ec9ad;
+  --color-person-nora: #b49ef0;
+  --color-person-sam: #8fa6d9;
+  --color-person-p0: #87c7b0;
+  --color-person-p1: #bfa3f0;
+  --color-person-p2: #8ab0e0;
+  --color-person-p3: #e3b378;
+  --color-person-p4: #e091a8;
+  --color-person-p5: #7dc4cf;
 
-  /* Legacy alias bridge for uniform consumption */
+  /* Legacy alias bridge */
   --bg: var(--color-bg);
   --panel: var(--color-panel);
   --surface: var(--color-surface);
@@ -126,19 +132,25 @@
   --radius-sm: 6px;
   --radius-control: 7px;
   --radius-md: 8px;
-  --radius-panel: 9px;
-  --radius-lg: 11px;
+  --radius-panel: 10px;
+  --radius-lg: 12px;
   --radius-card: 12px;
   --radius-pill: 999px;
 
+  /* Motion (restrained Swiss/Linear precision) */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 140ms;
+  --dur-med: 200ms;
+
   /* Focus */
   --focus-ring: 2px solid var(--color-accent);
-  --focus-offset: 3px;
+  --focus-offset: 2px;
   --focus-offset-tight: 2px;
 
   /* Elevation */
-  --shadow-card: 0 6px 18px #0c0a1140;
-  --shadow-inspector: 0 12px 32px #08060c60;
-  --shadow-menu: 0 12px 42px #0008;
-  --shadow-dialog: 0 14px 60px #0009;
+  --shadow-card: 0 4px 16px #07050c55, inset 0 1px 0 #ffffff08;
+  --shadow-card-hover: 0 8px 24px #07050c7a, inset 0 1px 0 #ffffff0d;
+  --shadow-inspector: 0 14px 36px #06040b80;
+  --shadow-menu: 0 14px 40px #000a, inset 0 1px 0 #ffffff0a;
+  --shadow-dialog: 0 20px 64px #000b, inset 0 1px 0 #ffffff0a;
 }

@@ -1,5 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, CheckCircle, Circle, Clock, GitBranch, GitCommit, Scales, ShieldCheck, WarningCircle, X } from "@phosphor-icons/react";
+import {
+  ArrowRight,
+  Check,
+  CheckCircle,
+  Circle,
+  Clock,
+  Copy,
+  GitBranch,
+  GitCommit,
+  Scales,
+  ShieldCheck,
+  Stack,
+  WarningCircle,
+  X,
+} from "@phosphor-icons/react";
+import { formatBatchLabel, splitRefName } from "../api/format";
 import type { BatchItem, LandingItem, ReviewItem, SubmissionItem } from "../api/types";
 import {
   Button,
@@ -57,6 +72,18 @@ function SubmissionTrace({ submission }: { submission: SubmissionItem }) {
   );
 }
 
+function initialSectionFor(
+  submissions: SubmissionItem[],
+  reviews: ReviewItem[],
+  landing: LandingItem[],
+  initialTaskFilter: string | null,
+): PipelineSection {
+  if (initialTaskFilter || submissions.length > 0) return "submissions";
+  if (reviews.length > 0) return "reviews";
+  if (landing.length > 0) return "landing";
+  return "submissions";
+}
+
 export default function PipelineView({
   submissions,
   reviews,
@@ -76,15 +103,21 @@ export default function PipelineView({
   onOpenTask: (taskId: string) => void;
   onMessages: (topic: string) => void;
 }) {
-  const [section, setSection] = useState<PipelineSection>("submissions");
-  const pageSize = 20;
+  const [section, setSection] = useState<PipelineSection>(() =>
+    initialSectionFor(submissions, reviews, landing, initialTaskFilter),
+  );
+  const pageSize = 24;
   const [visibleLimit, setVisibleLimit] = useState(pageSize);
   const [stateFilter, setStateFilter] = useState("");
   const [stageFilter, setStageFilter] = useState<number | null>(null);
+  const [landingQuery, setLandingQuery] = useState("");
+  const [landingStateFilter, setLandingStateFilter] = useState("");
+  const [copiedSha, setCopiedSha] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(
     () =>
       submissions.find((s) => s.task === initialTaskFilter)?.sha256 ??
       submissions[0]?.sha256 ??
+      landing[0]?.refName ??
       null,
   );
 
@@ -95,6 +128,10 @@ export default function PipelineView({
     setStateFilter("");
     setSelectedKey(null);
   }, [initialTaskFilter]);
+
+  useEffect(() => {
+    setCopiedSha(false);
+  }, [selectedKey]);
 
   const visibleSubmissions = useMemo(
     () =>
@@ -107,6 +144,31 @@ export default function PipelineView({
     [initialTaskFilter, stageFilter, stateFilter, submissions],
   );
 
+  const visibleLanding = useMemo(() => {
+    const q = landingQuery.trim().toLowerCase();
+    return landing.filter(
+      (item) =>
+        (!landingStateFilter || item.state === landingStateFilter) &&
+        (!q ||
+          [item.refName, item.sha, item.taskId, item.batchId ?? ""].some((v) =>
+            v.toLowerCase().includes(q),
+          )),
+    );
+  }, [landing, landingQuery, landingStateFilter]);
+
+  const landingStats = useMemo(() => {
+    const landed = landing.filter((l) => l.state === "landed").length;
+    const failed = landing.filter((l) => Boolean(l.failStep) || l.state.includes("fail")).length;
+    const queued = landing.length - landed - failed;
+    const uniqueBatches = new Set(landing.map((l) => l.batchId).filter(Boolean)).size;
+    return { landed, queued, failed, uniqueBatches };
+  }, [landing]);
+
+  const landingStates = useMemo(
+    () => [...new Set(landing.map((l) => l.state))].sort(),
+    [landing],
+  );
+
   const activeSubmission =
     section === "submissions"
       ? visibleSubmissions.find((s) => s.sha256 === selectedKey) ?? visibleSubmissions[0]
@@ -117,22 +179,38 @@ export default function PipelineView({
       : undefined;
   const activeLanding =
     section === "landing"
-      ? landing.find((l) => l.refName === selectedKey) ?? landing[0]
+      ? visibleLanding.find((l) => `${l.refName}@${l.sha}` === selectedKey || l.refName === selectedKey) ??
+        visibleLanding[0]
       : undefined;
 
   const hasDetail = Boolean(activeSubmission || activeReview || activeLanding);
-  const entryCount = section === "submissions" ? visibleSubmissions.length : section === "reviews" ? reviews.length : landing.length;
+  const entryCount =
+    section === "submissions"
+      ? visibleSubmissions.length
+      : section === "reviews"
+        ? reviews.length
+        : visibleLanding.length;
   const submissionStates = useMemo(
     () => [...new Set(submissions.map((s) => s.state))].sort(),
     [submissions],
   );
+
+  async function copySha(sha: string) {
+    try {
+      await navigator.clipboard.writeText(sha);
+      setCopiedSha(true);
+      window.setTimeout(() => setCopiedSha(false), 1800);
+    } catch {
+      // Ignore clipboard failures.
+    }
+  }
 
   return (
     <section className="pl-view" aria-labelledby="pl-title">
       <div className="pl-header">
         <div>
           <h1 id="pl-title">Delivery pipeline</h1>
-          <p>Follow submissions from intake to landing.</p>
+          <p>Follow submissions, independent reviews, and landed commits from intake to main.</p>
         </div>
         <SegmentedControl
           ariaLabel="Pipeline stage"
@@ -155,10 +233,23 @@ export default function PipelineView({
           {deliveryStages.map(({ label, description, icon: Icon, states }, index) => {
             const count = submissions.filter(({ state }) => (states as readonly string[]).includes(state)).length;
             return (
-              <button key={label} type="button" aria-pressed={stageFilter === index}
-                onClick={() => { setStageFilter(stageFilter === index ? null : index); setStateFilter(""); setVisibleLimit(pageSize); }}>
-                <span className="pl-stage-icon"><Icon size={17} aria-hidden="true" /></span>
-                <span><strong>{label}</strong><small>{description}</small></span>
+              <button
+                key={label}
+                type="button"
+                aria-pressed={stageFilter === index}
+                onClick={() => {
+                  setStageFilter(stageFilter === index ? null : index);
+                  setStateFilter("");
+                  setVisibleLimit(pageSize);
+                }}
+              >
+                <span className="pl-stage-icon">
+                  <Icon size={17} aria-hidden="true" />
+                </span>
+                <span>
+                  <strong>{label}</strong>
+                  <small>{description}</small>
+                </span>
                 <span className="pl-stage-total mono">{count}</span>
               </button>
             );
@@ -166,10 +257,74 @@ export default function PipelineView({
         </div>
       )}
 
+      {section === "landing" && landing.length > 0 && (
+        <div className="pl-stage-strip" role="group" aria-label="Landing summary">
+          <button
+            type="button"
+            aria-pressed={landingStateFilter === "landed"}
+            onClick={() => setLandingStateFilter(landingStateFilter === "landed" ? "" : "landed")}
+          >
+            <span className="pl-stage-icon is-good">
+              <CheckCircle size={17} aria-hidden="true" />
+            </span>
+            <span>
+              <strong>Landed</strong>
+              <small>Merged to main</small>
+            </span>
+            <span className="pl-stage-total mono">{landingStats.landed}</span>
+          </button>
+          <button
+            type="button"
+            aria-pressed={landingStateFilter === "queued"}
+            onClick={() => setLandingStateFilter(landingStateFilter === "queued" ? "" : "queued")}
+          >
+            <span className="pl-stage-icon">
+              <Clock size={17} aria-hidden="true" />
+            </span>
+            <span>
+              <strong>In flight</strong>
+              <small>Queued or verifying</small>
+            </span>
+            <span className="pl-stage-total mono">{landingStats.queued}</span>
+          </button>
+          <button
+            type="button"
+            aria-pressed={landingStateFilter === "failed"}
+            onClick={() => setLandingStateFilter(landingStateFilter === "failed" ? "" : "failed")}
+          >
+            <span className="pl-stage-icon is-danger">
+              <WarningCircle size={17} aria-hidden="true" />
+            </span>
+            <span>
+              <strong>Failed</strong>
+              <small>Needs attention</small>
+            </span>
+            <span className="pl-stage-total mono">{landingStats.failed}</span>
+          </button>
+          <div className="pl-stage-stat">
+            <span className="pl-stage-icon">
+              <Stack size={17} aria-hidden="true" />
+            </span>
+            <span>
+              <strong>Batches</strong>
+              <small>Verification runs</small>
+            </span>
+            <span className="pl-stage-total mono">{landingStats.uniqueBatches || batches.length}</span>
+          </div>
+        </div>
+      )}
+
       {section === "submissions" && (
         <FilterBar ariaLabel="Submission filters">
           <FilterField label="State">
-            <select value={stateFilter} onChange={(e) => { setStateFilter(e.target.value); setStageFilter(null); setVisibleLimit(pageSize); }}>
+            <select
+              value={stateFilter}
+              onChange={(e) => {
+                setStateFilter(e.target.value);
+                setStageFilter(null);
+                setVisibleLimit(pageSize);
+              }}
+            >
               <option value="">All states</option>
               {submissionStates.map((st) => (
                 <option key={st} value={st}>
@@ -199,6 +354,51 @@ export default function PipelineView({
         </FilterBar>
       )}
 
+      {section === "landing" && landing.length > 0 && (
+        <FilterBar ariaLabel="Landing filters">
+          <FilterField label="Search">
+            <input
+              value={landingQuery}
+              onChange={(e) => {
+                setLandingQuery(e.target.value);
+                setVisibleLimit(pageSize);
+              }}
+              placeholder="Branch, commit SHA, or batch"
+            />
+          </FilterField>
+          {landingStates.length > 1 && (
+            <FilterField label="State">
+              <select
+                value={landingStateFilter}
+                onChange={(e) => {
+                  setLandingStateFilter(e.target.value);
+                  setVisibleLimit(pageSize);
+                }}
+              >
+                <option value="">All states</option>
+                {landingStates.map((st) => (
+                  <option key={st} value={st}>
+                    {st.replaceAll("_", " ")}
+                  </option>
+                ))}
+              </select>
+            </FilterField>
+          )}
+          {(landingQuery || landingStateFilter) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setLandingQuery("");
+                setLandingStateFilter("");
+              }}
+            >
+              Clear filters
+            </Button>
+          )}
+        </FilterBar>
+      )}
+
       <div className="pl-content" data-detail={hasDetail}>
         <div className="pl-list-panel">
           <div className="pl-list-head">
@@ -210,17 +410,26 @@ export default function PipelineView({
                   : "Landing queue & batches"}
             </span>
             <StatusLabel variant="chip" tone="muted">
-              {section === "submissions"
-                ? visibleSubmissions.length
-                : section === "reviews"
-                  ? reviews.length
-                  : landing.length}
+              {entryCount}
             </StatusLabel>
           </div>
 
           {section === "submissions" &&
             (visibleSubmissions.length === 0 ? (
-              <div className="pl-empty">No submissions match the selected filters.</div>
+              <div className="pl-empty">
+                <ShieldCheck size={24} />
+                <strong>No active submissions</strong>
+                <p>
+                  {landing.length > 0
+                    ? `No bundles are waiting in intake right now. ${landing.length} changes are recorded in Landing.`
+                    : "Bundles uploaded by contributors appear here for gate, verify, and review checks."}
+                </p>
+                {landing.length > 0 && (
+                  <Button variant="secondary" size="sm" onClick={() => setSection("landing")}>
+                    View landing history ({landing.length}) <ArrowRight size={14} />
+                  </Button>
+                )}
+              </div>
             ) : (
               <ol className="pl-rows">
                 {visibleSubmissions.slice(0, visibleLimit).map((sub) => {
@@ -246,7 +455,12 @@ export default function PipelineView({
                             <span>risk: {sub.risk}</span>
                           </span>
                         </span>
-                        <div className="pl-stages" aria-label={stages.map((state, index) => `${deliveryStages[index].label}: ${stageStateLabels[state]}`).join(", ")}>
+                        <div
+                          className="pl-stages"
+                          aria-label={stages
+                            .map((state, index) => `${deliveryStages[index].label}: ${stageStateLabels[state]}`)
+                            .join(", ")}
+                        >
                           {stages.map((st, idx) => (
                             <span key={idx} className={`pl-stage-dot is-${st}`} />
                           ))}
@@ -263,7 +477,11 @@ export default function PipelineView({
 
           {section === "reviews" &&
             (reviews.length === 0 ? (
-              <div className="pl-empty">No active or recent review assignments.</div>
+              <div className="pl-empty">
+                <Scales size={24} />
+                <strong>No active review assignments</strong>
+                <p>Independent reviewer and audit verdicts appear here once submissions enter review.</p>
+              </div>
             ) : (
               <ol className="pl-rows">
                 {reviews.slice(0, visibleLimit).map((rev) => {
@@ -310,43 +528,72 @@ export default function PipelineView({
             ))}
 
           {section === "landing" &&
-            (landing.length === 0 ? (
-              <div className="pl-empty">Landing queue is empty.</div>
+            (visibleLanding.length === 0 ? (
+              <div className="pl-empty">
+                <GitCommit size={24} />
+                <strong>{landing.length === 0 ? "Landing queue is empty" : "No matching commits"}</strong>
+                <p>
+                  {landing.length === 0
+                    ? "Verified branches queued for batch landing appear here."
+                    : "Try clearing the search query or state filter."}
+                </p>
+              </div>
             ) : (
               <ol className="pl-rows">
-                {landing.slice(0, visibleLimit).map((item) => (
-                  <li key={item.refName}>
-                    <button
-                      type="button"
-                      className="pl-row"
-                      aria-pressed={activeLanding?.refName === item.refName}
-                      onClick={() => setSelectedKey(item.refName)}
-                    >
-                      <span className="mono">{item.taskId || item.sha}</span>
-                      <span className="pl-row-main">
-                        <span className="pl-row-title">{item.refName}</span>
-                        <span className="pl-row-meta">
-                          <code>{item.sha}</code>
-                          <span>·</span>
-                          <span>priority: {item.priority}</span>
-                          {item.batchId && <span>· {item.batchId}</span>}
-                        </span>
-                      </span>
-                      <span className="mono">{item.enqueuedAt}</span>
-                      <StatusLabel
-                        variant="pill"
-                        tone={item.state === "landed" ? "good" : item.failStep ? "danger" : "warning"}
+                {visibleLanding.slice(0, visibleLimit).map((item) => {
+                  const rowKey = `${item.refName}@${item.sha}`;
+                  const refParts = splitRefName(item.refName);
+                  const batchInfo = item.batchId ? formatBatchLabel(item.batchId) : null;
+                  const metaItems: string[] = [];
+                  if (item.taskId && item.sha) metaItems.push(item.sha);
+                  if (item.priority) metaItems.push(`priority: ${item.priority}`);
+                  if (batchInfo) metaItems.push(batchInfo.label);
+                  return (
+                    <li key={rowKey}>
+                      <button
+                        type="button"
+                        className="pl-row"
+                        aria-pressed={activeLanding?.refName === item.refName && activeLanding?.sha === item.sha}
+                        onClick={() => setSelectedKey(rowKey)}
                       >
-                        {item.state.replaceAll("_", " ")}
-                      </StatusLabel>
-                    </button>
-                  </li>
-                ))}
+                        <span className="mono pl-row-id">{item.taskId || item.sha}</span>
+                        <span className="pl-row-main">
+                          <span className="pl-row-title" title={item.refName}>
+                            {refParts.prefix && <span className="pl-ref-prefix">{refParts.prefix}</span>}
+                            {refParts.name}
+                          </span>
+                          {metaItems.length > 0 && (
+                            <span className="pl-row-meta">
+                              {metaItems.map((piece, idx) => (
+                                <span key={idx}>
+                                  {idx > 0 ? "· " : ""}
+                                  {piece}
+                                </span>
+                              ))}
+                            </span>
+                          )}
+                        </span>
+                        <span className="mono pl-row-time">{item.enqueuedAt}</span>
+                        <StatusLabel
+                          variant="pill"
+                          tone={item.state === "landed" ? "good" : item.failStep ? "danger" : "warning"}
+                        >
+                          {item.state.replaceAll("_", " ")}
+                        </StatusLabel>
+                      </button>
+                    </li>
+                  );
+                })}
               </ol>
             ))}
-          {entryCount > visibleLimit && <div className="pl-list-more">
-            <Button size="sm" onClick={() => setVisibleLimit(visibleLimit + pageSize)}>Show more</Button>
-          </div>}
+
+          {entryCount > visibleLimit && (
+            <div className="pl-list-more">
+              <Button size="sm" onClick={() => setVisibleLimit(visibleLimit + pageSize)}>
+                Show more ({entryCount - visibleLimit} remaining)
+              </Button>
+            </div>
+          )}
         </div>
 
         {activeSubmission && (
@@ -441,50 +688,88 @@ export default function PipelineView({
           </InspectorPanel>
         )}
 
-        {activeLanding && (
-          <InspectorPanel
-            mode="docked"
-            ariaLabel="Landing detail"
-            eyebrow={
-              <>
-                <GitCommit size={15} />
-                <span className="mono">{activeLanding.taskId || activeLanding.sha}</span>
-              </>
-            }
-            title={activeLanding.refName}
-          >
-            <DefinitionList
-              items={[
-                { label: "State", value: activeLanding.state.replaceAll("_", " ") },
-                { label: "Commit", value: <CodeChip small>{activeLanding.sha}</CodeChip> },
-                { label: "Priority", value: activeLanding.priority },
-                { label: "Enqueued", value: <span className="mono">{activeLanding.enqueuedAt}</span> },
-                ...(activeLanding.approvedBy ? [{ label: "Approved by", value: activeLanding.approvedBy }] : []),
-                ...(activeLanding.failStep ? [{ label: "Failed step", value: activeLanding.failStep }] : []),
-                ...(activeLanding.batchId
-                  ? [
-                      {
-                        label: "Batch",
-                        value:
-                          batches.find((b) => b.batchId === activeLanding.batchId)?.note ??
-                          activeLanding.batchId,
-                      },
-                    ]
-                  : []),
-              ]}
-            />
-            <div className="ui-inspector-actions ui-inspector-actions-docked">
-              {activeLanding.taskId && (
-                <Button variant="link" onClick={() => onOpenTask(activeLanding.taskId)}>
-                  Open task <ArrowRight size={14} />
-                </Button>
+        {activeLanding && (() => {
+          const batch = activeLanding.batchId
+            ? batches.find((b) => b.batchId === activeLanding.batchId)
+            : undefined;
+          const batchInfo = activeLanding.batchId ? formatBatchLabel(activeLanding.batchId) : undefined;
+          const refParts = splitRefName(activeLanding.refName);
+          return (
+            <InspectorPanel
+              mode="docked"
+              ariaLabel="Landing detail"
+              eyebrow={
+                <>
+                  <GitCommit size={15} />
+                  <span className="mono">{activeLanding.taskId || activeLanding.sha}</span>
+                </>
+              }
+              title={refParts.name}
+            >
+              {refParts.prefix && (
+                <p className="pl-detail-ref mono">{activeLanding.refName}</p>
               )}
-              <Button variant="link" onClick={() => onMessages("land/*")}>
-                Open landing events <ArrowRight size={14} />
-              </Button>
-            </div>
-          </InspectorPanel>
-        )}
+              <DefinitionList
+                items={[
+                  {
+                    label: "State",
+                    value: (
+                      <StatusLabel
+                        variant="pill"
+                        tone={activeLanding.state === "landed" ? "good" : activeLanding.failStep ? "danger" : "warning"}
+                      >
+                        {activeLanding.state.replaceAll("_", " ")}
+                      </StatusLabel>
+                    ),
+                  },
+                  {
+                    label: "Commit",
+                    value: (
+                      <span className="pl-copy-row">
+                        <CodeChip small>{activeLanding.sha}</CodeChip>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => copySha(activeLanding.sha)}
+                          aria-label="Copy commit SHA"
+                        >
+                          {copiedSha ? <Check size={13} /> : <Copy size={13} />}
+                        </Button>
+                      </span>
+                    ),
+                  },
+                  ...(activeLanding.priority ? [{ label: "Priority", value: activeLanding.priority }] : []),
+                  { label: "Enqueued", value: <span className="mono">{activeLanding.enqueuedAt}</span> },
+                  ...(activeLanding.approvedBy ? [{ label: "Approved by", value: activeLanding.approvedBy }] : []),
+                  ...(activeLanding.failStep ? [{ label: "Failed step", value: activeLanding.failStep }] : []),
+                  ...(activeLanding.batchId
+                    ? [
+                        {
+                          label: "Batch",
+                          value: (
+                            <span title={activeLanding.batchId}>
+                              {batchInfo?.label ?? activeLanding.batchId}
+                              {batch?.note ? ` · ${batch.note}` : ""}
+                            </span>
+                          ),
+                        },
+                      ]
+                    : []),
+                ]}
+              />
+              <div className="ui-inspector-actions ui-inspector-actions-docked">
+                {activeLanding.taskId && (
+                  <Button variant="link" onClick={() => onOpenTask(activeLanding.taskId)}>
+                    Open task <ArrowRight size={14} />
+                  </Button>
+                )}
+                <Button variant="link" onClick={() => onMessages("land/*")}>
+                  Open landing events <ArrowRight size={14} />
+                </Button>
+              </div>
+            </InspectorPanel>
+          );
+        })()}
       </div>
     </section>
   );

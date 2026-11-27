@@ -7,16 +7,50 @@ const PROVIDER_FILES: Record<AgentProvider, string> = {
   Gemini: "gemini-color.svg",
 };
 
-export function inferProvider(model?: string, cls?: string): AgentProvider | undefined {
-  const combined = `${model ?? ""} ${cls ?? ""}`.toLowerCase();
-  if (combined.includes("codex") || combined.includes("openai") || combined.includes("gpt")) {
+function matchProviderText(text: string): AgentProvider | undefined {
+  const lower = text.toLowerCase();
+  if (!lower) return undefined;
+  if (
+    lower.includes("claude") ||
+    lower.includes("sonnet") ||
+    lower.includes("opus") ||
+    lower.includes("haiku")
+  ) {
+    return "Claude";
+  }
+  if (
+    lower.includes("codex") ||
+    lower.includes("openai") ||
+    lower.includes("gpt") ||
+    /\bo[134](?:-|$|\b)/.test(lower)
+  ) {
     return "Codex";
   }
-  if (combined.includes("gemini") || combined.includes("agy")) {
+  if (lower.includes("gemini")) {
     return "Gemini";
   }
-  if (combined.includes("claude") || combined.includes("sonnet") || combined.includes("opus") || combined.includes("haiku")) {
-    return "Claude";
+  return undefined;
+}
+
+/**
+ * Infers the AI model provider using the most specific signal first:
+ * 1. Explicit model string
+ * 2. Agent/worker name (e.g. `opus-queue-async`, `sonnet-dstorage-fast`, `claude-prewarm`)
+ * 3. Agent class (only falls back to `agy` -> Gemini if neither model nor name specifies another family)
+ */
+export function inferProvider(model?: string, cls?: string, name?: string): AgentProvider | undefined {
+  const fromModel = matchProviderText(model ?? "");
+  if (fromModel) return fromModel;
+
+  const fromName = matchProviderText(name ?? "");
+  if (fromName) return fromName;
+
+  const fromClass = matchProviderText(cls ?? "");
+  if (fromClass) return fromClass;
+
+  const clsLower = (cls ?? "").toLowerCase();
+  if (clsLower.includes("agy")) {
+    return "Gemini";
   }
   return undefined;
 }

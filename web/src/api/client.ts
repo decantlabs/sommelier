@@ -12,6 +12,11 @@ import type {
   WorkTask,
 } from "./types";
 
+export type BriefResult = {
+  status: "ok" | "auth-required" | "not-found";
+  content: string;
+};
+
 export type CreateTaskInput = {
   title: string;
   scope: string;
@@ -75,11 +80,16 @@ export function useSommelierData(previewRole: AccessRole) {
 
   const wsRef = useRef<WebSocket | null>(null);
   const hubIdRef = useRef<number>(initialDemoSnapshot.hubId);
+  const identityRef = useRef<HubIdentity | null>(null);
   const refreshTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     hubIdRef.current = snapshot.hubId;
   }, [snapshot.hubId]);
+
+  useEffect(() => {
+    identityRef.current = identity;
+  }, [identity]);
 
   // Scrub any `?token=` accidentally pasted into the browser address bar without reading it.
   useEffect(() => {
@@ -110,7 +120,7 @@ export function useSommelierData(previewRole: AccessRole) {
     }
   }, []);
 
-  const loadSessionIdentity = useCallback(async () => {
+  const loadSessionIdentity = useCallback(async (): Promise<boolean> => {
     try {
       const res = await fetch("/api/session", {
         headers: { Accept: "application/json" },
@@ -121,14 +131,16 @@ export function useSommelierData(previewRole: AccessRole) {
         if (res.status === 401) {
           setIdentity((prev) => prev ?? { name: "public", role: "Public" });
         }
-        return;
+        return false;
       }
       const sess = (await res.json()) as { authenticated?: boolean; name?: string; role?: string };
       if (sess.authenticated && typeof sess.name === "string") {
         setIdentity({ name: sess.name, role: parseRole(sess.role) });
+        return true;
       }
+      return false;
     } catch {
-      // Ignore if session probe is unavailable.
+      return false;
     }
   }, []);
 
@@ -155,8 +167,10 @@ export function useSommelierData(previewRole: AccessRole) {
       setSnapshot(adapted);
       setSource("live");
       setLiveStatus("connected");
-      void loadLivePolicy();
-      void loadSessionIdentity();
+      const authed = await loadSessionIdentity();
+      if (authed) {
+        void loadLivePolicy();
+      }
       return true;
     } catch {
       return false;
@@ -194,7 +208,11 @@ export function useSommelierData(previewRole: AccessRole) {
 
       ws.onopen = () => {
         attempt = 0;
-        ws.send(JSON.stringify({ op: "whoami", rid: "ui-whoami" }));
+        // Anonymous public readers are strictly read-only; sending `whoami` triggers a hub rejection.
+        const currentIdentity = identityRef.current;
+        if (currentIdentity && currentIdentity.role !== "Public") {
+          ws.send(JSON.stringify({ op: "whoami", rid: "ui-whoami" }));
+        }
       };
 
       ws.onmessage = (event) => {
@@ -209,7 +227,10 @@ export function useSommelierData(previewRole: AccessRole) {
                 tier: typeof frame.tier === "number" ? frame.tier : undefined,
               });
             } else if (frame.ok === false && typeof frame.error === "string") {
-              setLastError(frame.error);
+              // Suppress expected public read-only rejections rather than popping error toasts.
+              if (!frame.error.includes("can only read")) {
+                setLastError(frame.error);
+              }
             }
             return;
           }
@@ -477,19 +498,40 @@ export function useSommelierData(previewRole: AccessRole) {
   }, [effectiveRole, snapshot.scheduler.activePauses, source]);
 
   const fetchBrief = useCallback(
-    async (taskId: string): Promise<string> => {
+    async (taskId: string): Promise<BriefResult> => {
       if (source === "live") {
         try {
           const res = await fetch(`/api/brief/${encodeURIComponent(taskId)}`, {
             credentials: "same-origin",
             cache: "no-store",
           });
-          if (res.ok) return await res.text();
+          if (res.ok) {
+            return { status: "ok", content: await res.text() };
+          }
+          if (res.status === 401 || res.status === 403) {
+            return {
+              status: "auth-required",
+              content:
+                "Extended task briefs require a member or orchestrator hub session. Sign in with a hub token from the connection menu in the top-right bar.",
+            };
+          }
+          if (res.status === 404) {
+            return {
+              status: "not-found",
+              content: `No extended brief is stored on the hub for ${taskId}.`,
+            };
+          }
         } catch {
           // Fall through to cached/demo brief.
         }
       }
-      return snapshot.briefs[taskId] ?? `# ${taskId}\n\nNo extended brief stored for this task.`;
+      if (snapshot.briefs[taskId]) {
+        return { status: "ok", content: snapshot.briefs[taskId] };
+      }
+      return {
+        status: "not-found",
+        content: `No extended brief stored for ${taskId}.`,
+      };
     },
     [snapshot.briefs, source],
   );

@@ -1,4 +1,5 @@
 import { inferProvider } from "../components/ProviderMark";
+import { humanizeTextDurations, pluralize } from "./format";
 import type {
   AccessRole,
   AgentMachine,
@@ -84,7 +85,8 @@ function formatRelativeAge(tsSecOrMs: number, nowSec: number): string {
   const diff = Math.max(0, nowSec - sec);
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
 }
 
 function titleCaseTaskState(raw: string): TaskState {
@@ -156,50 +158,107 @@ function parseFindings(raw: unknown): string | undefined {
   return trimmed;
 }
 
-function layoutTasks(rawTasks: Omit<WorkTask, "x" | "y">[]): WorkTask[] {
-  const levelMap = new Map<string, number>();
+const TASK_STATE_RANK: Record<TaskState, number> = {
+  Running: 0,
+  Leased: 1,
+  Stuck: 2,
+  Landing: 3,
+  Delivered: 4,
+  Offered: 5,
+  Ready: 6,
+  Draft: 7,
+  Closed: 8,
+  Cancelled: 9,
+};
+
+export function layoutTasks<T extends Omit<WorkTask, "x" | "y">>(rawTasks: T[]): (T & { x: number; y: number })[] {
   const byId = new Map(rawTasks.map((t) => [t.id, t]));
+  const connectedIds = new Set<string>();
 
-  function getDepth(id: string, stack = new Set<string>()): number {
-    const cached = levelMap.get(id);
-    if (cached !== undefined) return cached;
-    if (stack.has(id)) return 0;
-    const task = byId.get(id);
-    if (!task || (!task.deps?.length && !task.conflict)) {
-      levelMap.set(id, 0);
-      return 0;
-    }
-    stack.add(id);
-    const parentIds = [...(task.deps ?? []), ...(task.conflict ? [task.conflict] : [])];
-    const maxParent = parentIds.reduce((acc, pid) => {
-      if (!byId.has(pid)) return acc;
-      return Math.max(acc, getDepth(pid, stack) + 1);
-    }, 0);
-    stack.delete(id);
-    levelMap.set(id, maxParent);
-    return maxParent;
-  }
-
-  for (const t of rawTasks) getDepth(t.id);
-
-  const columns = new Map<number, Omit<WorkTask, "x" | "y">[]>();
   for (const t of rawTasks) {
-    const col = levelMap.get(t.id) ?? 0;
-    const list = columns.get(col) ?? [];
-    list.push(t);
-    columns.set(col, list);
+    for (const dep of t.deps ?? []) {
+      if (byId.has(dep)) {
+        connectedIds.add(t.id);
+        connectedIds.add(dep);
+      }
+    }
+    if (t.conflict && byId.has(t.conflict)) {
+      connectedIds.add(t.id);
+      connectedIds.add(t.conflict);
+    }
   }
 
-  const out: WorkTask[] = [];
-  for (const [col, list] of columns.entries()) {
-    list.forEach((task, rowIdx) => {
-      out.push({
-        ...task,
-        x: 105 + col * 465,
-        y: 137 + rowIdx * 295,
-      });
+  const connected = rawTasks.filter((t) => connectedIds.has(t.id));
+  const standalone = rawTasks
+    .filter((t) => !connectedIds.has(t.id))
+    .sort((a, b) => {
+      const rankDiff = (TASK_STATE_RANK[a.state] ?? 50) - (TASK_STATE_RANK[b.state] ?? 50);
+      if (rankDiff !== 0) return rankDiff;
+      return a.id.localeCompare(b.id);
     });
+
+  const out: (T & { x: number; y: number })[] = [];
+  let standaloneStartY = 84;
+
+  if (connected.length > 0) {
+    const levelMap = new Map<string, number>();
+    const getDepth = (id: string, stack = new Set<string>()): number => {
+      const cached = levelMap.get(id);
+      if (cached !== undefined) return cached;
+      if (stack.has(id)) return 0;
+      const task = byId.get(id);
+      if (!task || (!task.deps?.length && !task.conflict)) {
+        levelMap.set(id, 0);
+        return 0;
+      }
+      stack.add(id);
+      const parentIds = [...(task.deps ?? []), ...(task.conflict ? [task.conflict] : [])];
+      const maxParent = parentIds.reduce((acc, pid) => {
+        if (!byId.has(pid)) return acc;
+        return Math.max(acc, getDepth(pid, stack) + 1);
+      }, 0);
+      stack.delete(id);
+      levelMap.set(id, maxParent);
+      return maxParent;
+    };
+
+    for (const t of connected) getDepth(t.id);
+
+    const columns = new Map<number, T[]>();
+    for (const t of connected) {
+      const col = levelMap.get(t.id) ?? 0;
+      const list = columns.get(col) ?? [];
+      list.push(t);
+      columns.set(col, list);
+    }
+
+    let maxConnectedY = 84;
+    for (const [col, list] of [...columns.entries()].sort((a, b) => a[0] - b[0])) {
+      list.forEach((task, rowIdx) => {
+        const y = 84 + rowIdx * 212;
+        maxConnectedY = Math.max(maxConnectedY, y);
+        out.push({
+          ...task,
+          x: 64 + col * 420,
+          y,
+        });
+      });
+    }
+    standaloneStartY = maxConnectedY + 236;
   }
+
+  // Pack standalone tasks into a balanced multi-column grid instead of a single vertical column.
+  const gridCols = standalone.length <= 2 ? Math.max(1, standalone.length) : 3;
+  standalone.forEach((task, idx) => {
+    const col = idx % gridCols;
+    const row = Math.floor(idx / gridCols);
+    out.push({
+      ...task,
+      x: 32 + col * 332,
+      y: standaloneStartY + row * 190,
+    });
+  });
+
   return out;
 }
 
@@ -272,18 +331,27 @@ function adaptAgentMachines(raw: ApiStateSnapshot, nowSec: number): AgentMachine
     const lease = leases.get(id);
     const owner = str(row, "owner") || str(worker, "owner");
     const name = str(row, "agent") || str(row, "name") || str(worker, "agent");
-    const host = str(lease, "machine") || str(row, "machine") || undefined;
+    const host = str(lease, "machine") || str(worker, "machine") || str(row, "machine") || undefined;
     const model = str(worker, "model") || str(row, "model") || undefined;
     const agentClass = str(worker, "class") || str(row, "class") || str(lease, "class") || undefined;
     const mode = str(worker, "mode");
     const reported = str(row, "reported_state") || str(row, "state", "unknown");
     const state = str(worker, "state") || (bool(row, "stale") ? "stale" : reported);
     const statusAt = num(row, "as_of") || num(worker, "as_of");
+    const pid = num(worker, "pid", 0) || num(row, "pid", 0) || undefined;
+    const rawLiveness = str(worker, "liveness");
+    const supervised =
+      bool(worker, "supervised", false) ||
+      bool(row, "supervised", false) ||
+      rawLiveness === "process" ||
+      Boolean(pid);
+    const liveness: "process" | "self_reported" =
+      supervised || rawLiveness === "process" ? "process" : "self_reported";
 
     machine(owner, host).agents.push({
       name,
       state: capitalize(state.replaceAll("_", " ")),
-      provider: inferProvider(model, agentClass),
+      provider: inferProvider(model, agentClass, name),
       model,
       agentClass,
       mode: mode === "auto" ? "Auto" : mode === "own" ? "Own" : undefined,
@@ -293,7 +361,10 @@ function adaptAgentMachines(raw: ApiStateSnapshot, nowSec: number): AgentMachine
         ? formatRelativeAge(nowSec - worker.age_secs, nowSec)
         : statusAt > 0 ? formatRelativeAge(statusAt, nowSec) : undefined,
       statusDetail: str(worker, "text") || str(row, "text") || undefined,
-      reason: str(worker, "reason") || undefined,
+      reason: str(worker, "reason") ? humanizeTextDurations(str(worker, "reason")) : undefined,
+      supervised,
+      liveness,
+      pid,
     });
   }
 
@@ -481,15 +552,30 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
     const provider = inferProvider(
         str(worker, "model") || str(agent, "model") || str(m, "hello"),
         str(worker, "class") || str(agent, "class"),
+        str(worker, "agent") || str(agent, "agent") || str(agent, "name"),
       );
 
     const rawMode = str(worker, "mode") || str(cap, "mode", "auto");
     const mode: "Auto" | "Own" = rawMode.toLowerCase() === "own" ? "Own" : "Auto";
 
-    const derivedState =
-      str(worker, "state") ||
-      str(agent, "state") ||
-      (bool(m, "online") ? "Idle" : "Offline");
+    const ownerAgents = agentMachines
+      .filter((machine) => machine.owner === name)
+      .flatMap((machine) => machine.agents);
+    const hasHealthyRunning = ownerAgents.some((a) => a.state.toLowerCase() === "running" && !a.reason);
+    const firstAttention = ownerAgents.find((a) =>
+      ["suspect", "blocked", "stale", "dead", "starved", "draining"].includes(a.state.toLowerCase()),
+    );
+    const hasOwn = ownerAgents.some((a) => a.state.toLowerCase() === "own");
+    const hasIdle = ownerAgents.some((a) => a.state.toLowerCase() === "idle");
+    const derivedState = hasHealthyRunning
+      ? "Running"
+      : firstAttention
+        ? firstAttention.state
+        : hasOwn
+          ? "Own"
+          : hasIdle
+            ? "Idle"
+            : str(worker, "state") || str(agent, "state") || (bool(m, "online") ? "Idle" : "Offline");
     const seat = heldRole
       ? `${capitalize(str(heldRole, "role"))} · ${str(heldRole, "lease_scope", "full")}`
       : mode === "Own"
@@ -587,25 +673,29 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
     pickedBy: str(r, "picked_by") || undefined,
   }));
 
-  const landing: LandingItem[] = asArray(raw.landing).map((l) => ({
-    // Rust `LandingRow` serializes `ref_name` with `#[serde(rename = "ref")]`.
-    refName: str(l, "ref") || str(l, "ref_name"),
-    sha: str(l, "sha").slice(0, 7),
-    taskId: str(l, "task_id"),
-    state: str(l, "state", "queued"),
-    priority: str(l, "priority", "normal"),
-    batchId: str(l, "batch_id") || undefined,
-    tries: typeof l.tries === "number" ? l.tries : undefined,
-    failStep: str(l, "fail_step") || undefined,
-    failClass: str(l, "fail_class") || undefined,
-    approvedBy: str(l, "approved_by") || undefined,
-    enqueuedAt: formatClock(num(l, "enqueued_at", 0)),
-  }));
+  const landing: LandingItem[] = asArray(raw.landing).map((l) => {
+    const rawPriority = str(l, "priority").trim();
+    return {
+      // Rust `LandingRow` serializes `ref_name` with `#[serde(rename = "ref")]`.
+      refName: str(l, "ref") || str(l, "ref_name"),
+      sha: str(l, "sha").slice(0, 7),
+      taskId: str(l, "task_id"),
+      state: str(l, "state", "queued"),
+      priority: rawPriority || undefined,
+      batchId: str(l, "batch_id") || undefined,
+      tries: typeof l.tries === "number" ? l.tries : undefined,
+      failStep: str(l, "fail_step") || undefined,
+      failClass: str(l, "fail_class") || undefined,
+      approvedBy: str(l, "approved_by") || undefined,
+      enqueuedAt: formatClock(num(l, "enqueued_at", 0)),
+    };
+  });
 
   const batches: BatchItem[] = asArray(raw.batches).map((b) => {
     const members = Array.isArray(b.members) ? b.members : [];
     const baseSha = str(b, "base_sha") || str(b, "head_sha");
     const result = str(b, "result") || str(b, "state") || "running";
+    const verifications = num(b, "verifications", 0);
     return {
       batchId: str(b, "batch_id"),
       state: result,
@@ -613,7 +703,7 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
       headSha: baseSha ? baseSha.slice(0, 7) : undefined,
       note:
         str(b, "note") ||
-        (num(b, "verifications", 0) > 0 ? `${num(b, "verifications")} verifications` : undefined),
+        (verifications > 0 ? pluralize(verifications, "verification") : undefined),
     };
   });
 
@@ -777,10 +867,11 @@ export function adaptApiState(raw: ApiStateSnapshot): FactorySnapshot {
   const rawAlerts = asArray(raw.alerts).length ? asArray(raw.alerts) : asArray(derived?.alerts);
   const alerts: FactoryAlert[] = rawAlerts.map((a) => {
     const alertState = str(a, "state");
+    const rawMsg = str(a, "text") || str(a, "message") || str(a, "code");
     return {
       key: str(a, "key"),
       code: str(a, "code"),
-      message: str(a, "text") || str(a, "message") || str(a, "code"),
+      message: humanizeTextDurations(rawMsg),
       at: formatClock(num(a, "last_at", 0) || num(a, "opened_at", 0) || a.at),
       acked: alertState ? alertState !== "open" : bool(a, "acked", false),
     };

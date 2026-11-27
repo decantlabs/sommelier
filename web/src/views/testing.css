@@ -121,3 +121,36 @@
 .test-matrix-cell[aria-pressed="true"] { border-color: var(--color-accent-line); background: var(--color-surface-card-selected); }
 .test-matrix-cell small { display: inline-flex; gap: 6px; align-items: center; color: var(--color-text-muted); white-space: nowrap; }
 .matrix-unreported { color: var(--color-text-muted); }
+
+.ts-empty-state {
+  padding: 54px 24px;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.ts-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--color-line-control);
+  background: var(--color-surface);
+  color: var(--color-accent);
+}
+
+.ts-empty-state strong {
+  font-size: var(--text-lg);
+  font-weight: 590;
+  color: var(--color-text);
+}
+
+.ts-empty-state p {
+  margin: 0;
+  max-width: 460px;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--color-text-muted);
+}
