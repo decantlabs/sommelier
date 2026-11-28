@@ -222,7 +222,7 @@ export function App() {
             onClick={() => go("Graph")}
             aria-label="Sommelier work graph"
           >
-            <img src={`${import.meta.env.BASE_URL}assets/sommelier-mark.png`} width="28" height="28" alt="" />
+            <img src={`${import.meta.env.BASE_URL}assets/sommelier-mark.svg`} width="28" height="28" alt="" />
             <strong>sommelier</strong>
           </button>
           <span className="slash">/</span>
