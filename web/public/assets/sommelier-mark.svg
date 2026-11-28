@@ -1,42 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
-  <defs>
-    <radialGradient id="orb-grad" cx="32%" cy="28%" r="72%" fx="32%" fy="28%">
-      <stop offset="0%" stop-color="#e5d4ff" />
-      <stop offset="38%" stop-color="#c494f7" />
-      <stop offset="78%" stop-color="#9e67e3" />
-      <stop offset="100%" stop-color="#7643bd" />
-    </radialGradient>
-    <linearGradient id="rim-grad" x1="20%" y1="10%" x2="85%" y2="90%">
-      <stop offset="0%" stop-color="#7d4ec9" />
-      <stop offset="100%" stop-color="#4e2987" />
-    </linearGradient>
-    <linearGradient id="sheen-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.55" />
-      <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
-    </linearGradient>
-  </defs>
-
-  <!-- Orb 1: left large -->
-  <g>
-    <circle cx="66" cy="96" r="46" fill="url(#orb-grad)" stroke="url(#rim-grad)" stroke-width="6" />
-    <path d="M 38 76 A 32 32 0 0 1 78 60" stroke="url(#sheen-grad)" stroke-width="5.5" stroke-linecap="round" />
-  </g>
-
-  <!-- Orb 2: top right -->
-  <g>
-    <circle cx="168" cy="58" r="39" fill="url(#orb-grad)" stroke="url(#rim-grad)" stroke-width="6" />
-    <path d="M 145 41 A 27 27 0 0 1 178 28" stroke="url(#sheen-grad)" stroke-width="5" stroke-linecap="round" />
-  </g>
-
-  <!-- Orb 3: bottom center -->
-  <g>
-    <circle cx="126" cy="196" r="43" fill="url(#orb-grad)" stroke="url(#rim-grad)" stroke-width="6" />
-    <path d="M 100 178 A 30 30 0 0 1 137 163" stroke="url(#sheen-grad)" stroke-width="5" stroke-linecap="round" />
-  </g>
-
-  <!-- Orb 4: right mid small -->
-  <g>
-    <circle cx="206" cy="138" r="33" fill="url(#orb-grad)" stroke="url(#rim-grad)" stroke-width="5.5" />
-    <path d="M 186 124 A 22 22 0 0 1 214 113" stroke="url(#sheen-grad)" stroke-width="4.5" stroke-linecap="round" />
-  </g>
+  <circle cx="66" cy="96" r="46" fill="#a579da" stroke="#63468a" stroke-width="6" />
+  <circle cx="168" cy="58" r="39" fill="#a579da" stroke="#63468a" stroke-width="6" />
+  <circle cx="126" cy="196" r="43" fill="#a579da" stroke="#63468a" stroke-width="6" />
+  <circle cx="206" cy="138" r="33" fill="#a579da" stroke="#63468a" stroke-width="5.5" />
 </svg>
